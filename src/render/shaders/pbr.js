@@ -224,13 +224,13 @@ fn sunVisibility(worldPosition : vec3<f32>, normal : vec3<f32>, NoL : f32) -> f3
  * depth range, this applies it forwards -- and if they disagree, lights are
  * assigned to cells nothing looks up.
  */
-fn clusterFor(fragCoord : vec2<f32>, viewDistance : f32) -> u32 {
+fn clusterFor(fragCoord : vec2<f32>, viewDepth : f32) -> u32 {
   let tileX = min(u32(fragCoord.x / frame.clusterDepth.z), frame.clusterGrid.x - 1u);
   let tileY = min(u32(fragCoord.y / frame.clusterDepth.w), frame.clusterGrid.y - 1u);
 
   // Exponential in depth: uniform slices would spend almost every cell on the
   // far half of the view, where perspective makes them enormous.
-  let raw = log(max(viewDistance, 1e-4)) * frame.clusterDepth.x + frame.clusterDepth.y;
+  let raw = log(max(viewDepth, 1e-4)) * frame.clusterDepth.x + frame.clusterDepth.y;
   let slice = u32(clamp(raw, 0.0, f32(frame.clusterGrid.z - 1u)));
 
   return (slice * frame.clusterGrid.y + tileY) * frame.clusterGrid.x + tileX;
@@ -294,8 +294,18 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
   // ---- clustered punctual lights ----
   // Only the lights the compute pass put in THIS fragment's cell are touched,
   // so a scene with hundreds costs a handful per pixel.
-  let clusterViewDistance = length(v.world - frame.cameraPosition.xyz);
-  let cluster = clusterFor(v.clip.xy, clusterViewDistance);
+  //
+  // DEPTH, not radial distance. buildClusters slices the frustum with planes at
+  // constant view z, so a fragment has to pick its slice with the same
+  // quantity. Radial distance agrees only on the view axis and grows by 1/cos
+  // away from it, which sends edge-of-screen fragments to a slice further away
+  // than the froxel they are actually in: they then read a light list built for
+  // somewhere else, and the lights that should reach them are simply absent.
+  //
+  // The projection is [.., -1] in the w row, so clip.w is exactly -viewZ, and
+  // the fragment's builtin position carries its reciprocal. No extra uniform.
+  let viewDepth = 1.0 / v.clip.w;
+  let cluster = clusterFor(v.clip.xy, viewDepth);
   let lightCount = clusterCounts[cluster];
   let clusterBase = cluster * ${MAX_LIGHTS_PER_CLUSTER}u;
 

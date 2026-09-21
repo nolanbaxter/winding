@@ -378,15 +378,16 @@ export class ClusteredLights {
 }
 
 /**
- * Which cluster a view-space distance falls in.
+ * Which cluster a view-space DEPTH falls in -- z along the view axis, not
+ * radial distance from the eye. The slices are planes, not shells.
  *
  * The reference the shader's version was written from, and the only place the
  * mapping is tested. It does NOT verify the shader -- that is a separate copy
  * in WGSL, and the two can drift. Changing one means changing both.
  */
-export function sliceFor(distance, near, lightDistance, slices = CLUSTER_Z) {
+export function sliceFor(depth, near, lightDistance, slices = CLUSTER_Z) {
   const ratio = Math.log(lightDistance / near);
   const scale = slices / ratio;
   const bias = -(slices * Math.log(near)) / ratio;
-  return Math.min(Math.max(Math.floor(Math.log(distance) * scale + bias), 0), slices - 1);
+  return Math.min(Math.max(Math.floor(Math.log(depth) * scale + bias), 0), slices - 1);
 }
