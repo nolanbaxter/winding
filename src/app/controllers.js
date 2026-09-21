@@ -1,0 +1,176 @@
+// Camera controllers.
+//
+// A viewer without a way to move the camera is not a viewer, so this is part of
+// Tier 3 rather than something every example re-invents.
+//
+// Controllers mutate a Camera and nothing else. They do not know the engine
+// exists, which is what lets you drive one from your own loop, from a test, or
+// from an animation.
+
+import { vec3Create } from '../core/math/vec3.js';
+
+const MIN_PITCH = -Math.PI / 2 + 0.01;   // never exactly straight down: at the
+const MAX_PITCH = Math.PI / 2 - 0.01;    // pole the up vector becomes ambiguous
+
+/** Pixels of movement before a press counts as a drag rather than a click. */
+const DRAG_SLOP = 3;
+
+/**
+ * Drag to orbit, wheel to zoom, right-drag or shift-drag to pan.
+ *
+ * Call update(dt) once per rendered frame for the damping to run. Skipping it
+ * still works, it just snaps instead of easing.
+ */
+export class OrbitController {
+  constructor(camera, element, {
+    distance = 6, yaw = 0, pitch = 0.3, target = [0, 0, 0],
+    minDistance = 0.1, maxDistance = 1000,
+    rotateSpeed = 0.005, zoomSpeed = 0.0015, panSpeed = 0.002,
+    damping = 12,
+  } = {}) {
+    this.camera = camera;
+    this.element = element;
+
+    this.distance = distance;
+    this.yaw = yaw;
+    this.pitch = pitch;
+    this.target = vec3Create(target[0], target[1], target[2]);
+
+    // Where the camera is easing toward. Separating desired from actual is what
+    // makes damping a two-line lerp instead of a state machine.
+    this.desired = { distance, yaw, pitch, target: vec3Create(target[0], target[1], target[2]) };
+
+    this.minDistance = minDistance;
+    this.maxDistance = maxDistance;
+    this.rotateSpeed = rotateSpeed;
+    this.zoomSpeed = zoomSpeed;
+    this.panSpeed = panSpeed;
+    this.damping = damping;
+
+    this._dragging = 0;   // 0 none, 1 orbit, 2 pan
+    /**
+     * True when the last press moved far enough to be a drag rather than a
+     * click. A click handler that wants to select something reads this to tell
+     * "released after orbiting" from "clicked on that object" -- the browser
+     * fires a click event for both.
+     */
+    this.dragged = false;
+    this._attach();
+    this.update(0);       // place the camera before the first frame; nothing to forget
+  }
+
+  _attach() {
+    const element = this.element;
+
+    this._onPointerDown = (event) => {
+      // Shift-drag and right-drag both pan; trackpad users have no right button
+      // worth relying on.
+      this._dragging = (event.button === 2 || event.shiftKey) ? 2 : 1;
+      element.setPointerCapture(event.pointerId);
+      this._lastX = event.clientX;
+      this._lastY = event.clientY;
+      this._downX = event.clientX;
+      this._downY = event.clientY;
+      this.dragged = false;
+    };
+
+    this._onPointerMove = (event) => {
+      if (!this._dragging) return;
+      // A few pixels of slop: a press almost never lands on the exact pixel it
+      // started on, and treating a 1px wobble as a drag loses the click.
+      if (Math.abs(event.clientX - this._downX) > DRAG_SLOP
+        || Math.abs(event.clientY - this._downY) > DRAG_SLOP) {
+        this.dragged = true;
+      }
+      const dx = event.clientX - this._lastX;
+      const dy = event.clientY - this._lastY;
+      this._lastX = event.clientX;
+      this._lastY = event.clientY;
+
+      if (this._dragging === 1) {
+        this.desired.yaw -= dx * this.rotateSpeed;
+        this.desired.pitch = clamp(this.desired.pitch - dy * this.rotateSpeed, MIN_PITCH, MAX_PITCH);
+      } else {
+        // Pan in the camera's own plane, scaled by distance so the target
+        // tracks the cursor at any zoom level.
+        const scale = this.panSpeed * this.desired.distance;
+        const cosYaw = Math.cos(this.desired.yaw);
+        const sinYaw = Math.sin(this.desired.yaw);
+        this.desired.target[0] -= (dx * cosYaw) * scale;
+        this.desired.target[2] += (dx * sinYaw) * scale;
+        this.desired.target[1] += dy * scale;
+      }
+    };
+
+    this._onPointerUp = (event) => {
+      this._dragging = 0;
+      if (element.hasPointerCapture?.(event.pointerId)) element.releasePointerCapture(event.pointerId);
+    };
+
+    this._onWheel = (event) => {
+      event.preventDefault();
+      // Exponential, so one notch feels the same whether you are 1 unit or 100
+      // units out. Linear zoom crawls when far and overshoots when close.
+      this.desired.distance = clamp(
+        this.desired.distance * Math.exp(event.deltaY * this.zoomSpeed),
+        this.minDistance, this.maxDistance,
+      );
+    };
+
+    this._onContextMenu = (event) => event.preventDefault();
+
+    element.addEventListener('pointerdown', this._onPointerDown);
+    element.addEventListener('pointermove', this._onPointerMove);
+    element.addEventListener('pointerup', this._onPointerUp);
+    element.addEventListener('pointercancel', this._onPointerUp);
+    element.addEventListener('wheel', this._onWheel, { passive: false });
+    element.addEventListener('contextmenu', this._onContextMenu);
+  }
+
+  /** @param dt seconds since the last frame; 0 snaps straight to the target */
+  update(dt) {
+    // Frame-rate independent exponential decay. The naive `x += (target - x) *
+    // k` eases faster on a fast display, which makes the feel change with the
+    // monitor. This does not.
+    const t = dt > 0 ? 1 - Math.exp(-this.damping * dt) : 1;
+
+    this.yaw += (this.desired.yaw - this.yaw) * t;
+    this.pitch += (this.desired.pitch - this.pitch) * t;
+    this.distance += (this.desired.distance - this.distance) * t;
+    for (let i = 0; i < 3; i++) {
+      this.target[i] += (this.desired.target[i] - this.target[i]) * t;
+    }
+
+    const cosPitch = Math.cos(this.pitch);
+    this.camera.position[0] = this.target[0] + Math.sin(this.yaw) * cosPitch * this.distance;
+    this.camera.position[1] = this.target[1] + Math.sin(this.pitch) * this.distance;
+    this.camera.position[2] = this.target[2] + Math.cos(this.yaw) * cosPitch * this.distance;
+    this.camera.target.set(this.target);
+    return this;
+  }
+
+  /** Frame an axis-aligned box: point at its centre and back off to fit it. */
+  frameBounds(min, max, { fill = 1.4 } = {}) {
+    for (let i = 0; i < 3; i++) this.desired.target[i] = (min[i] + max[i]) * 0.5;
+    const radius = 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+    // Distance at which a sphere of this radius fills the vertical fov.
+    this.desired.distance = clamp(
+      (radius / Math.sin(this.camera.fovY * 0.5)) * fill, this.minDistance, this.maxDistance,
+    );
+    return this.update(0);
+  }
+
+  detach() {
+    const element = this.element;
+    element.removeEventListener('pointerdown', this._onPointerDown);
+    element.removeEventListener('pointermove', this._onPointerMove);
+    element.removeEventListener('pointerup', this._onPointerUp);
+    element.removeEventListener('pointercancel', this._onPointerUp);
+    element.removeEventListener('wheel', this._onWheel);
+    element.removeEventListener('contextmenu', this._onContextMenu);
+  }
+}
+
+function clamp(value, low, high) {
+  return Math.min(Math.max(value, low), high);
+}

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Winding">
+  <title>Winding</title>
+  <!--
+    Four sails, each a triangle, sweeping counter-clockwise: the winding order
+    the renderer treats as front-facing. The hue steps around the turn, so the
+    mark reads as rotating even when it is still.
+
+    Mid-tone blues on purpose. It sits on white and on dark without a second
+    file or a prefers-color-scheme switch.
+  -->
+  <g transform="rotate(45 32 32)">
+    <path d="M32 30 L32 4 L42.5 21 Z" fill="#1F5FD8"/>
+    <path d="M34 32 L60 32 L43 42.5 Z" fill="#2E86EC"/>
+    <path d="M32 34 L32 60 L21.5 43 Z" fill="#41A8F5"/>
+    <path d="M30 32 L4 32 L21 21.5 Z" fill="#59C8FB"/>
+  </g>
+  <circle cx="32" cy="32" r="3.8" fill="#123C8E"/>
+</svg>

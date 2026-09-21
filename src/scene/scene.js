@@ -1,0 +1,412 @@
+// Scene: entities, transforms, and the renderable list.
+//
+// Deliberately GPU-free. It stores references to primitives that already live
+// on the GPU, but it never calls a WebGPU function, which is what keeps it
+// testable under Node and what keeps "what is in the world" separate from "how
+// it gets drawn".
+//
+// Renderables are stored as SoA columns because the renderer walks all of them
+// every frame to update bounds and cull. The Node objects users hold are
+// cursors over this (see node.js), not entries in it.
+
+import { DEBUG, assert, assertFinite } from '../core/assert.js';
+import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
+import { TransformStore } from './transform.js';
+import { Node } from './node.js';
+import { updateWorldBounds } from './bounds.js';
+import { aabbRayDistance } from '../core/math/aabb.js';
+import { AnimationPlayer } from './animation.js';
+import { vec3Create } from '../core/math/vec3.js';
+import { grownCapacity, growArray } from '../core/grow.js';
+
+const DEFAULT_CAPACITY = 4096;
+
+export class Scene {
+  constructor({ capacity = DEFAULT_CAPACITY, renderableCapacity = capacity, lightCapacity = 256 } = {}) {
+    this.capacity = capacity;
+    this.entities = new HandleAllocator(capacity);
+    this.transforms = new TransformStore(capacity);
+
+    // --- renderable columns -------------------------------------------------
+    this.renderableCount = 0;
+    this.renderableCapacity = renderableCapacity;
+    /**
+     * Bumped whenever the set of renderables changes. Batching is O(n log n)
+     * and must not run on a scene that is merely moving.
+     */
+    this.revision = 0;
+    this.renderableEntity = new Uint32Array(renderableCapacity);
+    /** Which transform slot each renderable reads its world matrix from. */
+    this.renderableMatrixSlot = new Uint32Array(renderableCapacity);
+    this.renderableMaterial = new Uint16Array(renderableCapacity);
+    /** Primitive descriptors: GPU buffers + index count. Held, never called. */
+    this.renderablePrimitive = new Array(renderableCapacity);
+
+    this.localMin = new Float32Array(renderableCapacity * 3);
+    this.localMax = new Float32Array(renderableCapacity * 3);
+    this.worldMin = new Float32Array(renderableCapacity * 3);
+    this.worldMax = new Float32Array(renderableCapacity * 3);
+
+    // --- lighting -----------------------------------------------------------
+    // Plain mutable fields: they are per-scene data the renderer reads when it
+    // is handed this scene, not hidden state a function reaches for.
+    this.sun = {
+      direction: Float32Array.from([-0.35, -0.55, -0.45]),
+      color: Float32Array.from([3.2, 3.0, 2.7]),
+    };
+    /** Set by the engine. Drives ambient light and the skybox. */
+    this.environment = null;
+
+    // --- punctual lights ----------------------------------------------------
+    // Packed exactly as the GPU wants them, so uploading is one memcpy rather
+    // than a per-light gather. Four vec4s each; see LIGHT_FLOATS below.
+    this.lightCount = 0;
+    this.lightCapacity = lightCapacity;
+    this.lights = new Float32Array(lightCapacity * LIGHT_FLOATS);
+
+    this._childrenOf = new Map();   // entity -> [entity], asset declaration order
+    /** Root entity -> AnimationPlayer, for asset instances that have clips. */
+    this._players = new Map();
+  }
+
+  /**
+   * Instantiate a loaded asset. Returns the root Node.
+   *
+   * Synchronous on purpose: every slow step -- parsing, image decode, buffer
+   * upload, pipeline compilation -- already happened in engine.load(). Adding
+   * to a scene must never be the thing that stalls a frame.
+   */
+  add(asset, { parent = null } = {}) {
+    const created = new Array(asset.nodes.length).fill(NULL_HANDLE);
+    const roots = [];
+
+    const visit = (nodeIndex, parentEntity) => {
+      const node = asset.nodes[nodeIndex];
+      if (DEBUG) assert(created[nodeIndex] === NULL_HANDLE, 'asset node graph is not a tree');
+
+      const entity = this.entities.alloc();
+      created[nodeIndex] = entity;
+      this.transforms.add(entity, {
+        position: node.position,
+        rotation: node.rotation,
+        scale: node.scale,
+        parent: parentEntity,
+      });
+
+      if (node.mesh >= 0) {
+        for (const primitive of asset.meshes[node.mesh].primitives) {
+          this._addRenderable(entity, primitive);
+        }
+      }
+
+      const childEntities = [];
+      for (const child of node.children) childEntities.push(visit(child, entity));
+      if (childEntities.length > 0) this._childrenOf.set(entity, childEntities);
+
+      return entity;
+    };
+
+    const parentEntity = parent ? parent.entity : NULL_HANDLE;
+    for (const root of asset.roots) roots.push(visit(root, parentEntity));
+
+    // Multi-root assets get a wrapper so the caller always gets one handle back
+    // and can move the whole thing with a single setPosition.
+    let handle;
+    if (roots.length === 1) {
+      handle = roots[0];
+    } else {
+      handle = this.entities.alloc();
+      this.transforms.add(handle, { parent: parentEntity });
+      for (const root of roots) this.transforms.setParent(root, handle);
+      this._childrenOf.set(handle, roots);
+    }
+
+    // `created` maps the asset's node indices onto THIS instance's entities,
+    // which is the whole reason two copies of one asset can play the same clip
+    // at different times. It is kept only when there is something to play.
+    if (asset.animations?.length > 0) {
+      this._players.set(handle, new AnimationPlayer(asset.animations, created));
+    }
+
+    return new Node(this, handle);
+  }
+
+  _addRenderable(entity, primitive) {
+    if (this.renderableCount >= this.renderableCapacity) {
+      this._growRenderables(this.renderableCount + 1);
+    }
+    const i = this.renderableCount++;
+    this.revision++;
+
+    this.renderableEntity[i] = entity;
+    this.renderableMatrixSlot[i] = handleIndex(entity);
+    this.renderableMaterial[i] = primitive.materialId;
+    this.renderablePrimitive[i] = primitive;
+
+    this.localMin.set(primitive.bounds.min, i * 3);
+    this.localMax.set(primitive.bounds.max, i * 3);
+    return i;
+  }
+
+  _growRenderables(needed) {
+    const capacity = grownCapacity(this.renderableCapacity, needed);
+
+    this.renderableEntity = growArray(this.renderableEntity, capacity);
+    this.renderableMatrixSlot = growArray(this.renderableMatrixSlot, capacity);
+    this.renderableMaterial = growArray(this.renderableMaterial, capacity);
+    this.renderablePrimitive.length = capacity;
+
+    this.localMin = growArray(this.localMin, capacity, 3);
+    this.localMax = growArray(this.localMax, capacity, 3);
+    // World bounds are recomputed from local every time they are read, so these
+    // only need the room, not the contents.
+    this.worldMin = growArray(this.worldMin, capacity, 3);
+    this.worldMax = growArray(this.worldMax, capacity, 3);
+
+    this.renderableCapacity = capacity;
+  }
+
+  /** An empty node, for grouping things you position together. */
+  createNode({ parent = null } = {}) {
+    const entity = this.entities.alloc();
+    this.transforms.add(entity, { parent: parent ? parent.entity : NULL_HANDLE });
+    return new Node(this, entity);
+  }
+
+  node(entity) {
+    return new Node(this, entity);
+  }
+
+  childrenOf(node) {
+    const children = this._childrenOf.get(node.entity);
+    return children ? children.map((entity) => new Node(this, entity)) : [];
+  }
+
+  /**
+   * Remove a node and everything under it.
+   *
+   * Renderables are swap-removed, so their order changes -- nothing may cache a
+   * renderable index across a remove.
+   */
+  remove(node) {
+    const doomed = [];
+    const collect = (entity) => {
+      doomed.push(entity);
+      for (const child of this._childrenOf.get(entity) ?? []) collect(child);
+    };
+    collect(node.entity);
+
+    const dying = new Set(doomed);
+    for (let i = this.renderableCount - 1; i >= 0; i--) {
+      if (!dying.has(this.renderableEntity[i])) continue;
+
+      const last = --this.renderableCount;
+      if (i !== last) {
+        this.renderableEntity[i] = this.renderableEntity[last];
+        this.renderableMatrixSlot[i] = this.renderableMatrixSlot[last];
+        this.renderableMaterial[i] = this.renderableMaterial[last];
+        this.renderablePrimitive[i] = this.renderablePrimitive[last];
+        this.localMin.copyWithin(i * 3, last * 3, last * 3 + 3);
+        this.localMax.copyWithin(i * 3, last * 3, last * 3 + 3);
+      }
+      this.renderablePrimitive[last] = undefined;
+      this.revision++;
+    }
+
+    for (const entity of doomed) {
+      this.transforms.remove(entity);
+      this._childrenOf.delete(entity);
+      this._players.delete(entity);
+      this.entities.free(entity);
+    }
+  }
+
+  // ------------------------------------------------------------------ lights
+
+  /**
+   * Add a point or spot light. Returns its index.
+   *
+   * `radius` is where the light reaches exactly zero. Physical inverse-square
+   * falloff never quite does, so without a cutoff every light would have to be
+   * tested against every cluster in the scene -- the radius is what makes
+   * clustering possible at all, not a shortcut.
+   *
+   *   scene.addLight({ position: [0, 3, 0], color: [1, 0.7, 0.4], intensity: 20, radius: 12 });
+   *   scene.addLight({ position, direction, innerAngle: 0.3, outerAngle: 0.5, ... });
+   */
+  addLight({
+    position = [0, 0, 0],
+    color = [1, 1, 1],
+    intensity = 1,
+    radius = 10,
+    direction = null,
+    innerAngle = 0.2,
+    outerAngle = 0.5,
+  } = {}) {
+    if (this.lightCount >= this.lightCapacity) {
+      const capacity = grownCapacity(this.lightCapacity, this.lightCount + 1);
+      this.lights = growArray(this.lights, capacity, LIGHT_FLOATS);
+      this.lightCapacity = capacity;
+    }
+    const index = this.lightCount++;
+    this._writeLight(index, position, color, intensity, radius, direction, innerAngle, outerAngle);
+    return index;
+  }
+
+  _writeLight(index, position, color, intensity, radius, direction, innerAngle, outerAngle) {
+    const o = index * LIGHT_FLOATS;
+    const light = this.lights;
+
+    light[o] = position[0]; light[o + 1] = position[1]; light[o + 2] = position[2];
+    light[o + 3] = radius;
+
+    light[o + 4] = color[0]; light[o + 5] = color[1]; light[o + 6] = color[2];
+    light[o + 7] = intensity;
+
+    if (direction) {
+      const length = Math.hypot(direction[0], direction[1], direction[2]) || 1;
+      light[o + 8] = direction[0] / length;
+      light[o + 9] = direction[1] / length;
+      light[o + 10] = direction[2] / length;
+
+      // Frostbite's smooth cone: precomputing scale and offset turns the
+      // per-pixel test into a multiply-add instead of two cosines.
+      const cosOuter = Math.cos(outerAngle);
+      const scale = 1 / Math.max(Math.cos(innerAngle) - cosOuter, 1e-4);
+      light[o + 12] = scale;
+      light[o + 13] = -cosOuter * scale;
+      light[o + 14] = LIGHT_SPOT;
+    } else {
+      light[o + 8] = 0; light[o + 9] = -1; light[o + 10] = 0;
+      light[o + 12] = 1; light[o + 13] = 0;
+      light[o + 14] = LIGHT_POINT;
+    }
+    light[o + 11] = 0;
+    light[o + 15] = 0;
+  }
+
+  setLightPosition(index, x, y, z) {
+    const o = index * LIGHT_FLOATS;
+    this.lights[o] = x; this.lights[o + 1] = y; this.lights[o + 2] = z;
+  }
+
+  setLightColor(index, r, g, b, intensity = this.lights[index * LIGHT_FLOATS + 7]) {
+    const o = index * LIGHT_FLOATS + 4;
+    this.lights[o] = r; this.lights[o + 1] = g; this.lights[o + 2] = b;
+    this.lights[o + 3] = intensity;
+  }
+
+  /** Swap-remove, so light indices are not stable across a removal. */
+  removeLight(index) {
+    const last = --this.lightCount;
+    if (index !== last) {
+      this.lights.copyWithin(index * LIGHT_FLOATS, last * LIGHT_FLOATS, (last + 1) * LIGHT_FLOATS);
+    }
+  }
+
+  /**
+   * Recompose world matrices. Returns how many transforms were recomputed.
+   *
+   * With a job system it runs one depth level at a time across threads; without
+   * one it is the same code on this thread. Identical results either way.
+   */
+  update(jobs = null) {
+    return jobs?.parallel ? this.transforms.updateParallel(jobs) : this.transforms.update();
+  }
+
+  /** The AnimationPlayer for an asset instance, or null if it has no clips. */
+  playerFor(node) {
+    return this._players.get(node.entity) ?? null;
+  }
+
+  /**
+   * Advance every playing clip.
+   *
+   * engine.run() calls this once per rendered frame, before composition, so
+   * playing a clip is all you have to do. Driving renderFrame() yourself means
+   * calling this yourself -- that is the deal the manual path makes everywhere
+   * else too.
+   *
+   * Stepped by real elapsed time rather than the fixed simulation step, because
+   * animation is presentation: it belongs with the camera controller, not with
+   * the physics the accumulator exists to keep deterministic.
+   */
+  advanceAnimations(dt) {
+    let playing = 0;
+    for (const player of this._players.values()) {
+      if (player.advance(dt, this.transforms)) playing++;
+    }
+    return playing;
+  }
+
+  /**
+   * The nearest renderable a ray hits, or null.
+   *
+   * Tests world-space bounding boxes, not triangles. A click in the empty
+   * corner of a box counts as a hit, and a thin diagonal object has a box far
+   * larger than itself. Exact hits need the mesh kept on the CPU after upload,
+   * which it deliberately is not -- so this is the broad phase, standing alone.
+   *
+   * Composes transforms and refreshes bounds first, because the alternative is
+   * an API where the answer silently depends on whether you happened to render
+   * since the last move. Both are no-ops on a settled scene.
+   *
+   * @param origin    vec3, world space
+   * @param direction vec3, world space; normalized, or distances come back scaled
+   * @returns `{ node, renderable, distance }`, or null
+   */
+  raycast(origin, direction, { maxDistance = Infinity } = {}) {
+    // Unconditional, not DEBUG-only: this is a trust boundary, and a ray with a
+    // NaN component is not merely wrong, it is INVISIBLY wrong. The slab test
+    // derives no constraint from a NaN axis, so such a ray "hits" the first
+    // renderable at distance zero. A zero-sized canvas is enough to produce one.
+    assertFinite(origin, 'raycast origin', 0, 3);
+    assertFinite(direction, 'raycast direction', 0, 3);
+
+    this.update();
+    updateWorldBounds(
+      this.renderableCount, this.localMin, this.localMax, this.worldMin, this.worldMax,
+      this.transforms.world, this.renderableMatrixSlot, this.transforms.moved,
+    );
+
+    let bestDistance = maxDistance;
+    let best = -1;
+
+    for (let i = 0; i < this.renderableCount; i++) {
+      const distance = aabbRayDistance(this.worldMin, this.worldMax, origin, direction, i * 3);
+      // Not `>= 0`: a miss is -1, and a hit at exactly 0 means the origin is
+      // already inside the box, which is a hit.
+      if (distance < 0 || distance >= bestDistance) continue;
+      bestDistance = distance;
+      best = i;
+    }
+
+    if (best < 0) return null;
+    return {
+      node: new Node(this, this.renderableEntity[best]),
+      renderable: best,
+      distance: bestDistance,
+    };
+  }
+
+  /**
+   * The nearest renderable under a point on the canvas.
+   *
+   * `x`/`y` are CSS pixels from the canvas's top-left, and `width`/`height` its
+   * CSS size -- exactly what a pointer event plus getBoundingClientRect give you.
+   */
+  pick(camera, x, y, width, height, options) {
+    camera.rayFromScreen(x, y, width, height, PICK_ORIGIN, PICK_DIRECTION);
+    return this.raycast(PICK_ORIGIN, PICK_DIRECTION, options);
+  }
+}
+
+// Scratch for pick(). A scene is not raycast re-entrantly, and the result is
+// read before the next call.
+const PICK_ORIGIN = vec3Create();
+const PICK_DIRECTION = vec3Create();
+
+/** positionRadius, colorIntensity, directionCone, coneFalloff -- four vec4s. */
+export const LIGHT_FLOATS = 16;
+export const LIGHT_POINT = 0;
+export const LIGHT_SPOT = 1;

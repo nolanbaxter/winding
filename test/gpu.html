@@ -1,0 +1,61 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Winding — GPU smoke test</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 24px; background: #14161a; color: #d6dae0;
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 13px; font-weight: 600; margin: 0 0 16px; color: #8b93a1; letter-spacing: .08em; text-transform: uppercase; }
+  #summary { font-size: 20px; font-weight: 600; margin: 0 0 16px; }
+  .pass { color: #7fd18b; }
+  .fail { color: #ff7a7a; }
+  .running { color: #8b93a1; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 3px 0; border-bottom: 1px solid #23262c; }
+  .detail { display: block; white-space: pre-wrap; color: #ff9a9a; padding: 4px 0 4px 24px; }
+  .note { color: #6c7380; padding-left: 24px; }
+  /* Small and out of the way: the test renders into it, nobody looks at it. */
+  canvas { width: 320px; height: 240px; margin-top: 20px; border: 1px solid #23262c; display: block; }
+</style>
+
+<h1>Winding — GPU smoke test</h1>
+<p id="summary" class="running">running…</p>
+<ul id="results"></ul>
+<canvas id="view" width="320" height="240"></canvas>
+
+<script type="module">
+  import { run } from './gpu.test.js';
+
+  const summary = document.getElementById('summary');
+  const list = document.getElementById('results');
+
+  try {
+    const result = await run(document.getElementById('view'));
+
+    for (const r of result.results) {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="${r.ok ? 'pass' : 'fail'}">${r.ok ? 'ok' : 'FAIL'}</span> ${r.name}`;
+      if (r.detail) {
+        const d = document.createElement('span');
+        d.className = r.ok ? 'note' : 'detail';
+        d.textContent = r.detail;
+        li.append(d);
+      }
+      list.append(li);
+    }
+
+    summary.className = result.failed === 0 ? 'pass' : 'fail';
+    summary.textContent = result.failed === 0
+      ? `${result.passed} passed`
+      : `${result.failed} failed, ${result.passed} passed`;
+  } catch (error) {
+    // A throw here means the test harness itself broke, which is still a
+    // failure -- say so on the page rather than leaving it stuck on "running".
+    summary.className = 'fail';
+    summary.textContent = `harness error: ${error.message}`;
+    document.title = 'FAIL harness';
+    console.error(error);
+  }
+</script>

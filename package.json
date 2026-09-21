@@ -1,0 +1,14 @@
+{
+  "name": "winding",
+  "version": "0.1.0",
+  "description": "A WebGPU rendering engine for the browser. No dependencies, no build step.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/core.test.js && node test/scene.test.js && node test/gltf.test.js && node test/animation.test.js && node test/render.test.js && node test/app.test.js && node test/shadow.test.js && node test/graph.test.js && node test/clustered.test.js && node test/hzb.test.js && node test/jobs.test.js",
+    "test:gpu": "node serve.js"
+  }
+}

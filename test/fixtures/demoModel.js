@@ -1,0 +1,306 @@
+// Builds a .glb in memory so the demo exercises the REAL import path.
+//
+// The point is not the geometry -- it is that these bytes go through
+// parseContainer -> accessors -> interleave -> tangent generation -> node
+// decomposition -> instantiate, exactly as a file from Blender would. A demo
+// that hand-fed vertex arrays to the GPU would prove none of it.
+//
+// Pass ?model=<url> on the page to load an actual .glb instead.
+
+const GLB_MAGIC = 0x46546c67;
+const CHUNK_JSON = 0x4e4f534a;
+const CHUNK_BIN = 0x004e4942;
+
+/** Unit cube: 24 vertices so each face gets its own normal and UV square. */
+function cubeAttributes() {
+  const faces = [
+    { normal: [0, 0, 1], corners: [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]] },
+    { normal: [0, 0, -1], corners: [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]] },
+    { normal: [1, 0, 0], corners: [[1, -1, 1], [1, -1, -1], [1, 1, -1], [1, 1, 1]] },
+    { normal: [-1, 0, 0], corners: [[-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1]] },
+    { normal: [0, 1, 0], corners: [[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]] },
+    { normal: [0, -1, 0], corners: [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]] },
+  ];
+  const uvCorners = [[0, 1], [1, 1], [1, 0], [0, 0]];
+
+  const positions = new Float32Array(24 * 3);
+  const normals = new Float32Array(24 * 3);
+  const uvs = new Float32Array(24 * 2);
+  const indices = new Uint16Array(36);
+
+  let v = 0, n = 0, t = 0, i = 0;
+  faces.forEach((face, f) => {
+    face.corners.forEach((corner, c) => {
+      positions[v++] = corner[0] * 0.5;
+      positions[v++] = corner[1] * 0.5;
+      positions[v++] = corner[2] * 0.5;
+      normals[n++] = face.normal[0];
+      normals[n++] = face.normal[1];
+      normals[n++] = face.normal[2];
+      uvs[t++] = uvCorners[c][0];
+      uvs[t++] = uvCorners[c][1];
+    });
+    const base = f * 4;
+    indices[i++] = base; indices[i++] = base + 1; indices[i++] = base + 2;
+    indices[i++] = base; indices[i++] = base + 2; indices[i++] = base + 3;
+  });
+
+  return { positions, normals, uvs, indices };
+}
+
+function packBuffer(arrays) {
+  let total = 0;
+  const views = arrays.map((a) => {
+    const byteOffset = total;
+    total += (a.byteLength + 3) & ~3;          // bufferViews must stay 4-aligned
+    return { byteOffset, byteLength: a.byteLength };
+  });
+  const bytes = new Uint8Array(total);
+  arrays.forEach((a, k) => {
+    bytes.set(new Uint8Array(a.buffer, a.byteOffset, a.byteLength), views[k].byteOffset);
+  });
+  return { bytes, views };
+}
+
+function pad4(bytes, fill) {
+  const size = (bytes.length + 3) & ~3;
+  if (size === bytes.length) return bytes;
+  const out = new Uint8Array(size).fill(fill);
+  out.set(bytes);
+  return out;
+}
+
+function encodeGLB(json, binary) {
+  const jsonChunk = pad4(new TextEncoder().encode(JSON.stringify(json)), 0x20);
+  const binChunk = pad4(binary, 0);
+  const total = 12 + 8 + jsonChunk.length + 8 + binChunk.length;
+
+  const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, GLB_MAGIC, true);
+  view.setUint32(4, 2, true);
+  view.setUint32(8, total, true);
+  view.setUint32(12, jsonChunk.length, true);
+  view.setUint32(16, CHUNK_JSON, true);
+  out.set(jsonChunk, 20);
+
+  const o = 20 + jsonChunk.length;
+  view.setUint32(o, binChunk.length, true);
+  view.setUint32(o + 4, CHUNK_BIN, true);
+  out.set(binChunk, o + 8);
+  return out;
+}
+
+/**
+ * A PNG generated at runtime and embedded in the GLB.
+ *
+ * Encoding a real PNG matters: it means the demo goes through the actual image
+ * path -- Blob, createImageBitmap, sRGB texture, mip generation -- instead of
+ * handing the GPU a texture the loader never had to decode.
+ */
+async function texturePNG(size = 256) {
+  const canvas = new OffscreenCanvas(size, size);
+  const ctx = canvas.getContext('2d');
+
+  const cells = 8;
+  const cell = size / cells;
+  for (let y = 0; y < cells; y++) {
+    for (let x = 0; x < cells; x++) {
+      const dark = (x + y) % 2 === 0;
+      ctx.fillStyle = dark ? '#cfd6e0' : '#6d7a8c';
+      ctx.fillRect(x * cell, y * cell, cell, cell);
+    }
+  }
+
+  // An asymmetric mark, so a flipped or rotated UV mapping is obvious rather
+  // than hidden by the checker's symmetry.
+  ctx.fillStyle = '#e8613c';
+  ctx.beginPath();
+  ctx.moveTo(size * 0.5, size * 0.18);
+  ctx.lineTo(size * 0.74, size * 0.62);
+  ctx.lineTo(size * 0.26, size * 0.62);
+  ctx.closePath();
+  ctx.fill();
+
+  const blob = await canvas.convertToBlob({ type: 'image/png' });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+/** A large floor quad, facing +Y. Shadows need something to land on. */
+function groundAttributes(half = 14) {
+  return {
+    positions: Float32Array.from([
+      -half, 0, -half, half, 0, -half, half, 0, half, -half, 0, half,
+    ]),
+    normals: Float32Array.from([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]),
+    uvs: Float32Array.from([0, 0, 8, 0, 8, 8, 0, 8]),
+    // Counter-clockwise seen from above, matching frontFace 'ccw'.
+    indices: Uint16Array.from([0, 3, 2, 0, 2, 1]),
+  };
+}
+
+/**
+ * A three-level hierarchy: one hub, `arms` spokes parented to it, and a small
+ * cube parented to each spoke. Rotating only the hub moves all 13 nodes, which
+ * is the transform hierarchy doing its job where you can see it.
+ *
+ * Node 0 deliberately uses `matrix` form rather than TRS, so the decomposition
+ * path runs in the demo too.
+ */
+export async function buildDemoGLB({ arms = 6, glass = 3 } = {}) {
+  const cube = cubeAttributes();
+  const ground = groundAttributes();
+  const png = await texturePNG();
+  // Keyframes for the demo clip: rise, return, dip, return. Five keys, because
+  // the last has to repeat the first for the loop to wrap without a jerk.
+  const animTimes = Float32Array.from([0, 0.5, 1, 1.5, 2]);
+  const animBob = Float32Array.from([
+    0, 1.6, 0,
+    0, 2.5, 0,
+    0, 1.6, 0,
+    0, 0.9, 0,
+    0, 1.6, 0,     // equal to the first, or the wrap is a visible jerk
+  ]);
+
+  const { bytes, views } = packBuffer([
+    cube.positions, cube.normals, cube.uvs, cube.indices, png,
+    ground.positions, ground.normals, ground.uvs, ground.indices,
+    animTimes, animBob,
+  ]);
+
+  const nodes = [{
+    name: 'hub',
+    // Identity, in matrix form: exercises mat4Decompose on load.
+    matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    children: [],
+    mesh: 0,
+  }];
+
+  // The floor is a sibling root, so spinning the hub does not spin the ground.
+  const groundNode = {
+    name: 'ground', translation: [0, -1.6, 0], mesh: 1,
+  };
+
+  for (let a = 0; a < arms; a++) {
+    const angle = (a / arms) * Math.PI * 2;
+    const spoke = nodes.length;
+    nodes[0].children.push(spoke);
+
+    nodes.push({
+      name: `spoke_${a}`,
+      translation: [Math.cos(angle) * 3, 0, Math.sin(angle) * 3],
+      rotation: [0, Math.sin(angle / 2), 0, Math.cos(angle / 2)],
+      scale: [0.7, 0.7, 0.7],
+      mesh: 0,
+      children: [nodes.length + 1],
+    });
+
+    nodes.push({
+      name: `tip_${a}`,
+      translation: [0, 1.6, 0],
+      scale: [0.45, 0.45, 0.45],
+      mesh: 0,
+    });
+  }
+
+  const glassNodes = [];
+  for (let g = 0; g < glass; g++) {
+    glassNodes.push({
+      name: `glass_${g}`,
+      translation: [(g - (glass - 1) / 2) * 1.1, 0.6, g * 1.3 - 1.3],
+      scale: [2.4, 2.4, 0.06],
+      mesh: 2,
+    });
+  }
+
+  const json = {
+    asset: { version: '2.0', generator: 'demo' },
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors: [
+      {
+        bufferView: 0, componentType: 5126, count: 24, type: 'VEC3',
+        min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5],
+      },
+      { bufferView: 1, componentType: 5126, count: 24, type: 'VEC3' },
+      { bufferView: 2, componentType: 5126, count: 24, type: 'VEC2' },
+      { bufferView: 3, componentType: 5123, count: 36, type: 'SCALAR' },
+      {
+        bufferView: 5, componentType: 5126, count: 4, type: 'VEC3',
+        min: [-14, 0, -14], max: [14, 0, 14],
+      },
+      { bufferView: 6, componentType: 5126, count: 4, type: 'VEC3' },
+      { bufferView: 7, componentType: 5126, count: 4, type: 'VEC2' },
+      { bufferView: 8, componentType: 5123, count: 6, type: 'SCALAR' },
+      { bufferView: 9, componentType: 5126, count: 5, type: 'SCALAR' },
+      { bufferView: 10, componentType: 5126, count: 5, type: 'VEC3' },
+    ],
+    // No TANGENT on purpose: the importer derives it from the UVs.
+    meshes: [
+      {
+        name: 'cube',
+        primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, indices: 3, material: 0 }],
+      },
+      {
+        name: 'ground',
+        primitives: [{ attributes: { POSITION: 4, NORMAL: 5, TEXCOORD_0: 6 }, indices: 7, material: 1 }],
+      },
+      {
+        name: 'glass',
+        primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, indices: 3, material: 2 }],
+      },
+    ],
+    // The PNG rides in the same BIN chunk as the geometry, referenced by a
+    // bufferView -- which is exactly how a real .glb ships its textures.
+    images: [{ name: 'checker', bufferView: 4, mimeType: 'image/png' }],
+    samplers: [{ magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }],
+    textures: [{ source: 0, sampler: 0 }],
+    materials: [
+      {
+        name: 'demo',
+        pbrMetallicRoughness: {
+          baseColorTexture: { index: 0 },
+          baseColorFactor: [1, 1, 1, 1],
+          metallicFactor: 0,
+          roughnessFactor: 0.6,
+        },
+      },
+      {
+        name: 'ground',
+        pbrMetallicRoughness: {
+          baseColorFactor: [0.42, 0.44, 0.47, 1],
+          metallicFactor: 0,
+          roughnessFactor: 0.9,
+        },
+      },
+      {
+        // The whole point of the glass panes: overlapping BLEND surfaces are
+        // the only thing that shows whether draw order is actually being
+        // sorted, because a wrong order still renders -- it just looks wrong.
+        name: 'glass',
+        alphaMode: 'BLEND',
+        doubleSided: true,
+        pbrMetallicRoughness: {
+          baseColorFactor: [0.35, 0.72, 0.9, 0.4],
+          metallicFactor: 0,
+          roughnessFactor: 0.1,
+        },
+      },
+    ],
+    // One channel per tip node. They share a sampler, which is normal in real
+    // assets and exercises the case where several channels read one curve.
+    animations: [{
+      name: 'bob',
+      samplers: [{ input: 8, output: 9, interpolation: 'LINEAR' }],
+      channels: nodes
+        .map((node, i) => ({ node, i }))
+        .filter(({ node }) => node.name?.startsWith('tip_'))
+        .map(({ i }) => ({ sampler: 0, target: { node: i, path: 'translation' } })),
+    }],
+    nodes: [...nodes, groundNode, ...glassNodes],
+    scenes: [{ nodes: [0, nodes.length, ...glassNodes.map((_, g) => nodes.length + 1 + g)] }],
+    scene: 0,
+  };
+
+  return encodeGLB(json, bytes);
+}

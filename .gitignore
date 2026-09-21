@@ -1,0 +1,28 @@
+# There are no dependencies and no build step, so most of this is editor and OS
+# droppings rather than artifacts.
+
+node_modules/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Logs and scratch
+*.log
+npm-debug.log*
+/tmp/
+*.bak
+*.orig
+
+# Not published: the design doc is a working document for building the engine,
+# not documentation of it. Nothing in src/ cites it, so the code stands alone.
+DESIGN.md
+
+# Not published: local harnesses, not part of the engine. The demo model the
+# viewer uses lives in test/fixtures/ instead, because the GPU smoke test
+# depends on it and that has to work from a clean clone.
+examples/
+tools/
