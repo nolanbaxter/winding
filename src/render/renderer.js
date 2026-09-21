@@ -12,6 +12,7 @@ import {
 import { DEPTH_CLEAR_VALUE } from '../rhi/device.js';
 
 import { mat4NormalMatrix } from '../core/math/mat4.js';
+import { vec3Create, vec3Sub, vec3Normalize } from '../core/math/vec3.js';
 import { frustumCreate, frustumFromViewProjection, frustumTestAABB } from '../core/math/frustum.js';
 import { grownCapacity } from '../core/grow.js';
 
@@ -28,6 +29,9 @@ import { HierarchicalDepth } from './hzb.js';
 import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT } from './vertex.js';
 
 const DEFAULT_MAX_DRAWS = 4096;
+
+/** Scratch for the camera forward axis used by transparent depth sorting. */
+const FORWARD = vec3Create();
 
 const now = () => (globalThis.performance?.now?.() ?? Date.now());
 
@@ -276,6 +280,22 @@ export class Renderer {
 
     this._orderTransparent(scene, camera);
 
+    // These three recompute what the frame uniform is about to copy, so they
+    // have to run FIRST. Filling the uniform before them uploaded the previous
+    // frame's cascade matrices, splits and cluster parameters while the shadow
+    // pass rasterised with this frame's -- so a moving camera looked up its
+    // shadows in the wrong patch of the map, and the first frame of all read
+    // matrices that were still zero.
+    this.skybox.update(camera, 1.0);
+    this.shadows.update(camera, scene.sun.direction);
+    this.clusters.update(scene, camera, this.lightDistance);
+    // Growing the light list replaced lightBuffer, which every cached frame
+    // bind group names. Dropping the cache rebuilds them on next use.
+    if (this._clusterRevision !== this.clusters.buffersRevision) {
+      this._frameBindGroups = new WeakMap();
+      this._clusterRevision = this.clusters.buffersRevision;
+    }
+
     // --- frame uniform ------------------------------------------------------
     this.frameData.set(camera.viewProjection, 0);
     this.frameData.set(camera.position, 16);
@@ -310,15 +330,6 @@ export class Renderer {
     this.frameData[111] = this.clusters.tileSize[1];
     rhi.queue.writeBuffer(this.frameBuffer, 0, this.frameData);
 
-    this.skybox.update(camera, 1.0);
-    this.shadows.update(camera, scene.sun.direction);
-    this.clusters.update(scene, camera, this.lightDistance);
-    // Growing the light list replaced lightBuffer, which every cached frame
-    // bind group names. Dropping the cache rebuilds them on next use.
-    if (this._clusterRevision !== this.clusters.buffersRevision) {
-      this._frameBindGroups = new WeakMap();
-      this._clusterRevision = this.clusters.buffersRevision;
-    }
 
 
     // --- declare the frame ---------------------------------------------------
@@ -434,26 +445,29 @@ export class Renderer {
 
     const near = camera.near;
     const eye = camera.position;
+    vec3Sub(FORWARD, camera.target, camera.position);
+    vec3Normalize(FORWARD, FORWARD);
 
     for (let t = 0; t < gpu.transparentCount; t++) {
       const i = gpu.transparentItems[t];
       const o = i * 3;
       if (!frustumTestAABB(this.frustum, scene.worldMin, scene.worldMax, o)) continue;
 
-      // Distance to the bounds centre. Clamped at the near plane because the
-      // depth bucket reuses the projection's own near/distance curve, which is
-      // only defined from there outward.
+      // VIEW DEPTH to the bounds centre, not radial distance: the bucket runs
+      // it through the projection's own near/depth curve, which is defined
+      // against z along the view axis. Clamped at the near plane, where that
+      // curve starts.
       const dx = (scene.worldMin[o] + scene.worldMax[o]) * 0.5 - eye[0];
       const dy = (scene.worldMin[o + 1] + scene.worldMax[o + 1]) * 0.5 - eye[1];
       const dz = (scene.worldMin[o + 2] + scene.worldMax[o + 2]) * 0.5 - eye[2];
-      const distance = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz), near);
+      const depth = Math.max(dx * FORWARD[0] + dy * FORWARD[1] + dz * FORWARD[2], near);
 
       const materialId = scene.renderableMaterial[i];
       this.transparentList.push(
         transparentSortKey(
           this.materials.pipelineIdOf[materialId],
           materialId,
-          transparentDepthBucket(near, distance),
+          transparentDepthBucket(near, depth),
         ),
         i,
       );

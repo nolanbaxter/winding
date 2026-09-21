@@ -208,6 +208,12 @@ export class Scene {
         this.renderablePrimitive[i] = this.renderablePrimitive[last];
         this.localMin.copyWithin(i * 3, last * 3, last * 3 + 3);
         this.localMax.copyWithin(i * 3, last * 3, last * 3 + 3);
+        // World bounds move with their renderable too. Without this the
+        // survivor inherits the deleted object's box and keeps it until it
+        // happens to move: the GPU culls a visible mesh, and raycast returns
+        // the wrong thing.
+        this.worldMin.copyWithin(i * 3, last * 3, last * 3 + 3);
+        this.worldMax.copyWithin(i * 3, last * 3, last * 3 + 3);
       }
       this.renderablePrimitive[last] = undefined;
       this.revision++;

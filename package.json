@@ -1,6 +1,6 @@
 {
   "name": "winding",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A WebGPU rendering engine for the browser. No dependencies, no build step.",
   "license": "MIT",
   "type": "module",

@@ -165,8 +165,8 @@ export class ShadowMaps {
     /** World-space offset along the surface normal, in texels, at lookup time. */
     normalBias = 1.5,
     /** Hardware slope-scaled bias applied while rendering the map. */
-    depthBiasSlope = 2.0,
-    depthBiasConstant = 1,
+    depthBiasSlope = -2.0,
+    depthBiasConstant = -1,
   } = {}) {
     if (DEBUG) assert(cascades > 0 && cascades <= MAX_CASCADES, 'bad cascade count');
 
@@ -320,10 +320,12 @@ export class ShadowMaps {
       this.splits[i] = sliceFar;
       sliceNear = sliceFar;
     }
-    // Unused cascades get a split beyond anything, so the shader's selection
-    // loop can be branchless and still never pick them.
+    // Unused cascades get a split of 0, not Infinity. selectCascade tests
+    // `viewDepth < split`, and every depth is below Infinity, so the obvious
+    // sentinel picks the cascade it was meant to skip -- an identity matrix and
+    // a texture layer that was never allocated.
     for (let i = this.cascadeCount; i < MAX_CASCADES; i++) {
-      this.splits[i] = Infinity;
+      this.splits[i] = 0;
       mat4Identity(this.matrices.subarray(i * 16, i * 16 + 16));
     }
 

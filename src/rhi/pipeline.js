@@ -133,7 +133,7 @@ function pipelineKey(desc) {
   key += `|FS${fragmentShader.id}:${desc.fragmentEntry ?? 'fs'}`;
   key += `|P${p.topology},${p.cullMode},${p.frontFace},${p.stripIndexFormat ?? '-'}`;
   key += d
-    ? `|D${d.format},${d.depthCompare},${d.depthWriteEnabled ? 1 : 0},${d.depthBias ?? 0}`
+    ? `|D${d.format},${d.depthCompare},${d.depthWriteEnabled ? 1 : 0},${d.depthBias ?? 0},${d.depthBiasSlopeScale ?? 0}`
     : '|D-';
   key += `|M${desc.multisample?.count ?? 1}`;
 

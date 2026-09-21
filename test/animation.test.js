@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import { AnimationPlayer, sampleClip } from '../src/scene/animation.js';
 import { Scene } from '../src/scene/scene.js';
+import { NULL_HANDLE } from '../src/core/handle.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -41,6 +42,8 @@ function clip(path, times, values, interpolation = 'LINEAR', name = 'clip') {
 function recorder() {
   return {
     position: null, rotation: null, scale: null,
+    // sampleClip checks liveness before writing, so the stub has to model it.
+    used: new Uint8Array(64).fill(1),
     setPosition(e, x, y, z) { this.position = [x, y, z]; },
     setScale(e, x, y, z) { this.scale = [x, y, z]; },
     setRotation(e, q) { this.rotation = [q[0], q[1], q[2], q[3]]; },
@@ -149,6 +152,32 @@ test('a channel targeting a node this instance does not have is skipped', () => 
   const t = recorder();
   sampleClip(c, 0.5, t, [1]);          // no index 7
   assert.equal(t.position, null);
+});
+
+test('a channel whose node was never instantiated does not drive entity 0', () => {
+  // The node->entity map is pre-filled with NULL_HANDLE, which IS 0. A guard
+  // testing for undefined lets an unreached node write to whatever entity was
+  // added first.
+  const c = clip('translation', [0, 1], [0, 0, 0, 100, 200, 300]);
+  c.channels[0].node = 1;
+  const t = recorder();
+  sampleClip(c, 1, t, [5, NULL_HANDLE]);   // node 1 was never reached
+  assert.equal(t.position, null, 'wrote into the null entity');
+});
+
+test('a channel pointing at a freed entity is skipped', () => {
+  // A player outlives the removal of a child of its instance. The handle packs
+  // its slot in the upper 24 bits, so a live-looking small integer is index 0.
+  const c = clip('translation', [0, 1], [0, 0, 0, 1, 1, 1]);
+  const freed = (3 << 8) | 1;           // slot 3, generation 1
+  const t = recorder();
+  t.used[3] = 0;
+  sampleClip(c, 1, t, [freed]);
+  assert.equal(t.position, null);
+
+  t.used[3] = 1;                        // and it samples again once alive
+  sampleClip(c, 1, t, [freed]);
+  assert.deepEqual(t.position, [1, 1, 1]);
 });
 
 // ------------------------------------------------------------------ playback

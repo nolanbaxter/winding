@@ -10,6 +10,7 @@
 // that moved a node without marking it would compose to a stale matrix.
 
 import { quatSlerp, quatNormalize } from '../core/math/quat.js';
+import { NULL_HANDLE, handleIndex } from '../core/handle.js';
 
 const STEP = 'STEP';
 const CUBICSPLINE = 'CUBICSPLINE';
@@ -121,7 +122,18 @@ function sampleChannel(channel, time) {
 export function sampleClip(clip, time, transforms, entityOf) {
   for (const channel of clip.channels) {
     const entity = entityOf[channel.node];
-    if (entity === undefined) continue;
+
+    // Three ways a channel can point at nothing, and all three have to be
+    // caught before the write:
+    //   undefined     the clip names a node index this instance has no slot for
+    //   NULL_HANDLE   the map is pre-filled with it and only nodes reachable
+    //                 from the asset's roots get overwritten, so a channel
+    //                 aimed outside the default scene would drive entity 0
+    //   freed         a player outlives the removal of a child of its instance
+    // NULL_HANDLE is 0, so testing for undefined alone leaves the second case
+    // writing into whatever was added to the scene first.
+    if (entity === undefined || entity === NULL_HANDLE) continue;
+    if (transforms.used[handleIndex(entity)] === 0) continue;
 
     const components = sampleChannel(channel, time);
     if (components === 0) continue;
