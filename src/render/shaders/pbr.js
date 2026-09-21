@@ -21,7 +21,7 @@ struct Frame {
   sunDirection   : vec4<f32>,               //  80  w = prefiltered mip count
   sunColor       : vec4<f32>,               //  96  w = active cascade count
   cascades       : array<mat4x4<f32>, 4>,   // 112
-  cascadeSplits  : vec4<f32>,               // 368  view distance each cascade ends at
+  cascadeSplits  : vec4<f32>,               // 368  view DEPTH each cascade ends at
   cascadeTexel   : vec4<f32>,               // 384  world size of one texel, per cascade
   shadowParams   : vec4<f32>,               // 400  x = normal bias, y = map size
   clusterGrid    : vec4<u32>,               // 416  x, y, z cells; w = light count
@@ -138,11 +138,11 @@ fn vs(
  * indexing into a vec4 is legal WGSL but compiles to a scratch-memory round
  * trip on some drivers, and there are only ever four.
  */
-fn selectCascade(viewDistance : f32) -> i32 {
-  if (viewDistance < frame.cascadeSplits.x) { return 0; }
-  if (viewDistance < frame.cascadeSplits.y) { return 1; }
-  if (viewDistance < frame.cascadeSplits.z) { return 2; }
-  if (viewDistance < frame.cascadeSplits.w) { return 3; }
+fn selectCascade(viewDepth : f32) -> i32 {
+  if (viewDepth < frame.cascadeSplits.x) { return 0; }
+  if (viewDepth < frame.cascadeSplits.y) { return 1; }
+  if (viewDepth < frame.cascadeSplits.z) { return 2; }
+  if (viewDepth < frame.cascadeSplits.w) { return 3; }
   return -1;
 }
 
@@ -173,11 +173,10 @@ fn cascadeMatrix(cascade : i32, p : vec4<f32>) -> vec4<f32> {
  * Surfaces facing away from the light are skipped entirely -- they are already
  * dark from N.L, and their shadow lookups are the noisiest ones there are.
  */
-fn sunVisibility(worldPosition : vec3<f32>, normal : vec3<f32>, NoL : f32) -> f32 {
+fn sunVisibility(worldPosition : vec3<f32>, normal : vec3<f32>, NoL : f32, viewDepth : f32) -> f32 {
   if (NoL <= 0.0) { return 1.0; }
 
-  let viewDistance = length(worldPosition - frame.cameraPosition.xyz);
-  let cascade = selectCascade(viewDistance);
+  let cascade = selectCascade(viewDepth);
   if (cascade < 0) { return 1.0; }
 
   // Scale the offset with how glancing the light is: a surface almost edge-on
@@ -264,6 +263,12 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
   let view = normalize(frame.cameraPosition.xyz - v.world);
   let NoV = max(dot(n, view), 1e-4);
 
+  // View-space depth, shared by cascade selection and the cluster lookup.
+  // Both are defined against planes of constant z on the CPU side, so neither
+  // may use radial distance. The projection has -1 in its w row, making clip.w
+  // exactly -viewZ; the fragment's builtin position carries the reciprocal.
+  let viewDepth = 1.0 / v.clip.w;
+
   // Dielectrics reflect ~4% head-on; metals reflect their own colour and have
   // no diffuse term at all. That single split is the whole metallic workflow.
   let albedo = sampled.rgb;
@@ -288,7 +293,7 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
   // Shadows attenuate the DIRECT term only. Ambient comes from the whole sky,
   // which the sun's shadow map says nothing about -- multiplying it too is the
   // usual cause of shadowed areas going implausibly black.
-  let visibility = sunVisibility(v.world, n, NoL);
+  let visibility = sunVisibility(v.world, n, NoL, viewDepth);
   var direct = (kd * diffuseColor / PI + specular) * frame.sunColor.rgb * NoL * visibility;
 
   // ---- clustered punctual lights ----
@@ -304,7 +309,6 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
   //
   // The projection is [.., -1] in the w row, so clip.w is exactly -viewZ, and
   // the fragment's builtin position carries its reciprocal. No extra uniform.
-  let viewDepth = 1.0 / v.clip.w;
   let cluster = clusterFor(v.clip.xy, viewDepth);
   let lightCount = clusterCounts[cluster];
   let clusterBase = cluster * ${MAX_LIGHTS_PER_CLUSTER}u;
