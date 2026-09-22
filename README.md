@@ -183,10 +183,6 @@ These are real and currently unaddressed.
 - **Transparency sorts per object, not per fragment.** `BLEND` geometry is culled and sorted
   back-to-front on the CPU and drawn after all opaque batches, which is exact for separated convex
   objects and wrong for interpenetrating ones. Blended geometry also casts no shadow.
-- **Mirrored node transforms render inside-out.** `frontFace` is fixed at counter-clockwise, and
-  glTF requires the winding to reverse when a node's global transform has a negative determinant.
-  The importer detects the mirror and nothing consumes it, so the common trick of mirroring one
-  chair to make its pair draws with the front faces culled.
 - **Only `TEXCOORD_0` is read.** A material that puts its occlusion or normal map on a second UV
   set — the standard baked-AO layout out of Blender and Max — samples the first one instead.
   `COLOR_0` is dropped for the same reason: there is no room in the vertex for either.
