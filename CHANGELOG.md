@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-22
+
+A race in the job system, and the reason nobody had seen it.
+
+The parallel suite had never run a worker. It spawned them correctly and
+dispatched in the same synchronous run, so the readiness message could not
+have arrived yet and every dispatch took the inline branch -- fourteen of
+them, across every release so far. Nothing failed, because the serial
+fallback is bit-identical to the parallel path by design; that identity is
+what makes results useless as evidence about which one ran.
+
+Making it run parallel found a real bug in the first suite execution.
+
+Patch rather than minor: `ready()` and `stats` are additions, but nothing
+that existed changes shape for a caller. The cursor layout is internal, and
+the one caller of `runChunks` outside this file is the worker entry module,
+which is in this repository.
+
 ### Fixed
 
 - **A worker could run one dispatch's chunks with another's arguments.** The
@@ -769,7 +787,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/nolanbaxter/winding/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/nolanbaxter/winding/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/nolanbaxter/winding/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nolanbaxter/winding/compare/v0.4.0...v0.5.0
