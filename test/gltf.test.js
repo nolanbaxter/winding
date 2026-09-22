@@ -153,6 +153,81 @@ function quadGLB({
   return makeGLB(json, bytes);
 }
 
+/**
+ * The quad again, rigged to two joints: the bottom edge to joint 0 and the top
+ * edge to joint 1, which is the smallest thing that deforms visibly.
+ */
+function skinnedGLB({
+  jointComponentType = 5123,      // UNSIGNED_SHORT
+  weightComponentType = 5126,     // FLOAT
+  weights = null,
+  inverseBind = true,
+  joints = null,
+  extraJointSet = false,
+  omitWeights = false,
+} = {}) {
+  const jointData = joints ?? Uint16Array.from([
+    0, 0, 0, 0,
+    0, 0, 0, 0,
+    1, 0, 0, 0,
+    1, 0, 0, 0,
+  ]);
+  const weightData = weights ?? Float32Array.from([
+    1, 0, 0, 0,
+    1, 0, 0, 0,
+    1, 0, 0, 0,
+    1, 0, 0, 0,
+  ]);
+
+  const arrays = [QUAD.positions, QUAD.indices, QUAD.normals, QUAD.uvs, jointData];
+  if (!omitWeights) arrays.push(weightData);
+  const ibmData = new Float32Array(32);
+  ibmData.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 0);
+  ibmData.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1], 16);
+  if (inverseBind) arrays.push(ibmData);
+
+  const { bytes, views } = packBuffer(arrays);
+  const accessors = [
+    { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+    { bufferView: 1, componentType: 5123, count: 6, type: 'SCALAR' },
+    { bufferView: 2, componentType: 5126, count: 4, type: 'VEC3' },
+    { bufferView: 3, componentType: 5126, count: 4, type: 'VEC2' },
+    { bufferView: 4, componentType: jointComponentType, count: 4, type: 'VEC4' },
+  ];
+  const attributes = { POSITION: 0, NORMAL: 2, TEXCOORD_0: 3, JOINTS_0: 4 };
+  let next = 5;
+  if (!omitWeights) {
+    accessors.push({
+      bufferView: next, componentType: weightComponentType, count: 4, type: 'VEC4',
+      normalized: weightComponentType !== 5126,
+    });
+    attributes.WEIGHTS_0 = next++;
+  }
+  if (extraJointSet) attributes.JOINTS_1 = 4;
+
+  const skin = { joints: [1, 2] };
+  if (inverseBind) {
+    accessors.push({ bufferView: next, componentType: 5126, count: 2, type: 'MAT4' });
+    skin.inverseBindMatrices = next++;
+  }
+
+  return makeGLB({
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors,
+    meshes: [{ name: 'rigged', primitives: [{ attributes, indices: 1 }] }],
+    skins: [skin],
+    nodes: [
+      { name: 'character', mesh: 0, skin: 0 },
+      { name: 'hip' },
+      { name: 'chest' },
+    ],
+    scenes: [{ nodes: [0, 1, 2] }],
+    scene: 0,
+  }, bytes);
+}
+
 // --------------------------------------------------------------- container
 
 console.log('\nglb container');
@@ -853,6 +928,173 @@ test('a real triangle still gets its geometric normal', () => {
   close(normals[0], 0, EPS, 'x');
   close(normals[1], 0, EPS, 'y');
   close(normals[2], 1, EPS, 'z is the winding normal');
+});
+
+// -------------------------------------------------------------------- skins
+
+console.log('\nskins');
+
+await atest('a skin gives its joint nodes and inverse bind matrices', async () => {
+  const model = await loadGLTF(skinnedGLB());
+  assert.equal(model.skins.length, 1);
+
+  const skin = model.skins[0];
+  // joints maps "joint 3" to "node 17". It is the only thing that makes a
+  // vertex's integer mean anything, so the ORDER is the contract.
+  assert.deepEqual([...skin.joints], [1, 2]);
+  assert.equal(skin.inverseBind.length, 2 * 16);
+  vecClose(skin.inverseBind.subarray(12, 15), [0, 0, 0], EPS, 'joint 0 bind translation');
+  vecClose(skin.inverseBind.subarray(28, 31), [0, -1, 0], EPS, 'joint 1 bind translation');
+});
+
+await atest('the node carries the skin, not the mesh', async () => {
+  // One mesh can be instanced under two skeletons, so the pairing lives on the
+  // node. Everything downstream depends on reading it from there.
+  const model = await loadGLTF(skinnedGLB());
+  assert.equal(model.nodes[0].skin, 0);
+  assert.equal(model.nodes[0].mesh, 0);
+  assert.equal(model.nodes[1].skin, -1, 'a joint node is not itself skinned');
+});
+
+await atest('influences come through as integers and normalized weights', async () => {
+  const model = await loadGLTF(skinnedGLB());
+  const primitive = model.meshes[0].primitives[0];
+
+  assert.ok(primitive.jointIndices instanceof Uint32Array, 'indices ADDRESS a palette');
+  assert.deepEqual([...primitive.jointIndices.subarray(0, 4)], [0, 0, 0, 0]);
+  assert.deepEqual([...primitive.jointIndices.subarray(8, 12)], [1, 0, 0, 0]);
+  assert.equal(primitive.jointWeights.length, 16);
+});
+
+await atest('unnormalized weights are renormalized, not passed through', async () => {
+  // The spec requires the file to normalize and exporters get it wrong often
+  // enough that validators check. An unnormalized set does not fail loudly --
+  // it scales the vertex toward or away from the origin by whatever the sum
+  // is, which reads as a mesh that inflates as it animates.
+  const model = await loadGLTF(skinnedGLB({
+    weights: Float32Array.from([
+      0.5, 0.25, 0, 0,     // sums to 0.75
+      2, 2, 0, 0,          // sums to 4
+      0, 0, 0, 0,          // sums to 0: no influence at all
+      1, 0, 0, 0,
+    ]),
+  }));
+  const w = model.meshes[0].primitives[0].jointWeights;
+
+  for (let v = 0; v < 4; v++) {
+    const o = v * 4;
+    close(w[o] + w[o + 1] + w[o + 2] + w[o + 3], 1, EPS, `vertex ${v} sums to one`);
+  }
+  close(w[0], 2 / 3, EPS, 'ratio preserved');
+  close(w[1], 1 / 3, EPS, 'ratio preserved');
+  // Zero influence pins to the first joint. Left at zero the palette sends the
+  // vertex to the origin, which is a spike through the middle of the model.
+  close(w[8], 1, EPS, 'a weightless vertex is pinned, not sent to the origin');
+});
+
+await atest('an unsigned byte joint accessor reads as the same integers', async () => {
+  const model = await loadGLTF(skinnedGLB({
+    jointComponentType: 5121,
+    joints: Uint8Array.from([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]),
+  }));
+  const indices = model.meshes[0].primitives[0].jointIndices;
+  assert.deepEqual([...indices.subarray(8, 12)], [1, 0, 0, 0]);
+});
+
+await atest('normalized byte weights are dequantized', async () => {
+  const model = await loadGLTF(skinnedGLB({
+    weightComponentType: 5121,
+    weights: Uint8Array.from([
+      255, 0, 0, 0, 128, 127, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0,
+    ]),
+  }));
+  const w = model.meshes[0].primitives[0].jointWeights;
+  close(w[0], 1, EPS, 'full influence');
+  close(w[4] + w[5], 1, EPS, 'split influence still sums to one');
+});
+
+await atest('a skin with no inverse bind matrices gets identities', async () => {
+  // The spec's meaning for an absent accessor: a skeleton authored already in
+  // bind pose. Not an error, and not zeros -- zeros would collapse the mesh.
+  const model = await loadGLTF(skinnedGLB({ inverseBind: false }));
+  const { inverseBind } = model.skins[0];
+  assert.equal(inverseBind.length, 32);
+  for (let j = 0; j < 2; j++) {
+    const m = inverseBind.subarray(j * 16, j * 16 + 16);
+    assert.deepEqual([...m], [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], `joint ${j}`);
+  }
+});
+
+await atest('influences survive the unweld a mesh without normals goes through', async () => {
+  // De-indexing per face must carry them, or they come back indexed by the old
+  // vertex ids -- which is a mesh rigged to the wrong joints rather than an
+  // error.
+  const glb = skinnedGLB();
+  const model = await loadGLTF(glb);
+  const before = model.meshes[0].primitives[0];
+  assert.equal(before.vertexCount, 4);
+
+  // Same document with NORMAL removed, which forces the flat-shading unweld.
+  const json = JSON.parse(new TextDecoder().decode(
+    glb.subarray(20, 20 + new DataView(glb.buffer, glb.byteOffset + 12, 8).getUint32(0, true)),
+  ));
+  delete json.meshes[0].primitives[0].attributes.NORMAL;
+  const unwelded = await loadGLTF(makeGLB(json, glb.subarray(
+    28 + new DataView(glb.buffer, glb.byteOffset + 12, 8).getUint32(0, true),
+  )));
+  const after = unwelded.meshes[0].primitives[0];
+
+  assert.equal(after.vertexCount, 6, 'two triangles, de-indexed');
+  assert.equal(after.jointIndices.length, 24);
+  const seen = new Set([...after.jointIndices]);
+  assert.ok(seen.has(1), 'the second joint survived; a dropped attribute would leave only zeros');
+  for (let v = 0; v < after.vertexCount; v++) {
+    const o = v * 4;
+    const sum = after.jointWeights[o] + after.jointWeights[o + 1]
+      + after.jointWeights[o + 2] + after.jointWeights[o + 3];
+    close(sum, 1, EPS, `unwelded vertex ${v} still normalized`);
+  }
+});
+
+await atest('more than four influences is refused, not silently truncated', async () => {
+  // Taking the first four and renormalizing is the usual graceful degradation,
+  // and it changes how the mesh deforms without saying so. A refusal naming
+  // the limit is something a re-export can satisfy.
+  await assert.rejects(
+    loadGLTF(skinnedGLB({ extraJointSet: true })),
+    /four influences/,
+  );
+});
+
+await atest('JOINTS_0 without WEIGHTS_0 is refused', async () => {
+  // Either alone is meaningless: indices with no weights cannot say how much,
+  // weights with no indices cannot say of what.
+  await assert.rejects(
+    loadGLTF(skinnedGLB({ omitWeights: true })),
+    /without the other/,
+  );
+});
+
+await atest('a joint index past the skin is refused at load', async () => {
+  // Not survivable downstream: the index reads past the palette, which is a
+  // storage buffer, so it picks up the next instance's matrices and drags the
+  // vertex somewhere arbitrary. Checked once here rather than clamped per
+  // vertex on the GPU forever.
+  await assert.rejects(
+    loadGLTF(skinnedGLB({
+      joints: Uint16Array.from([0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 1, 0, 0, 0]),
+    })),
+    /past the 2 the skin declares/,
+  );
+});
+
+await atest('the joint range check pairs a mesh with the skin that drives it', async () => {
+  // The check cannot happen while a primitive is built, because which skin
+  // applies comes from the NODE. This asset's indices are fine against a
+  // two-joint skin and would be out of range against a one-joint one.
+  const model = await loadGLTF(skinnedGLB());
+  assert.equal(model.skins[0].joints.length, 2);
+  assert.equal(Math.max(...model.meshes[0].primitives[0].jointIndices), 1);
 });
 
 console.log(`\n${passed} checks passed\n`);

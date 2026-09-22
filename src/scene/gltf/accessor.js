@@ -53,26 +53,32 @@ export function readAccessorAsFloat32(json, buffers, accessorIndex) {
 }
 
 /**
- * Read an index accessor as Uint32Array.
+ * Read an accessor as unsigned integers, without dequantizing.
  *
- * glTF allows u8/u16/u32 indices; the engine standardizes on u32
- * so nothing downstream carries a branch for 65k-vertex meshes.
+ * `expectedType` defaults to SCALAR, which is what indices are. Joint indices
+ * are VEC4 and must come through here rather than through the float reader:
+ * they ADDRESS a palette, so a normalized read would turn joint 3 of 4 into
+ * 0.75 and a float read of a u16 would be fine until a skeleton passed 2^24
+ * joints. Neither is a number this can afford to be approximately right about.
  */
-export function readAccessorAsUint32(json, buffers, accessorIndex) {
+export function readAccessorAsUint32(json, buffers, accessorIndex, expectedType = 'SCALAR') {
   const accessor = accessorAt(json, accessorIndex);
   const comp = componentInfo(accessor.componentType);
 
-  if (accessor.type !== 'SCALAR') {
-    throw new Error(`glTF: index accessor ${accessorIndex} must be SCALAR, got ${accessor.type}`);
+  if (accessor.type !== expectedType) {
+    throw new Error(
+      `glTF: accessor ${accessorIndex} must be ${expectedType}, got ${accessor.type}`,
+    );
   }
   if (comp.signed && comp.name !== 'FLOAT') {
-    throw new Error(`glTF: index accessor ${accessorIndex} uses signed ${comp.name}`);
+    throw new Error(`glTF: accessor ${accessorIndex} uses signed ${comp.name} where an unsigned integer is required`);
   }
 
-  const out = new Uint32Array(accessor.count);
-  readInto(out, json, buffers, accessor, comp, 1, false);
+  const perElement = componentCountOf(expectedType);
+  const out = new Uint32Array(accessor.count * perElement);
+  readInto(out, json, buffers, accessor, comp, perElement, false);
 
-  if (accessor.sparse) applySparse(out, json, buffers, accessor, 1, false);
+  if (accessor.sparse) applySparse(out, json, buffers, accessor, perElement, false);
   return out;
 }
 

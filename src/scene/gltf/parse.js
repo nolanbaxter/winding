@@ -8,9 +8,14 @@
 //   const model = await loadGLTF(bytes);
 //   instantiate(model, entities, transforms);   // becomes entities
 //
-// Not handled: skins, cameras, morph targets, KHR extensions. Animations ARE
-// read (see animation.js), but only their TRS channels -- a `weights` channel
-// has no morph targets to drive and is dropped.
+// Not handled: cameras, morph targets, KHR extensions. Animations ARE read
+// (see animation.js), but only their TRS channels -- a `weights` channel has
+// no morph targets to drive and is dropped.
+//
+// Skins ARE read: the joint list, the inverse bind matrices and the per-vertex
+// influences all come through (see skin.js). Nothing DEFORMS yet -- that is a
+// vertex shader, a matrix palette and a bounds derivation, none of which live
+// in the importer. What is here is the data those need, verified on its own.
 // Each is a real feature, none is needed to draw a static mesh, and every one
 // of them is additive to this file rather than a rewrite of it.
 
@@ -22,6 +27,7 @@ import {
 import { mat4Decompose } from '../../core/math/mat4.js';
 import { parseContainer, resolveBuffers } from './glb.js';
 import { readAccessorAsFloat32, readAccessorAsUint32, componentCountOf } from './accessor.js';
+import { readSkins, normalizeWeights, checkJointIndices } from './skin.js';
 import { generateTangents, unweldAndComputeFlatNormals } from './tangents.js';
 
 // The vertex format is the renderer's contract, defined in render/vertex.js.
@@ -89,11 +95,35 @@ function buildModel(json, buffers) {
     primitives: (mesh.primitives ?? []).map((p) => buildPrimitive(json, buffers, p)),
   }));
   const nodes = readNodes(json);
+  const skins = readSkins(json, buffers);
+
+  // Joint indices are only meaningful against a particular skin, and which
+  // skin that is comes from the NODE, not the mesh. So the range check cannot
+  // happen while a primitive is being built -- it happens here, once the
+  // pairing is known, and it walks each (mesh, skin) pair only once however
+  // many nodes share it.
+  const checked = new Set();
+  for (const node of nodes) {
+    if (node.skin < 0 || node.mesh < 0) continue;
+    if (node.skin >= skins.length) {
+      throw new Error(`glTF: node "${node.name}" names skin ${node.skin}, which does not exist`);
+    }
+    const key = `${node.mesh}:${node.skin}`;
+    if (checked.has(key)) continue;
+    checked.add(key);
+
+    const jointCount = skins[node.skin].joints.length;
+    for (const primitive of meshes[node.mesh]?.primitives ?? []) {
+      if (primitive.jointIndices === null) continue;
+      checkJointIndices(primitive.jointIndices, jointCount, `mesh "${meshes[node.mesh].name}"`);
+    }
+  }
 
   return {
     nodes,
     meshes,
     materials,
+    skins,
     animations: readAnimations(json, buffers),
     roots: findRoots(json, nodes),
     // The raw document, for subsystems that need what this view deliberately
@@ -156,6 +186,34 @@ function buildPrimitive(json, buffers, primitive) {
     }
   }
 
+  // Skinning influences. Present together or not at all: either is meaningless
+  // alone, and a mesh with one of them is malformed rather than half-skinned.
+  let jointIndices = null;
+  let jointWeights = null;
+  if (attributes.JOINTS_0 !== undefined || attributes.WEIGHTS_0 !== undefined) {
+    if (attributes.JOINTS_0 === undefined || attributes.WEIGHTS_0 === undefined) {
+      throw new Error('glTF: a primitive has one of JOINTS_0 / WEIGHTS_0 without the other');
+    }
+    // More than four influences per vertex. Taking the first four and
+    // renormalizing is the usual graceful degradation, and it silently changes
+    // how the mesh deforms -- so this refuses instead and names the limit,
+    // which a re-export can satisfy.
+    if (attributes.JOINTS_1 !== undefined) {
+      throw new Error(
+        'glTF: JOINTS_1 is present; this renderer supports four influences per vertex',
+      );
+    }
+    jointIndices = readAccessorAsUint32(json, buffers, attributes.JOINTS_0, 'VEC4');
+    jointWeights = readAccessorAsFloat32(json, buffers, attributes.WEIGHTS_0);
+    checkLength(jointWeights, vertexCount, 4, 'WEIGHTS_0');
+    if (jointIndices.length !== vertexCount * 4) {
+      throw new Error(
+        `glTF: JOINTS_0 has ${jointIndices.length / 4} entries but POSITION has ${vertexCount}`,
+      );
+    }
+    normalizeWeights(jointWeights, vertexCount);
+  }
+
   checkLength(normals, vertexCount, 3, 'NORMAL');
   checkLength(uvs, vertexCount, 2, 'TEXCOORD_0');
   checkLength(tangents, vertexCount, 4, 'TANGENT');
@@ -190,6 +248,11 @@ function buildPrimitive(json, buffers, primitive) {
     if (hadUVs) extras.push({ data: uvs, components: 2 });
     if (uv1s !== null) extras.push({ data: uv1s, components: 2 });
     if (colors !== null) extras.push({ data: colors, components: 4 });
+    if (jointWeights !== null) extras.push({ data: jointWeights, components: 4 });
+    // Joint INDICES ride through the float path as whole numbers. Every index
+    // a skin can address is far below 2^24, where a float32 is still exact, so
+    // nothing is lost and the unweld needs no integer variant.
+    if (jointIndices !== null) extras.push({ data: Float32Array.from(jointIndices), components: 4 });
 
     const unwelded = unweldAndComputeFlatNormals(positions, indices, extras);
     positions = unwelded.positions;
@@ -200,6 +263,8 @@ function buildPrimitive(json, buffers, primitive) {
     if (hadUVs) uvs = unwelded.extras[next++];
     if (uv1s !== null) uv1s = unwelded.extras[next++];
     if (colors !== null) colors = unwelded.extras[next++];
+    if (jointWeights !== null) jointWeights = unwelded.extras[next++];
+    if (jointIndices !== null) jointIndices = Uint32Array.from(unwelded.extras[next++]);
 
     tangents = null;
     vertexCount = positions.length / 3;
@@ -236,6 +301,11 @@ function buildPrimitive(json, buffers, primitive) {
     indexCount: indices.length,
     material: primitive.material ?? -1,
     bounds,
+    // Null unless the mesh is skinned. Kept beside the interleaved vertices
+    // rather than inside them: only a skinned pipeline binds these, so they
+    // become a second vertex buffer rather than 12 bytes on every static mesh.
+    jointIndices,
+    jointWeights,
   };
 }
 
@@ -376,6 +446,9 @@ function readNodes(json) {
       scale,
       children: node.children ?? [],
       mesh: node.mesh ?? -1,
+      // Which skin drives this node's mesh, or -1. The node carries it rather
+      // than the mesh, because one mesh can be instanced under two skeletons.
+      skin: node.skin ?? -1,
     };
   });
 }
