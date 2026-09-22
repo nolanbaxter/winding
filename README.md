@@ -81,8 +81,8 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 293 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 11 checks on a real device
+npm test          # 302 checks, Node, no browser
+npm run test:gpu  # serves the page; open test/gpu.html for 12 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
@@ -149,11 +149,13 @@ stops as soon as the next one starts further away than the best hit. Either way 
 transforms and refreshes bounds itself, so the answer never depends on whether you happened to
 render since the last move.
 
-**Nothing is sized in advance.** Scenes, transforms, draw lists, materials, lights and every
-per-renderable GPU buffer grow on demand by doubling, so the capacity arguments are starting sizes
+**Nothing is sized in advance.** Scenes, transforms, draw lists, materials, lights, the render graph
+and every per-renderable GPU buffer grow on demand, so the capacity arguments are starting sizes
 rather than budgets. Two limits remain hard, and both are derived rather than chosen: 2^24 entities
 (the index field of a handle) and 4096 materials (the material field of a sort key). Neither is a
-number more memory would fix.
+number more memory would fix. One more bites before either of those does — the per-batch uniform
+buffer is sized per renderable rather than per batch, which makes an invalid buffer somewhere above
+half a million renderables. That one is a bug, not a budget.
 
 **A job system.** Atomic-cursor parallel-for across workers with the main thread participating.
 Requires cross-origin isolation for `SharedArrayBuffer`; without it, it runs inline and produces
@@ -181,6 +183,21 @@ These are real and currently unaddressed.
 - **Transparency sorts per object, not per fragment.** `BLEND` geometry is culled and sorted
   back-to-front on the CPU and drawn after all opaque batches, which is exact for separated convex
   objects and wrong for interpenetrating ones. Blended geometry also casts no shadow.
+- **Mirrored node transforms render inside-out.** `frontFace` is fixed at counter-clockwise, and
+  glTF requires the winding to reverse when a node's global transform has a negative determinant.
+  The importer detects the mirror and nothing consumes it, so the common trick of mirroring one
+  chair to make its pair draws with the front faces culled.
+- **Only `TEXCOORD_0` is read.** A material that puts its occlusion or normal map on a second UV
+  set — the standard baked-AO layout out of Blender and Max — samples the first one instead.
+  `COLOR_0` is dropped for the same reason: there is no room in the vertex for either.
+- **The defaults assume a scene tens of units across.** `shadowDistance` and `lightDistance` are 60
+  world units, the bloom threshold assumes scene-linear 1.0 is white, and the procedural sky's sun
+  is what the exposure and that threshold were balanced against. A scene at millimetre or kilometre
+  scale needs all of them moved, and only two are reachable through `Winding.create`.
+- **The cluster grid is 16 by 9.** Tiles are derived from the real resolution, so coverage is
+  correct at any size, but the froxels are only square at 16:9. A portrait or square viewport gets
+  stretched cells, which overlap more lights and reach the 64-per-cluster cap sooner. Overflow past
+  that cap drops lights silently.
 - **Device loss is reported, not recovered.** The callback fires; rebuilding the GPU state is on you.
 - **Resource aliasing is idle in the default frame.** Transients share memory when their lifetimes do
   not overlap, but every same-size pair in the bloom chain overlaps by construction, so nothing is

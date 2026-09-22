@@ -7,10 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Three of the README's limitations, worked through in order of what they cost
-to fix rather than what they cost to describe.
+## [0.2.0] - 2026-09-22
+
+Three of the README's limitations, then two audits and the fixes they found.
+
+**If you are upgrading, four of these change what you SEE**, not just what is
+correct underneath. Double-sided back faces shade instead of going black;
+lights beyond `lightDistance` light things; `NEAREST`-filtered textures stop
+mipping, so pixel art goes sharp; and a texture past the device's size limit
+now throws where it used to render untextured in silence. If a scene looks
+different after this release, it is one of those four.
+
+### Removed
+
+Five exports, each with no caller anywhere in the engine or its tests:
+
+- `UniformRing` and its whole per-frame allocator. `rhi/buffer.js` went from
+  131 lines to 26 and stopped advertising a subsystem nothing used.
+- `SUN_DIRECTION`, documented for an analytic key light that does not exist,
+  and a hand-copy of three literals from the WGSL beside it.
+- `DRAW_BYTES`, a second name for `DRAW_DATA_BYTES`.
+- `opaqueDepthBucket`, which filled a sort-key field that is always zero.
+- `GROUP_PASS`, renamed `GROUP_RESERVED`. Nothing ever bound at that rate; the
+  shadow cascade matrices the header claimed lived there are in `GROUP_FRAME`.
+
+`RenderGraph` no longer takes `maxPasses` or `maxResources`, and `GpuProfiler`
+no longer takes `maxPasses`. See Changed.
+
+### Changed
+
+- **`sampleClip` and `AnimationPlayer` take the scene's handle allocator.**
+  `sampleClip(clip, time, transforms, entityOf, entities)` and
+  `new AnimationPlayer(clips, entityOf, entities)`. Required, not optional --
+  liveness cannot be answered without it. See Fixed.
+- **`TRANSPARENT_PIPELINE_BITS` is 4 and `TRANSPARENT_MATERIAL_BITS` is 12**,
+  where they were 8 and 8. See Fixed.
+- **Two-phase occlusion culling.** Whatever was drawn last frame is drawn
+  first, the depth pyramid is built from that, and a second cull tests
+  everything else against it before a second pass draws what it newly admits.
+  Nothing is a frame stale any more, so an object that becomes visible appears
+  on the frame it does instead of popping in on the next. `lastViewProjection`
+  is gone. Both phases share one indirect buffer, one visible list and one
+  batch-info buffer, each doubled, so this costs one compute dispatch and one
+  set of indirect draws rather than a second copy of the machinery.
+- **The render graph versions resources written more than once.** A read edged
+  from every writer regardless of declaration order, which is right for a
+  single-writer resource and wrong for a sequence: the depth pyramid reads
+  depth between the two forward passes, and edging it from both put it after a
+  pass that depends on it. A resource written several times is a sequence of
+  values, and a read means the one current where it was declared.
+- **The render graph has no pass or resource ceiling.** It was 32, and the
+  default frame's pass count is a function of resolution -- 31 at 1080p,
+  exactly 32 at 1440p and 4K, and 33 at 5K, where it threw every frame. The
+  capacity is deleted rather than raised: a frame declares what it needs, and
+  the pools extend to that and are reused. `GpuProfiler` follows the same rule
+  and sizes its query set from the frame, so its first frame is untimed.
+- **`createScene()` no longer touches the job system**, and the compose job is
+  registered once per engine. See Fixed.
+- **`ClusteredLights.update` and `createTexture2D` throw** on inputs that used
+  to fail silently: a non-positive near, a `lightDistance` at or inside it, and
+  a texture past `maxTextureDimension2D`.
 
 ### Added
+
 
 - **Triangle-exact picking**, behind `engine.load(src, { retainGeometry: true })`.
   `scene.raycast` keeps the bounding-box test as a broad phase, sorts the
@@ -31,35 +90,109 @@ to fix rather than what they cost to describe.
   read as exactly 0 on any given frame and only the mean over hundreds of them
   means anything.
 
-### Changed
-
-- **Occlusion culling runs in two phases and is no longer a frame stale.**
-  What was drawn last frame is drawn first, the depth pyramid is built from
-  that, and a second cull tests everything else against it before a second
-  pass draws whatever it newly admits. An object that becomes visible now
-  appears on the frame it does instead of popping in on the next, because the
-  pyramid and the matrix it is projected with both belong to this frame.
-  `lastViewProjection` is gone. The two phases share one indirect buffer, one
-  visible list and one batch-info buffer, each doubled, so this costs one
-  compute dispatch and one set of indirect draws rather than a second copy of
-  the machinery.
-- **The render graph versions resources that are written more than once.** A
-  read edged from every writer regardless of declaration order, which is right
-  for a single-writer resource and wrong for a sequence: the depth pyramid
-  reads depth between the two forward passes, and edging it from both put it
-  after a pass that depends on it. A resource written several times is a
-  sequence of values and a read means the one current where it was declared.
-  Single-writer resources behave exactly as before, which is the case the rule
-  was written for.
-
 ### Fixed
 
-- The aliasing limitation was described as never triggering "because every
-  transient target is a distinct size". Measured, the reason is different: the
-  bloom chain does contain same-size pairs, but `bloom{i}` and `bloom-up{i}`
-  overlap in lifetime by construction, so there is nothing to share. Adding a
-  three-pass separable blur aliases immediately. The pass is idle here, not
-  speculative, and its own tests already covered it.
+Two audits, one for stubbed-out or wrong code and one for whether the engine is
+general purpose or fitted to the two demo assets. Everything below came from
+reading; three ad-hoc detector scripts produced nothing but false positives.
+
+**Wrong pixels**
+
+- **The depth pyramid was not conservative.** `fsFirst` documented its 2x2
+  gather as one that "always covers the full footprint". The scale lands in
+  [1, 2), so an output texel owns a source interval shorter than two texels
+  that still straddles THREE of them when unaligned -- 75% of the row at 1920
+  wide. Missing a texel from a MIN raises the result, and under reverse-Z
+  higher is nearer, so the pyramid claimed a nearer occluder than existed and
+  the cull test deleted visible geometry. Now a 3x3 gather clamped to the
+  footprint's own last texel.
+- **Double-sided back faces shaded black.** `cullMode: 'none'` was set, but the
+  fragment shader built its TBN from the interpolated normal with no
+  `front_facing` flip, so a back face arrived with the normal of the front it
+  was authored as and `NoL` clamped to zero. Every leaf, curtain and thin
+  panel. The normal and bitangent now flip together; the tangent does not,
+  since it follows the UV's u axis.
+- **`lightDistance` was a hard cutoff**, in a file that says three times it is
+  not. The exponential mapping ends the final cell exactly there, so a light
+  past it sat outside every cluster box and was added to none -- while the
+  fragment shader clamps depths beyond `lightDistance` INTO that cell. The last
+  slice now reaches as far as the farthest light does, derived from the light
+  list each frame.
+- **glTF's `NEAREST` and `LINEAR` minFilters built a mip chain.** Those two
+  mean no mip chain at all. They now pin both LOD clamps to 0.
+- **An animation channel could drive a recycled entity.** The 0.1.1 guard
+  tested the transform SLOT and never the generation, and handles recycle
+  last-in-first-out, so the next `alloc()` took the slot back and marked it
+  live. The guard caught "freed" and missed "freed and reused", which is the
+  common case. It is now one call to `HandleAllocator.alive()`, which is the
+  only thing that compares generations.
+- **Blended geometry past 255 materials reordered the frame.** The transparent
+  sort key's material field was 8 bits while `MaterialRegistry` guards 4096
+  from the opaque key, and nothing minted against the narrower one. The
+  missing width was next door: pipeline ids are a dense index over
+  `variantKey`, which has at most six values, so 8 bits carried 3 bits of
+  information. Now 16/4/12, with the material width defined AS
+  `OPAQUE_MATERIAL_BITS` and three module-load asserts so the two cannot drift.
+
+**Crashes, leaks and NaN**
+
+- **The render graph threw every frame at 5K** and had zero headroom at 1440p
+  and 4K. See Changed.
+- **Resizing leaked every texture it passed through.** The graph's pool is
+  keyed by descriptor and was emptied only by a `destroy()` nothing called, so
+  every distinct surface size a window drag passes through stayed resident.
+  Measured over 120 widths: 120 textures, 1.84 GB. Now one. `PostStack`'s bind
+  group cache had the same shape, and with the pool destroying textures it
+  stopped being merely a leak.
+- **Three NaN paths with no guard**: zeroing `sun.direction`, which is the
+  natural way to say "no sun", produced NaN cascade matrices;
+  `log(lightDistance / near)` was unguarded in three different ways; and a
+  zero-area triangle in a mesh without normals left a zero normal that turned
+  the whole face NaN in the shader. Exporters emit collapsed triangles
+  routinely, and the tangent path twenty lines away already handled it.
+- **Eight `destroy()` methods had no caller** and `Renderer` had none at all,
+  so the teardown path existed on paper. `Engine.destroy()` also destroyed an
+  `Environment` that `create()` documents as shareable, and a lost device left
+  `_running` true forever so every later `run()` threw "already running". The
+  decoded `ImageBitmap`s were never closed either -- over a gigabyte on Sponza.
+- **A texture past `maxTextureDimension2D`** returned an invalid texture with
+  no exception, after which the upload, the mip generation and every draw
+  binding it were silent no-ops.
+
+**Silent state corruption**
+
+- **`createScene()` hijacked the previous scene.** Each call re-registered the
+  compose job with a closure over the new scene and re-pointed the shared
+  buffers, so with two scenes the workers composed one scene's columns for
+  every frame of the other. `setSharedData` now publishes an owner, and
+  `updateParallel` republishes when the owner is not itself -- a condition a
+  per-store revision cannot express.
+- **`mat4Decompose` wrote `outPos` before the guard** that documents the
+  outputs as untouched on a degenerate matrix, so a caller trusting it got a
+  transform mixed from two different matrices.
+- **`createPipelineLayout`'s range check was DEBUG-only and ran after** the
+  loop that ignores out-of-range keys, so in release a fifth bind group was
+  dropped in silence.
+- **`compileShaderSync` had no `.catch()`** on `getCompilationInfo()`, so a
+  device lost mid-load left `shaderErrors` empty -- which the GPU suite reads
+  as clean, meaning a compile failure could report as a pass.
+- **`serve.js` tested `startsWith(ROOT)` with no separator**, so a sibling
+  directory whose name merely extends the root's was served.
+
+**Documentation that described something else**
+
+`hzb.js` still said two-phase culling was "not done here"; `drawlist.js`
+claimed opaque draws sort near-to-far for early-Z, which they never have;
+`quat.js` said there is deliberately no `quatFromEuler` fifty lines above
+exporting one; `assert.js` said every call site is DEBUG-guarded;
+`bindgroups.js` described a four-rate model that is three; `material.js`
+documented a texture slot named `orm` that does not exist, so anyone following
+it got a flat material with no error; `mat4Invert` promised null on a singular
+matrix when it only tests for an exactly-zero determinant; `pbr.js`'s
+`instance_index` note is false on the transparent path. Four arithmetic counts
+in comments were wrong where the code was right.
+
+302 checks under Node, 12 on a real device.
 
 ## [0.1.1] - 2026-09-21
 
@@ -152,6 +285,7 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/nolanbaxter/winding/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/nolanbaxter/winding/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/nolanbaxter/winding/releases/tag/v0.1.0
