@@ -92,6 +92,18 @@ export class GLTFTextures {
     return sampler;
   }
 
+  /**
+   * Drop the decoded images once everything that wanted one has been uploaded.
+   *
+   * The GPU textures are unaffected -- they already hold their own copy. This
+   * only releases the ImageBitmaps, whose native memory the collector would
+   * otherwise free whenever it felt like it.
+   */
+  releaseBitmaps() {
+    for (const bitmap of this.bitmaps) bitmap?.close?.();
+    this.bitmaps = [];
+  }
+
   destroy() {
     for (const texture of this._textures.values()) texture.destroy();
     this._textures.clear();

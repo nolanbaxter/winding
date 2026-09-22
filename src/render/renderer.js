@@ -471,6 +471,29 @@ export class Renderer {
   }
 
   /**
+   * Release every GPU object this renderer owns.
+   *
+   * Eight subsystems here each defined a destroy() and not one was ever called,
+   * so the whole teardown path existed on paper only. device.destroy() does
+   * reclaim the memory, which is why nothing showed -- but it does not help the
+   * cases that are not a full teardown: an Engine destroyed while another still
+   * uses the device, or a profiler left holding buffers mid-mapAsync.
+   *
+   * Not the materials or the environment: the registry's textures come from
+   * assets the caller loaded, and the environment may be shared.
+   */
+  destroy() {
+    this.gpuTiming.destroy();
+    this.graph.destroy();
+    this.gpu.destroy();
+    this.shadows.destroy();
+    this.clusters.destroy();
+    this.hzb.destroy();
+    this.post.destroy();
+    this.frameBuffer.destroy();
+  }
+
+  /**
    * Cull and order this frame's blended geometry, back to front.
    *
    * This is the one place the engine sorts on the CPU, and it is not an

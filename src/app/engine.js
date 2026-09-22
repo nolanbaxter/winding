@@ -50,7 +50,8 @@ export class Winding {
       exposure: options.exposure,
     });
 
-    const environment = options.environment instanceof Environment
+    const sharedEnvironment = options.environment instanceof Environment;
+    const environment = sharedEnvironment
       ? options.environment
       : new Environment(rhi, options.environment ?? {});
 
@@ -63,15 +64,17 @@ export class Winding {
         : null,
     });
 
-    return new Winding(rhi, renderer, environment, jobs);
+    return new Winding(rhi, renderer, environment, jobs, !sharedEnvironment);
   }
 
-  constructor(rhi, renderer, environment, jobs) {
+  constructor(rhi, renderer, environment, jobs, ownsEnvironment = true) {
     /** The RHI. Public: dropping a tier must never require a fork. */
     this.rhi = rhi;
     this.renderer = renderer;
     this.environment = environment;
     this.jobs = jobs;
+    /** False when create() was handed an Environment to share. */
+    this._ownsEnvironment = ownsEnvironment;
 
     this.clock = new Clock(1 / 60);
     this.fps = 0;
@@ -131,6 +134,13 @@ export class Winding {
     const materialIds = model.materials.map(
       (material) => this.renderer.materials.register(material, textures.texturesFor(material)),
     );
+
+    // Every image that was going to be uploaded now has been, so the decoded
+    // copies are dead weight. An ImageBitmap holds native memory the collector
+    // frees only when it gets round to it, and a texture-heavy asset is
+    // hundreds of megabytes of them -- Sponza decodes to over a gigabyte.
+    // close() gives it back at a known moment instead.
+    textures.releaseBitmaps();
 
     const meshes = model.meshes.map((mesh, m) => ({
       name: mesh.name,
@@ -200,7 +210,12 @@ export class Winding {
     this._running = true;
 
     const loop = (nowMs) => {
-      if (!this._running || this.rhi.destroyed) return;
+      // The device going away ends the loop for good, so tear the running
+      // flag down with it. Returning without stop() left _running true, and
+      // every later run() threw 'already running' with no way back short of
+      // destroy() -- a lost device wedged the engine rather than stopping it.
+      if (!this._running) return;
+      if (this.rhi.destroyed) { this.stop(); return; }
       this._raf = requestAnimationFrame(loop);
 
       this.clock.begin(nowMs / 1000);
@@ -239,10 +254,18 @@ export class Winding {
     return this.renderer.stats;
   }
 
+  /**
+   * Release everything this engine owns.
+   *
+   * The environment is destroyed only if this engine made it. `create` accepts
+   * one to SHARE, and tearing down a borrowed environment's cubemaps breaks
+   * whichever engine is still using them.
+   */
   destroy() {
     this.stop();
     this.jobs.destroy();
-    this.environment.destroy();
+    this.renderer.destroy();
+    if (this._ownsEnvironment) this.environment.destroy();
     this.rhi.destroy();
   }
 }
