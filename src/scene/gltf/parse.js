@@ -8,16 +8,16 @@
 //   const model = await loadGLTF(bytes);
 //   instantiate(model, entities, transforms);   // becomes entities
 //
-// Not handled: cameras, morph targets, KHR extensions. Animations ARE read
-// (see animation.js), but only their TRS channels -- a `weights` channel has
-// no morph targets to drive and is dropped.
+// Not handled: cameras, KHR extensions.
 //
-// Skins ARE read: the joint list, the inverse bind matrices and the per-vertex
-// influences all come through (see skin.js). Nothing DEFORMS yet -- that is a
-// vertex shader, a matrix palette and a bounds derivation, none of which live
-// in the importer. What is here is the data those need, verified on its own.
-// Each is a real feature, none is needed to draw a static mesh, and every one
-// of them is additive to this file rather than a rewrite of it.
+// Skins and morph targets both come through whole -- the joint list, the
+// inverse bind matrices and the per-vertex influences (skin.js); the per-target
+// vertex deltas and the weights that mix them (morph.js). Animations bring
+// their TRS channels and their `weights` channels alike.
+//
+// What DEFORMS geometry is a vertex shader, a matrix palette and a bounds
+// derivation, none of which live in the importer. What is here is the data
+// those need, in the layout they want it, verified on its own.
 
 import { DEBUG, assertFinite } from '../../core/assert.js';
 import { NULL_HANDLE } from '../../core/handle.js';
@@ -30,6 +30,7 @@ import { readAccessorAsFloat32, readAccessorAsUint32, componentCountOf } from '.
 import {
   readSkins, normalizeWeights, checkJointIndices, jointInfluenceRadii,
 } from './skin.js';
+import { readMorphTargets, morphWeightsFor } from './morph.js';
 import { generateTangents, unweldAndComputeFlatNormals } from './tangents.js';
 
 // The vertex format is the renderer's contract, defined in render/vertex.js.
@@ -92,10 +93,34 @@ export async function loadGLTF(source, options = {}) {
 
 function buildModel(json, buffers) {
   const materials = readMaterials(json);
-  const meshes = (json.meshes ?? []).map((mesh, i) => ({
-    name: mesh.name ?? `mesh_${i}`,
-    primitives: (mesh.primitives ?? []).map((p) => buildPrimitive(json, buffers, p)),
-  }));
+  const meshes = (json.meshes ?? []).map((mesh, i) => {
+    const name = mesh.name ?? `mesh_${i}`;
+    const primitives = (mesh.primitives ?? []).map(
+      (p) => buildPrimitive(json, buffers, p, `mesh "${name}"`),
+    );
+
+    // Every primitive of a mesh is deformed by ONE set of weights, so they
+    // must agree on how many targets there are. The spec requires it; an
+    // exporter that broke it would leave half a face morphing.
+    const targetCount = primitives[0]?.morph?.targetCount ?? 0;
+    for (const primitive of primitives) {
+      if ((primitive.morph?.targetCount ?? 0) !== targetCount) {
+        throw new Error(
+          `glTF: mesh "${name}" has primitives with different morph target counts`,
+        );
+      }
+    }
+
+    return {
+      name,
+      primitives,
+      /** How many targets every primitive here carries. Zero means none. */
+      targetCount,
+      // The mesh's own default weights. A node instancing it may override
+      // them, which is why these are kept rather than resolved here.
+      weights: morphWeightsFor(mesh.weights, null, targetCount, `mesh "${name}"`),
+    };
+  });
   const nodes = readNodes(json);
   const skins = readSkins(json, buffers);
 
@@ -131,12 +156,27 @@ function buildModel(json, buffers) {
     }
   }
 
+  // Morph weights, resolved once the mesh each node instances is known. A
+  // node with no override inherits the mesh's defaults -- copied, not shared,
+  // because two nodes instancing one mesh animate independently.
+  for (const node of nodes) {
+    if (node.mesh < 0) {
+      node.weights = null;
+      continue;
+    }
+    const mesh = meshes[node.mesh];
+    if (!mesh) throw new Error(`glTF: node "${node.name}" names mesh ${node.mesh}, which does not exist`);
+    node.weights = mesh.targetCount === 0
+      ? null
+      : morphWeightsFor(mesh.weights, node.weights, mesh.targetCount, `node "${node.name}"`);
+  }
+
   return {
     nodes,
     meshes,
     materials,
     skins,
-    animations: readAnimations(json, buffers),
+    animations: readAnimations(json, buffers, meshes),
     roots: findRoots(json, nodes),
     // The raw document, for subsystems that need what this view deliberately
     // drops -- image decoding needs the bufferViews, and extensions will need
@@ -148,7 +188,7 @@ function buildModel(json, buffers) {
 
 // ------------------------------------------------------------- primitives
 
-function buildPrimitive(json, buffers, primitive) {
+function buildPrimitive(json, buffers, primitive, label) {
   const mode = primitive.mode ?? MODE_TRIANGLES;
   if (mode !== MODE_TRIANGLES) {
     throw new Error(
@@ -226,6 +266,10 @@ function buildPrimitive(json, buffers, primitive) {
     normalizeWeights(jointWeights, vertexCount);
   }
 
+  // Morph targets. Interleaved vertex-major by morph.js, which is what lets
+  // the unweld below treat them as one more per-vertex attribute.
+  let morph = readMorphTargets(json, buffers, primitive.targets, vertexCount, label);
+
   checkLength(normals, vertexCount, 3, 'NORMAL');
   checkLength(uvs, vertexCount, 2, 'TEXCOORD_0');
   checkLength(tangents, vertexCount, 4, 'TANGENT');
@@ -265,6 +309,11 @@ function buildPrimitive(json, buffers, primitive) {
     // a skin can address is far below 2^24, where a float32 is still exact, so
     // nothing is lost and the unweld needs no integer variant.
     if (jointIndices !== null) extras.push({ data: Float32Array.from(jointIndices), components: 4 });
+    // One "attribute" of targetCount * stride floats. Vertex-major layout is
+    // what makes that true -- see morph.js.
+    if (morph !== null) {
+      extras.push({ data: morph.deltas, components: morph.targetCount * morph.stride });
+    }
 
     const unwelded = unweldAndComputeFlatNormals(positions, indices, extras);
     positions = unwelded.positions;
@@ -277,6 +326,9 @@ function buildPrimitive(json, buffers, primitive) {
     if (colors !== null) colors = unwelded.extras[next++];
     if (jointWeights !== null) jointWeights = unwelded.extras[next++];
     if (jointIndices !== null) jointIndices = Uint32Array.from(unwelded.extras[next++]);
+    // The extent is a property of the deltas, not of how they are indexed, so
+    // duplicating vertices cannot change it.
+    if (morph !== null) morph = { ...morph, deltas: unwelded.extras[next++] };
 
     tangents = null;
     vertexCount = positions.length / 3;
@@ -318,6 +370,11 @@ function buildPrimitive(json, buffers, primitive) {
     // become a second vertex buffer rather than 12 bytes on every static mesh.
     jointIndices,
     jointWeights,
+    // Null unless the primitive has morph targets. The deltas are a storage
+    // buffer the vertex shader indexes, not a vertex attribute: a vertex reads
+    // every target, so they cannot be a per-vertex binding without one
+    // attribute per target.
+    morph,
   };
 }
 
@@ -461,6 +518,10 @@ function readNodes(json) {
       // Which skin drives this node's mesh, or -1. The node carries it rather
       // than the mesh, because one mesh can be instanced under two skeletons.
       skin: node.skin ?? -1,
+      // This instance's morph weights, still raw: their length can only be
+      // checked against the mesh, and which mesh that is may be a node this
+      // loop has not reached. buildModel resolves them.
+      weights: node.weights ?? null,
     };
   });
 }

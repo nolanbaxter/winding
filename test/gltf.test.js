@@ -228,6 +228,150 @@ function skinnedGLB({
   }, bytes);
 }
 
+
+/**
+ * The quad with morph targets.
+ *
+ * Each entry of `targets` names the deltas it carries. The defaults are the
+ * smallest pair that exercises the two things the layout has to get right: a
+ * target that moves positions only, beside one that also moves normals, so the
+ * stride is decided by the wider of them and the narrower is zero-padded.
+ */
+const MORPH_T0_POSITION = Float32Array.from([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1]);
+const MORPH_T1_POSITION = Float32Array.from([0, 0, 0, 0, 2, 0, 0, 2, 0, 0, 0, 0]);
+const MORPH_T1_NORMAL = Float32Array.from([0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0]);
+
+function morphedGLB({
+  targets = [{ POSITION: MORPH_T0_POSITION }, { POSITION: MORPH_T1_POSITION, NORMAL: MORPH_T1_NORMAL }],
+  meshWeights,
+  nodeWeights,
+  includeNormals = true,
+  secondPrimitiveTargets,
+  animation = null,
+  sparsePosition = false,
+  targetType = 'VEC3',
+  targetCount,
+} = {}) {
+  const arrays = [QUAD.positions, QUAD.indices, QUAD.normals, QUAD.uvs];
+  const accessors = [
+    { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+    { bufferView: 1, componentType: 5123, count: 6, type: 'SCALAR' },
+    { bufferView: 2, componentType: 5126, count: 4, type: 'VEC3' },
+    { bufferView: 3, componentType: 5126, count: 4, type: 'VEC2' },
+  ];
+  let next = 4;
+
+  // Deferred accessor descriptions: the bufferView index is only known once
+  // every array has been queued, so the data goes in first and the JSON after.
+  const pending = [];
+  const addAccessor = (data, type, count) => {
+    arrays.push(data);
+    pending.push({ type, count });
+    return next++;
+  };
+
+  const targetJSON = (targets ?? []).map((target) => {
+    const out = {};
+    for (const name of ['POSITION', 'NORMAL', 'TANGENT']) {
+      if (target[name] === undefined) continue;
+      const type = name === 'POSITION' && targetType !== 'VEC3' ? targetType : 'VEC3';
+      out[name] = addAccessor(target[name], type, targetCount ?? 4);
+    }
+    return out;
+  });
+
+  const secondTargetJSON = (secondPrimitiveTargets ?? []).map((target) => {
+    const out = {};
+    for (const name of ['POSITION', 'NORMAL', 'TANGENT']) {
+      if (target[name] === undefined) continue;
+      out[name] = addAccessor(target[name], 'VEC3', 4);
+    }
+    return out;
+  });
+
+  let animationJSON;
+  if (animation) {
+    const times = addAccessor(animation.times, 'SCALAR', animation.times.length);
+    const valueType = animation.valueType ?? 'SCALAR';
+    const wide = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 }[valueType];
+    const values = addAccessor(animation.values, valueType, animation.values.length / wide);
+    animationJSON = [{
+      samplers: [{ input: times, output: values, interpolation: animation.interpolation ?? 'LINEAR' }],
+      channels: [{ sampler: 0, target: { node: animation.node ?? 0, path: animation.path ?? 'weights' } }],
+    }];
+  }
+
+  const { bytes, views } = packBuffer(arrays);
+  for (let i = 0; i < pending.length; i++) {
+    accessors.push({
+      bufferView: 4 + i, componentType: 5126, count: pending[i].count, type: pending[i].type,
+    });
+  }
+
+  // A sparse POSITION delta: no bufferView at all, so the base is zeros and
+  // the overrides are the only data. The usual shape of a real morph target.
+  if (sparsePosition) {
+    const indices = Uint32Array.from([2, 3]);
+    const values = Float32Array.from([0, 0, 1, 0, 0, 1]);
+    const extra = packBuffer([indices, values]);
+    const merged = new Uint8Array(bytes.length + extra.bytes.length);
+    merged.set(bytes);
+    merged.set(extra.bytes, bytes.length);
+    const base = views.length;
+    views.push(
+      { byteOffset: bytes.length + extra.views[0].byteOffset, byteLength: extra.views[0].byteLength },
+      { byteOffset: bytes.length + extra.views[1].byteOffset, byteLength: extra.views[1].byteLength },
+    );
+    const sparseAccessor = accessors.length;
+    accessors.push({
+      componentType: 5126, count: 4, type: 'VEC3',
+      sparse: {
+        count: 2,
+        indices: { bufferView: base, componentType: 5125 },
+        values: { bufferView: base + 1 },
+      },
+    });
+    targetJSON.length = 0;
+    targetJSON.push({ POSITION: sparseAccessor });
+    return makeGLB(morphJSON(merged, views, accessors, targetJSON, [], {
+      meshWeights, nodeWeights, includeNormals, animationJSON,
+    }), merged);
+  }
+
+  return makeGLB(morphJSON(bytes, views, accessors, targetJSON, secondTargetJSON, {
+    meshWeights, nodeWeights, includeNormals, animationJSON,
+  }), bytes);
+}
+
+function morphJSON(bytes, views, accessors, targetJSON, secondTargetJSON, opts) {
+  const attributes = { POSITION: 0, TEXCOORD_0: 3 };
+  if (opts.includeNormals) attributes.NORMAL = 2;
+
+  const primitives = [{ attributes, indices: 1, targets: targetJSON }];
+  if (secondTargetJSON.length > 0) {
+    primitives.push({ attributes, indices: 1, targets: secondTargetJSON });
+  }
+
+  const mesh = { name: 'face', primitives };
+  if (opts.meshWeights !== undefined) mesh.weights = opts.meshWeights;
+
+  const node = { name: 'head', mesh: 0 };
+  if (opts.nodeWeights !== undefined) node.weights = opts.nodeWeights;
+
+  const json = {
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors,
+    meshes: [mesh],
+    nodes: [node],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  };
+  if (opts.animationJSON) json.animations = opts.animationJSON;
+  return json;
+}
+
 // --------------------------------------------------------------- container
 
 console.log('\nglb container');
@@ -928,6 +1072,204 @@ test('a real triangle still gets its geometric normal', () => {
   close(normals[0], 0, EPS, 'x');
   close(normals[1], 0, EPS, 'y');
   close(normals[2], 1, EPS, 'z is the winding normal');
+});
+
+// -------------------------------------------------------------- morph targets
+
+console.log('\nmorph targets');
+
+await atest('deltas interleave vertex-major at the widest stride any target needs', async () => {
+  const model = await loadGLTF(morphedGLB());
+  const morph = model.meshes[0].primitives[0].morph;
+
+  assert.equal(morph.targetCount, 2);
+  // One target carries normals, so both are stored six floats wide.
+  assert.equal(morph.stride, 6);
+  assert.equal(morph.deltas.length, 4 * 2 * 6);
+
+  // Vertex 2, target 0: the position delta it was given, then zero normals --
+  // that target does not deform normals, and zero is the identity of addition.
+  const v2t0 = (2 * 2 + 0) * 6;
+  vecClose(morph.deltas.subarray(v2t0, v2t0 + 6), [0, 0, 1, 0, 0, 0], EPS, 'v2 t0');
+
+  // Vertex 2, target 1: both halves present.
+  const v2t1 = (2 * 2 + 1) * 6;
+  vecClose(morph.deltas.subarray(v2t1, v2t1 + 6), [0, 2, 0, 1, 0, 0], EPS, 'v2 t1');
+
+  // Vertex 0 moves under neither.
+  vecClose(morph.deltas.subarray(0, 12), new Array(12).fill(0), EPS, 'v0');
+});
+
+await atest('a positions-only mesh stays three floats wide', async () => {
+  const model = await loadGLTF(morphedGLB({ targets: [{ POSITION: MORPH_T0_POSITION }] }));
+  const morph = model.meshes[0].primitives[0].morph;
+  assert.equal(morph.stride, 3);
+  assert.equal(morph.deltas.length, 4 * 1 * 3);
+});
+
+await atest('extent is the farthest a vertex travels under one target', async () => {
+  const model = await loadGLTF(morphedGLB());
+  const { extent } = model.meshes[0].primitives[0].morph;
+  // Target 0 moves two vertices one unit along +Z; target 1 moves two by two.
+  close(extent[0], 1, EPS, 'extent[0]');
+  close(extent[1], 2, EPS, 'extent[1]');
+});
+
+await atest('a mesh with no targets has no morph data at all', async () => {
+  const model = await loadGLTF(quadGLB());
+  assert.equal(model.meshes[0].primitives[0].morph, null);
+  assert.equal(model.meshes[0].targetCount, 0);
+  assert.equal(model.nodes[0].weights, null);
+});
+
+await atest('a sparse delta accessor reads as the dense array it describes', async () => {
+  // The common real-world encoding: a target that moves a few vertices stores
+  // only those, against a base of zeros.
+  const model = await loadGLTF(morphedGLB({ sparsePosition: true }));
+  const morph = model.meshes[0].primitives[0].morph;
+  assert.equal(morph.stride, 3);
+  vecClose(morph.deltas.subarray(0, 6), [0, 0, 0, 0, 0, 0], EPS, 'untouched vertices');
+  vecClose(morph.deltas.subarray(6, 12), [0, 0, 1, 0, 0, 1], EPS, 'overridden vertices');
+  close(morph.extent[0], 1, EPS, 'extent');
+});
+
+// ------------------------------------------------------------- morph weights
+
+await atest('weights default to zero, which is the undeformed mesh', async () => {
+  const model = await loadGLTF(morphedGLB());
+  vecClose(model.meshes[0].weights, [0, 0], EPS, 'mesh weights');
+  vecClose(model.nodes[0].weights, [0, 0], EPS, 'node weights');
+});
+
+await atest('the mesh supplies defaults and the node overrides them', async () => {
+  const both = await loadGLTF(morphedGLB({ meshWeights: [0.25, 0.5], nodeWeights: [1, 0] }));
+  vecClose(both.meshes[0].weights, [0.25, 0.5], EPS, 'mesh');
+  vecClose(both.nodes[0].weights, [1, 0], EPS, 'node overrides');
+
+  const inherited = await loadGLTF(morphedGLB({ meshWeights: [0.25, 0.5] }));
+  vecClose(inherited.nodes[0].weights, [0.25, 0.5], EPS, 'node inherits');
+
+  // Copied, not shared: two nodes on one mesh animate independently.
+  assert.notEqual(inherited.nodes[0].weights, inherited.meshes[0].weights);
+});
+
+await atest('a weight list of the wrong length is refused, not padded', async () => {
+  await assert.rejects(
+    () => loadGLTF(morphedGLB({ meshWeights: [0.5] })),
+    /1 morph weights for 2 targets/,
+  );
+  await assert.rejects(
+    () => loadGLTF(morphedGLB({ nodeWeights: [1, 0, 0] })),
+    /3 morph weights for 2 targets/,
+  );
+});
+
+// --------------------------------------------------------- malformed targets
+
+await atest('primitives of one mesh must agree on how many targets there are', async () => {
+  await assert.rejects(
+    () => loadGLTF(morphedGLB({ secondPrimitiveTargets: [{ POSITION: MORPH_T0_POSITION }] })),
+    /different morph target counts/,
+  );
+});
+
+await atest('a target that deforms nothing is refused', async () => {
+  await assert.rejects(
+    () => loadGLTF(morphedGLB({ targets: [{}] })),
+    /none of which deform/,
+  );
+});
+
+await atest('a delta accessor of the wrong length is refused', async () => {
+  await assert.rejects(
+    () => loadGLTF(morphedGLB({
+      targets: [{ POSITION: Float32Array.from([0, 0, 1, 0, 0, 1]) }], targetCount: 2,
+    })),
+    /2 POSITION deltas but the primitive has 4 vertices/,
+  );
+});
+
+await atest('a non-VEC3 delta is refused', async () => {
+  await assert.rejects(
+    () => loadGLTF(morphedGLB({
+      targets: [{ POSITION: Float32Array.from([0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1]) }],
+      targetType: 'VEC4',
+    })),
+    /which is not VEC3/,
+  );
+});
+
+await atest('deltas survive the unweld a mesh without normals goes through', async () => {
+  // No NORMAL means flat shading, which de-indexes the mesh. Every attribute
+  // has to be reordered with it -- deltas included, or vertex 0 of the new
+  // mesh would read the delta of whatever vertex 0 used to be.
+  const model = await loadGLTF(morphedGLB({ includeNormals: false }));
+  const { morph, vertexCount } = model.meshes[0].primitives[0];
+
+  assert.equal(vertexCount, 6);                       // 2 triangles, unwelded
+  assert.equal(morph.deltas.length, 6 * 2 * 6);
+
+  // The quad's indices are [0,1,2, 0,2,3], so unwelded vertices 2 and 4 are
+  // both original vertex 2 -- the shared corner, duplicated.
+  const v2t0 = (2 * 2 + 0) * 6;
+  vecClose(morph.deltas.subarray(v2t0, v2t0 + 3), [0, 0, 1], EPS, 'unwelded v2 t0');
+  const v4t0 = (4 * 2 + 0) * 6;
+  vecClose(morph.deltas.subarray(v4t0, v4t0 + 3), [0, 0, 1], EPS, 'unwelded v4 t0');
+  // Unwelded vertex 3 is original 0, which moves under nothing.
+  const v3t0 = (3 * 2 + 0) * 6;
+  vecClose(morph.deltas.subarray(v3t0, v3t0 + 3), [0, 0, 0], EPS, 'unwelded v3 t0');
+
+  // Duplicating vertices cannot change how far the target reaches.
+  close(morph.extent[0], 1, EPS, 'extent after unweld');
+});
+
+// ------------------------------------------------------------ weight channels
+
+await atest('a weights channel is as wide as the mesh has targets', async () => {
+  const model = await loadGLTF(morphedGLB({
+    animation: { times: Float32Array.from([0, 1]), values: Float32Array.from([0, 0, 1, 0.5]) },
+  }));
+  assert.equal(model.animations.length, 1);
+  const [channel] = model.animations[0].channels;
+  assert.equal(channel.path, 'weights');
+  // SCALAR in the file; two targets wide here, which is the only reading that
+  // makes the run of four values mean anything.
+  assert.equal(channel.components, 2);
+  assert.equal(channel.times.length, 2);
+  vecClose(channel.values, [0, 0, 1, 0.5], EPS, 'values');
+  close(model.animations[0].duration, 1, EPS, 'duration');
+});
+
+await atest('a weights run of the wrong length is refused', async () => {
+  await assert.rejects(
+    () => loadGLTF(morphedGLB({
+      animation: { times: Float32Array.from([0, 1]), values: Float32Array.from([0, 0, 1]) },
+    })),
+    /2 times but 3 values/,
+  );
+});
+
+await atest('a weights channel on a mesh with no targets drives nothing', async () => {
+  // Legal, and not worth failing a load over: the same non-event as a channel
+  // that names no node.
+  const model = await loadGLTF(morphedGLB({
+    targets: [],
+    animation: { times: Float32Array.from([0, 1]), values: Float32Array.from([0, 1]) },
+  }));
+  assert.equal(model.meshes[0].targetCount, 0);
+  assert.equal(model.animations[0].channels.length, 0);
+});
+
+await atest('a TRS channel still checks its accessor type', async () => {
+  await assert.rejects(
+    () => loadGLTF(morphedGLB({
+      animation: {
+        path: 'translation', valueType: 'VEC2',
+        times: Float32Array.from([0, 1]), values: Float32Array.from([0, 0, 1, 1]),
+      },
+    })),
+    /drives translation \(3 components\) from a 2-component accessor/,
+  );
 });
 
 // -------------------------------------------------------------------- skins
