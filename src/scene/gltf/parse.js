@@ -186,6 +186,9 @@ function buildPrimitive(json, buffers, primitive) {
 
   return {
     vertices: interleave(positions, normals, uvs, tangents, vertexCount),
+    // Kept alongside the interleaved copy so a caller that wants triangle-exact
+    // picking can retain a quarter of the memory rather than the whole vertex.
+    positions,
     indices,
     vertexCount,
     indexCount: indices.length,

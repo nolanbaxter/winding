@@ -1,4 +1,4 @@
-// Axis-aligned bounding boxes.
+// Axis-aligned bounding boxes, and the ray tests that run against them.
 //
 // Stored as two vec3s rather than center+extent: the min/max form is what glTF
 // accessors hand you and what the frustum test wants, so anything else would
@@ -109,4 +109,55 @@ export function aabbRayDistance(min, max, origin, direction, boundsOff = 0) {
   }
 
   return enter;
+}
+
+/**
+ * Distance along a ray to where it meets a triangle, or -1 for a miss.
+ *
+ * Moller-Trumbore, without a backface cull: a pick should find a surface from
+ * either side, and glTF materials are double-sided often enough that culling
+ * here would make the answer depend on winding.
+ *
+ * `a`, `b` and `c` index `positions` as flat xyz, so callers pass `index * 3`.
+ *
+ * Like the slab test above, a degenerate triangle is not special-cased. A zero
+ * determinant makes the barycentrics +/-Infinity or NaN, and every path out of
+ * those fails one of the range checks, so the miss falls out of the arithmetic.
+ *
+ * `direction` need not be normalized. The result is in units of its length,
+ * which is what lets the caller hand in a ray transformed into local space and
+ * compare the answer against world-space distances unchanged.
+ */
+export function rayTriangleDistance(origin, direction, positions, a, b, c) {
+  const e1x = positions[b] - positions[a];
+  const e1y = positions[b + 1] - positions[a + 1];
+  const e1z = positions[b + 2] - positions[a + 2];
+  const e2x = positions[c] - positions[a];
+  const e2y = positions[c + 1] - positions[a + 1];
+  const e2z = positions[c + 2] - positions[a + 2];
+
+  // p = direction x e2, and det = e1 . p is the scalar triple product: the
+  // volume of the parallelepiped the three edges span, zero when the ray is
+  // parallel to the triangle's plane.
+  const px = direction[1] * e2z - direction[2] * e2y;
+  const py = direction[2] * e2x - direction[0] * e2z;
+  const pz = direction[0] * e2y - direction[1] * e2x;
+  const inverse = 1 / (e1x * px + e1y * py + e1z * pz);
+
+  const tx = origin[0] - positions[a];
+  const ty = origin[1] - positions[a + 1];
+  const tz = origin[2] - positions[a + 2];
+
+  const u = (tx * px + ty * py + tz * pz) * inverse;
+  if (!(u >= 0 && u <= 1)) return -1;
+
+  const qx = ty * e1z - tz * e1y;
+  const qy = tz * e1x - tx * e1z;
+  const qz = tx * e1y - ty * e1x;
+
+  const v = (direction[0] * qx + direction[1] * qy + direction[2] * qz) * inverse;
+  if (!(v >= 0 && u + v <= 1)) return -1;
+
+  const distance = (e2x * qx + e2y * qy + e2z * qz) * inverse;
+  return distance >= 0 ? distance : -1;
 }

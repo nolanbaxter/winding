@@ -101,8 +101,15 @@ export class Winding {
    *
    * `source` is a URL string, an ArrayBuffer, or a Uint8Array. This is the only
    * slow call in the API, which is exactly where a progress indicator belongs.
+   *
+   * `retainGeometry` keeps each primitive's positions and indices on the CPU
+   * after upload, which is what Scene.raycast needs to answer with triangles
+   * instead of bounding boxes. Off by default: it costs 12 bytes per vertex
+   * plus 4 per index on the JS heap for as long as the asset lives, and most
+   * scenes never pick.
    */
   async load(source, options = {}) {
+    const { retainGeometry = false } = options;
     let bytes = source;
     let baseURL = options.baseURL;
 
@@ -140,6 +147,11 @@ export class Winding {
         }),
         indexCount: primitive.indexCount,
         bounds: primitive.bounds,
+        // Only when asked. Scene.raycast tests triangles for primitives that have
+        // these and falls back to the bounding box for those that do not, so the
+        // flag buys precision with memory and nothing else changes.
+        positions: retainGeometry ? primitive.positions : undefined,
+        indices: retainGeometry ? primitive.indices : undefined,
         materialId: primitive.material >= 0
           ? materialIds[primitive.material]
           : this._defaultMaterial(),

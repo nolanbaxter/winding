@@ -21,6 +21,7 @@ import {
   mat4Invert, mat4LookAt, mat4NormalMatrix, mat4PerspectiveReverseZInfinite,
 } from '../src/core/math/mat4.js';
 
+import { rayTriangleDistance } from '../src/core/math/aabb.js';
 import { assertFinite } from '../src/core/assert.js';
 import { HandleAllocator, NULL_HANDLE, handleIndex } from '../src/core/handle.js';
 import { Clock } from '../src/core/time.js';
@@ -569,6 +570,64 @@ test('a backwards clock does not drain the accumulator', () => {
   c.begin(5);
   assert.equal(c.realDelta, 0);
   assert.ok(c.accumulator >= 0);
+});
+
+// --------------------------------------------------------- ray vs triangle
+
+console.log('\nrayTriangleDistance');
+
+// A triangle in the z = 0 plane, counter-clockwise seen from +Z.
+const TRI = new Float32Array([
+  0, 0, 0,
+  1, 0, 0,
+  0, 1, 0,
+]);
+
+function shoot(ox, oy, oz, dx, dy, dz) {
+  return rayTriangleDistance([ox, oy, oz], [dx, dy, dz], TRI, 0, 3, 6);
+}
+
+test('a ray through the interior reports the distance to the plane', () => {
+  assert.equal(shoot(0.25, 0.25, 5, 0, 0, -1), 5);
+});
+
+test('a hit is found from either side, because picking does not cull', () => {
+  assert.equal(shoot(0.25, 0.25, -5, 0, 0, 1), 5);
+});
+
+test('the barycentric bounds reject the corner outside the hypotenuse', () => {
+  // (0.9, 0.9) is inside the triangle's bounding box and outside the triangle:
+  // u + v = 1.8 > 1. This is the case a box-only test gets wrong.
+  assert.equal(shoot(0.9, 0.9, 5, 0, 0, -1), -1);
+  assert.equal(shoot(-0.1, 0.5, 5, 0, 0, -1), -1, 'u < 0');
+  assert.equal(shoot(0.5, -0.1, 5, 0, 0, -1), -1, 'v < 0');
+});
+
+test('an edge and a vertex count as hits', () => {
+  assert.equal(shoot(0.5, 0, 5, 0, 0, -1), 5, 'on the v = 0 edge');
+  assert.equal(shoot(0, 0, 5, 0, 0, -1), 5, 'on the first vertex');
+});
+
+test('a triangle behind the origin is a miss, not a negative distance', () => {
+  assert.equal(shoot(0.25, 0.25, 5, 0, 0, 1), -1);
+});
+
+test('a ray parallel to the plane misses without special-casing', () => {
+  // det is exactly 0 here, so the barycentrics come out non-finite and every
+  // range check fails. The miss falls out of IEEE rather than out of a branch.
+  assert.equal(shoot(0.25, 0.25, 5, 1, 0, 0), -1);
+});
+
+test('a degenerate triangle cannot be hit', () => {
+  const flat = new Float32Array([0, 0, 0, 1, 0, 0, 2, 0, 0]);
+  assert.equal(rayTriangleDistance([0.5, 0, 5], [0, 0, -1], flat, 0, 3, 6), -1);
+});
+
+test('distance is in units of the direction, not of world length', () => {
+  // The narrow phase depends on this: it hands in a direction transformed into
+  // local space WITHOUT renormalizing, so that t stays comparable to the
+  // world-space box distances. Halving the direction doubles t.
+  assert.equal(shoot(0.25, 0.25, 5, 0, 0, -0.5), 10);
 });
 
 console.log(`\n${passed} checks passed\n`);

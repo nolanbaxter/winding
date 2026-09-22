@@ -14,9 +14,10 @@ import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
 import { TransformStore } from './transform.js';
 import { Node } from './node.js';
 import { updateWorldBounds } from './bounds.js';
-import { aabbRayDistance } from '../core/math/aabb.js';
+import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
-import { vec3Create } from '../core/math/vec3.js';
+import { vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
+import { mat4Create, mat4Copy, mat4Invert } from '../core/math/mat4.js';
 import { grownCapacity, growArray } from '../core/grow.js';
 
 const DEFAULT_CAPACITY = 4096;
@@ -348,10 +349,16 @@ export class Scene {
   /**
    * The nearest renderable a ray hits, or null.
    *
-   * Tests world-space bounding boxes, not triangles. A click in the empty
-   * corner of a box counts as a hit, and a thin diagonal object has a box far
-   * larger than itself. Exact hits need the mesh kept on the CPU after upload,
-   * which it deliberately is not -- so this is the broad phase, standing alone.
+   * Two phases. Every world bounding box the ray enters is collected and sorted
+   * by entry distance, then walked near to far; a primitive loaded with
+   * `retainGeometry` is tested triangle by triangle, and one loaded without it
+   * is taken at its box distance because that is the only answer available. The
+   * walk stops as soon as the next box starts further away than the best hit so
+   * far, which is what keeps an exact test off geometry that cannot win.
+   *
+   * Mixing the two in one scene is allowed and means what it looks like: an
+   * un-retained object can shadow a retained one, because its box is all this
+   * knows about it.
    *
    * Composes transforms and refreshes bounds first, because the alternative is
    * an API where the answer silently depends on whether you happened to render
@@ -375,16 +382,34 @@ export class Scene {
       this.transforms.world, this.renderableMatrixSlot, this.transforms.moved,
     );
 
-    let bestDistance = maxDistance;
-    let best = -1;
+    const candidates = [];
 
     for (let i = 0; i < this.renderableCount; i++) {
       const distance = aabbRayDistance(this.worldMin, this.worldMax, origin, direction, i * 3);
       // Not `>= 0`: a miss is -1, and a hit at exactly 0 means the origin is
       // already inside the box, which is a hit.
+      if (distance < 0 || distance >= maxDistance) continue;
+      candidates.push({ renderable: i, distance });
+    }
+    candidates.sort(byDistance);
+
+    let bestDistance = maxDistance;
+    let best = -1;
+
+    for (const candidate of candidates) {
+      if (candidate.distance >= bestDistance) break;
+
+      const primitive = this.renderablePrimitive[candidate.renderable];
+      if (primitive.positions === undefined || primitive.indices === undefined) {
+        best = candidate.renderable;
+        bestDistance = candidate.distance;
+        continue;
+      }
+
+      const distance = this._triangleDistance(candidate.renderable, primitive, origin, direction);
       if (distance < 0 || distance >= bestDistance) continue;
       bestDistance = distance;
-      best = i;
+      best = candidate.renderable;
     }
 
     if (best < 0) return null;
@@ -393,6 +418,41 @@ export class Scene {
       renderable: best,
       distance: bestDistance,
     };
+  }
+
+  /**
+   * Nearest triangle of one renderable along a ray, or -1.
+   *
+   * The ray is pushed into local space rather than the triangles into world
+   * space: one matrix inverse against however many vertices the primitive has.
+   *
+   * The transformed direction is deliberately left un-normalized. `M` is
+   * linear, so `M(o + t*d)` and `o + t*d` share the same `t`, and the distance
+   * comes back on the same scale as the box distances it is compared against.
+   * Normalizing here would silently rescale it by the object's scale factor.
+   */
+  _triangleDistance(renderable, primitive, origin, direction) {
+    const slot = this.renderableMatrixSlot[renderable];
+    mat4Copy(PICK_WORLD, this.transforms.world, 0, slot * 16);
+    // A scale of zero on any axis collapses the mesh to a plane or a point.
+    // There is nothing to hit, and inverting would divide by zero.
+    if (mat4Invert(PICK_INVERSE, PICK_WORLD) === null) return -1;
+
+    vec3TransformMat4(LOCAL_ORIGIN, origin, PICK_INVERSE);
+    vec3TransformMat4Dir(LOCAL_DIRECTION, direction, PICK_INVERSE);
+
+    const { positions, indices } = primitive;
+    let nearest = -1;
+
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+      const distance = rayTriangleDistance(
+        LOCAL_ORIGIN, LOCAL_DIRECTION, positions,
+        indices[i] * 3, indices[i + 1] * 3, indices[i + 2] * 3,
+      );
+      if (distance < 0) continue;
+      if (nearest < 0 || distance < nearest) nearest = distance;
+    }
+    return nearest;
   }
 
   /**
@@ -411,6 +471,16 @@ export class Scene {
 // read before the next call.
 const PICK_ORIGIN = vec3Create();
 const PICK_DIRECTION = vec3Create();
+
+/** Scratch for the narrow phase: the ray, pushed into one renderable's local space. */
+const PICK_WORLD = mat4Create();
+const PICK_INVERSE = mat4Create();
+const LOCAL_ORIGIN = vec3Create();
+const LOCAL_DIRECTION = vec3Create();
+
+function byDistance(a, b) {
+  return a.distance - b.distance;
+}
 
 /** positionRadius, colorIntensity, directionCone, coneFalloff -- four vec4s. */
 export const LIGHT_FLOATS = 16;

@@ -399,4 +399,119 @@ test('picking through the camera finds the box under the cursor', () => {
   assert.equal(scene.pick(camera, 0, 0, 100, 100), null, 'the far corner should miss');
 });
 
+// ------------------------------------------------- triangle-exact picking
+
+console.log('\npicking against triangles');
+
+/**
+ * One renderable whose bounding box is the unit cube but whose geometry is a
+ * single small quad at its centre. Every ray that enters the box away from the
+ * middle is a box hit and a triangle miss, which is the whole difference.
+ */
+function retainedScene({ position = [0, 0, -5], scale } = {}) {
+  const scene = new Scene({ capacity: 8 });
+  const entity = scene.entities.alloc();
+  scene.transforms.add(entity, { position, scale });
+  scene._addRenderable(entity, {
+    indexCount: 6,
+    materialId: 0,
+    bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+    positions: new Float32Array([
+      -0.2, -0.2, 0,
+      0.2, -0.2, 0,
+      0.2, 0.2, 0,
+      -0.2, 0.2, 0,
+    ]),
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+  });
+  return { scene, entity };
+}
+
+test('a ray through the geometry hits, and reports the distance to it', () => {
+  const { scene, entity } = retainedScene();
+  const hit = scene.raycast(vec3Create(0, 0, 0), vec3Create(0, 0, -1));
+  assert.ok(hit, 'straight down the middle');
+  assert.equal(hit.node.entity, entity);
+  // The box front face is at z = -4.5; the quad is at z = -5. Reporting 4.5
+  // would mean the broad phase answered.
+  close(hit.distance, 5, EPS, 'distance is to the triangle, not to the box');
+});
+
+test('the empty corner of the box is a miss once geometry is retained', () => {
+  const { scene } = retainedScene();
+  // Inside the box, outside the 0.4 x 0.4 quad.
+  assert.equal(scene.raycast(vec3Create(0.4, 0.4, 0), vec3Create(0, 0, -1)), null);
+});
+
+test('the same corner still hits when geometry was not retained', () => {
+  // The contrast that makes the option mean something. Same box, same ray.
+  const { scene } = pickScene([[0, 0, -5]]);
+  assert.ok(scene.raycast(vec3Create(0.4, 0.4, 0), vec3Create(0, 0, -1)));
+});
+
+test('a scaled instance reports its distance in world units', () => {
+  // The narrow phase inverts the model matrix and does NOT renormalize the
+  // transformed direction. If it did, this would come back as 2.5 -- the
+  // distance measured in the object's own halved local units.
+  const { scene } = retainedScene({ position: [0, 0, -5], scale: [2, 2, 2] });
+  const hit = scene.raycast(vec3Create(0, 0, 0), vec3Create(0, 0, -1));
+  assert.ok(hit, 'a doubled quad is still under the ray');
+  close(hit.distance, 5, EPS, 'world units, not local');
+});
+
+test('a scaled instance widens what it can be hit by', () => {
+  // The quad spans +/-0.2 locally, so at scale 2 it reaches 0.4 and a ray that
+  // misses the unscaled one now connects. Proves the ray really is being
+  // pushed through the transform rather than tested in local space as-is.
+  assert.equal(
+    retainedScene().scene.raycast(vec3Create(0.3, 0, 0), vec3Create(0, 0, -1)), null,
+    'misses at scale 1',
+  );
+  assert.ok(
+    retainedScene({ scale: [2, 2, 2] }).scene.raycast(vec3Create(0.3, 0, 0), vec3Create(0, 0, -1)),
+    'hits at scale 2',
+  );
+});
+
+test('a zero scale collapses the mesh and cannot be hit', () => {
+  // The model matrix is singular, so there is no inverse and nothing to test
+  // against. Returning a box hit here would be reporting geometry that has no
+  // extent at all.
+  const { scene } = retainedScene({ scale: [0, 0, 0] });
+  assert.equal(scene.raycast(vec3Create(0, 0, 0), vec3Create(0, 0, -1)), null);
+});
+
+test('a nearer plain box wins over a further exact hit', () => {
+  // Mixed retention in one scene. The un-retained box at -2 is in front of the
+  // quad at -5, and the near-to-far walk must stop at it.
+  const { scene } = retainedScene();
+  const blocker = scene.entities.alloc();
+  scene.transforms.add(blocker, { position: [0, 0, -2] });
+  scene._addRenderable(blocker, {
+    indexCount: 36, materialId: 0,
+    bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+  });
+
+  const hit = scene.raycast(vec3Create(0, 0, 0), vec3Create(0, 0, -1));
+  assert.ok(hit);
+  assert.equal(hit.node.entity, blocker);
+  close(hit.distance, 1.5, EPS, 'the blocker front face');
+});
+
+test('a further exact hit wins when the nearer box is a triangle miss', () => {
+  // The reverse: the retained object is FIRST in the list and nearer by box,
+  // but the ray slips past its geometry, so the plain box behind it answers.
+  const { scene } = retainedScene({ position: [0, 0, -2] });
+  const behind = scene.entities.alloc();
+  scene.transforms.add(behind, { position: [0, 0, -5] });
+  scene._addRenderable(behind, {
+    indexCount: 36, materialId: 0,
+    bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+  });
+
+  const hit = scene.raycast(vec3Create(0.4, 0.4, 0), vec3Create(0, 0, -1));
+  assert.ok(hit, 'the box behind is still there');
+  assert.equal(hit.node.entity, behind);
+});
+
 console.log(`\n${passed} checks passed\n`);
