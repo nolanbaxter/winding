@@ -60,6 +60,14 @@ export function compileShaderSync(device, code, label = 'shader') {
       shaderErrors.push(problem);
       console.error(problem);
     }
+  }).catch((error) => {
+    // A rejection here is a lost device mid-load, which is the one case where
+    // the diagnostic matters most. Without a catch it became an unhandled
+    // rejection and shaderErrors stayed empty -- which the GPU suite reads as
+    // clean, so a compile failure could be reported as a pass.
+    const problem = `${label}: compilation info unavailable (${error?.message ?? error})`;
+    shaderErrors.push(problem);
+    console.error(problem);
   });
 
   return shader;

@@ -1,9 +1,10 @@
 // Quaternions -- the only rotation representation the engine stores.
 //
-// Euler angles are a UI format. Storing them means owning gimbal
-// lock and broken interpolation forever, so they are converted at the edge and
-// never enter the core. There is deliberately no quatFromEuler here; add one
-// beside the editor/controller code that needs it, not in the math layer.
+// Euler angles are a UI format. Storing them means owning gimbal lock and
+// broken interpolation forever, so they are converted at the EDGE and never
+// enter the core. quatFromEuler below is that edge and the only one: it exists
+// so a caller can hand the engine the angles a control panel produced, and
+// nothing downstream of it ever sees an Euler triple again.
 //
 // Layout is [x, y, z, w] -- vector part first, scalar last. This matches glTF,
 // WGSL's vec4, and glMatrix. Some textbooks use [w, x, y, z]; mixing the two

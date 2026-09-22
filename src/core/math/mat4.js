@@ -285,10 +285,6 @@ const decomposeScratch = new Float32Array(16);
  * the outputs are left untouched.
  */
 export function mat4Decompose(outPos, outRot, outScale, m, mOff = 0) {
-  outPos[0] = m[mOff + 12];
-  outPos[1] = m[mOff + 13];
-  outPos[2] = m[mOff + 14];
-
   // Scale is the length of each basis column.
   let sx = Math.hypot(m[mOff], m[mOff + 1], m[mOff + 2]);
   const sy = Math.hypot(m[mOff + 4], m[mOff + 5], m[mOff + 6]);
@@ -299,7 +295,15 @@ export function mat4Decompose(outPos, outRot, outScale, m, mOff = 0) {
   // Without this the rotation extraction below silently returns garbage.
   if (determinant3(m, mOff) < 0) sx = -sx;
 
+  // Before any output is written. This used to run after the translation had
+  // already been copied out, so a caller trusting the documented contract kept
+  // its previous rotation and scale and got the degenerate matrix's position --
+  // a transform mixed from two different matrices, which is worse than either.
   if (sx === 0 || sy === 0 || sz === 0) return false;
+
+  outPos[0] = m[mOff + 12];
+  outPos[1] = m[mOff + 13];
+  outPos[2] = m[mOff + 14];
 
   // Strip scale, leaving a pure rotation for the quaternion extraction.
   const s = decomposeScratch;

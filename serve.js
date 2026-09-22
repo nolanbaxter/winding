@@ -8,7 +8,7 @@
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, sep } from 'node:path';
 
 const ROOT = import.meta.dirname;
 const PORT = Number(process.argv[2] ?? 8080);
@@ -27,9 +27,11 @@ createServer(async (req, res) => {
     if (path.endsWith('/')) path += 'index.html';
 
     // Reject traversal before touching the filesystem: normalize resolves the
-    // '..' segments, then we confirm the result is still inside ROOT.
+    // '..' segments, then we confirm the result is still inside ROOT. The
+    // separator is part of the test -- without it a sibling directory whose
+    // name merely EXTENDS the root's, '3D conceptElsewhere', passes.
     const full = normalize(join(ROOT, path));
-    if (!full.startsWith(ROOT)) {
+    if (full !== ROOT && !full.startsWith(ROOT + sep)) {
       res.writeHead(403).end('forbidden');
       return;
     }

@@ -1,13 +1,20 @@
 // Bind group frequency model.
 //
 // WebGPU gives you 4 bind groups by default (maxBindGroups). That is not a
-// limit to work around -- it maps exactly onto the four rates at which data
-// actually changes, so we spend one group on each:
+// limit to work around -- it maps onto the rates at which data actually
+// changes, so we spend one group on each:
 //
-//   0  FRAME     camera matrices, time, light clusters   -- rebound once a frame
-//   1  PASS      shadow cascade matrices, target info    -- rebound per pass
+//   0  FRAME     camera matrices, time, light clusters,
+//                shadow cascade matrices                 -- rebound once a frame
+//   1  --        reserved, currently unused
 //   2  MATERIAL  textures, samplers, material params     -- rebound per material
 //   3  DRAW      model matrix, via dynamic offset        -- rebound per object
+//
+// Slot 1 was a PASS rate, for anything that changes between passes but not
+// within one. Nothing turned out to need it: the shadow pass rebinds nothing
+// of its own, because the cascade matrices are uniform across the frame and
+// live in FRAME with everything else at that rate. The slot is left empty
+// rather than renumbered, since the numbering is what the shaders name.
 //
 // Cost is rebinding, so the cheap groups sit at the top and the expensive one
 // at the bottom. This ordering is why the draw list sorts by material: crossing
@@ -16,11 +23,11 @@
 // A pipeline that skips a group still has to declare it, because a pipeline
 // layout is a dense array. Unused slots get an empty layout and an empty bind
 // group, both shared process-wide -- see emptyLayoutFor().
-
 import { DEBUG, assert } from '../core/assert.js';
 
 export const GROUP_FRAME = 0;
-export const GROUP_PASS = 1;
+/** Reserved. Nothing binds at this rate; see the header. */
+export const GROUP_RESERVED = 1;
 export const GROUP_MATERIAL = 2;
 export const GROUP_DRAW = 3;
 export const GROUP_COUNT = 4;
@@ -56,6 +63,18 @@ let nextLayoutId = 1;
 export function createPipelineLayout(device, groups, label) {
   const { layout: emptyLayout, group: emptyGroup } = emptyLayoutFor(device);
 
+  // Unconditional, and before the layouts are built. The loop below only ever
+  // reads slots 0..GROUP_COUNT-1, so a group handed in at index 4 was silently
+  // dropped in a release build and the pipeline was created with an empty
+  // layout in its place -- surfacing much later as a WebGPU validation error
+  // naming the wrong thing. A tier-2 caller supplying its own groups is exactly
+  // who would hit it.
+  for (const key of Object.keys(groups)) {
+    if (!(Number(key) < GROUP_COUNT)) {
+      throw new Error(`createPipelineLayout: bind group ${key} exceeds the ${GROUP_COUNT} WebGPU guarantees`);
+    }
+  }
+
   const layouts = [];
   const emptySlots = [];
   for (let i = 0; i < GROUP_COUNT; i++) {
@@ -64,12 +83,6 @@ export function createPipelineLayout(device, groups, label) {
     } else {
       layouts.push(emptyLayout);
       emptySlots.push(i);
-    }
-  }
-
-  if (DEBUG) {
-    for (const key of Object.keys(groups)) {
-      assert(Number(key) < GROUP_COUNT, `bind group ${key} exceeds GROUP_COUNT`);
     }
   }
 

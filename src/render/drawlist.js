@@ -9,14 +9,18 @@
 // sort itself needs no policy:
 //
 //   OPAQUE        [ pipeline:10 | material:12 | depth:10 ]
-//   TRANSPARENT   [ depth:16    | pipeline:8  | material:8 ]
+//   TRANSPARENT   [ depth:16    | pipeline:4  | material:12 ]
 //
-// Opaque puts state first because state changes are the expensive thing, and
-// sorts near-to-far within a state bucket so the depth test rejects shaded
-// pixels early. Transparent CANNOT reorder by state -- blending is
-// order-dependent -- so depth takes the high bits and state efficiency gets
-// whatever is left. That difference is forced by the hardware, not chosen.
-
+// Opaque puts state first because state changes are the expensive thing.
+// Transparent CANNOT reorder by state -- blending is order-dependent -- so
+// depth takes the high bits and state efficiency gets whatever is left. That
+// difference is forced by the hardware, not chosen.
+//
+// The opaque key's depth field is real and is always zero. What gets sorted
+// there is BATCHES, and a batch of instances has no single depth; the GPU
+// decides which of them survive and the CPU never learns the answer. Sorting
+// near-to-far for early-Z would need a depth prepass, not a different key.
+// The field is kept because the layout is what makes the key 32 bits wide.
 import { DEBUG, assert } from '../core/assert.js';
 import { grownCapacity, growArray } from '../core/grow.js';
 
@@ -104,11 +108,6 @@ export function transparentSortKey(pipelineId, materialId, depthBucket) {
  *
  * `near` is the camera's near distance; `distance` is view-space depth.
  */
-export function opaqueDepthBucket(near, distance) {
-  // near -> 0 (drawn first), infinity -> max.
-  return Math.round((1 - reverseZDepth(near, distance)) * OPAQUE_DEPTH_MAX);
-}
-
 export function transparentDepthBucket(near, distance) {
   // far -> 0 (drawn first), near -> max.
   return Math.round(reverseZDepth(near, distance) * TRANSPARENT_DEPTH_MAX);

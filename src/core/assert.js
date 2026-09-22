@@ -1,10 +1,14 @@
 // Development-only validation. Nothing fails silently.
 //
-// Every call site guards with `if (DEBUG)`. Build with `--define:DEBUG=false`
-// and any minifier removes the dead branch entirely.
+// Almost every call site guards with `if (DEBUG)`. Build with
+// `--define:DEBUG=false` and any minifier removes the dead branch entirely.
 //
-// Errors that must fire in release too (capacity exhaustion, allocation
-// failure) throw directly instead of going through here.
+// Two things do NOT go through that guard. Errors that must fire in release --
+// capacity exhaustion, allocation failure, a camera near of zero -- throw
+// directly instead of coming here at all. And a trust boundary, where the
+// input came from outside the engine, calls assertFinite unguarded on purpose:
+// Scene.raycast does this, because a NaN ray is not merely wrong, it reports a
+// hit at distance zero on whatever it looks at first.
 
 export const DEBUG = true;
 

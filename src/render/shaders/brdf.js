@@ -124,8 +124,3 @@ fn skyRadiance(dir : vec3<f32>) -> vec3<f32> {
 }
 `;
 
-/** The same sun direction the sky shader uses, for the analytic key light. */
-export const SUN_DIRECTION = (() => {
-  const length = Math.hypot(0.35, 0.55, 0.45);
-  return Float32Array.from([0.35 / length, 0.55 / length, 0.45 / length]);
-})();

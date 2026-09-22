@@ -15,7 +15,7 @@ import { vec3Create } from '../src/core/math/vec3.js';
 import { Camera } from '../src/scene/camera.js';
 import {
   DrawList, opaqueSortKey, transparentSortKey,
-  opaqueDepthBucket, transparentDepthBucket,
+  transparentDepthBucket,
   OPAQUE_PIPELINE_BITS, OPAQUE_MATERIAL_BITS, OPAQUE_DEPTH_BITS,
   TRANSPARENT_PIPELINE_BITS, TRANSPARENT_MATERIAL_BITS, TRANSPARENT_DEPTH_BITS,
 } from '../src/render/drawlist.js';
@@ -287,16 +287,19 @@ test('an id too large for its field is caught, not aliased', () => {
   assert.throws(() => opaqueSortKey(0, 1 << OPAQUE_MATERIAL_BITS, 0), /material id/);
 });
 
-test('depth buckets derive from the reverse-Z curve, near-first for opaque', () => {
+test('depth buckets derive from the reverse-Z curve, far-first for blending', () => {
+  // Only the transparent bucket exists now. The opaque key's depth field is
+  // always zero, because a BATCH has no single depth -- so the function that
+  // would have filled it had no caller and is gone.
   const near = 0.1;
-  let previous = -1;
+  let previous = Infinity;
   for (const distance of [0.1, 1, 10, 1000, 1e6]) {
-    const bucket = opaqueDepthBucket(near, distance);
-    assert.ok(bucket >= previous, `not monotonic at ${distance}`);
-    assert.ok(bucket >= 0 && bucket <= 1023, `out of range at ${distance}: ${bucket}`);
+    const bucket = transparentDepthBucket(near, distance);
+    assert.ok(bucket <= previous, `not monotonic at ${distance}`);
+    assert.ok(bucket >= 0 && bucket <= 65535, `out of range at ${distance}: ${bucket}`);
     previous = bucket;
   }
-  assert.equal(opaqueDepthBucket(near, near), 0, 'at the near plane, sorted first');
+  assert.equal(transparentDepthBucket(near, near), 65535, 'at the near plane, drawn last');
 });
 
 test('transparent buckets run the other way, far-first', () => {
@@ -307,7 +310,7 @@ test('transparent buckets run the other way, far-first', () => {
 
 test('degenerate distances do not produce NaN buckets', () => {
   for (const distance of [0, -5, NaN]) {
-    const bucket = opaqueDepthBucket(0.1, distance);
+    const bucket = transparentDepthBucket(0.1, distance);
     assert.ok(Number.isInteger(bucket) && bucket >= 0, `distance ${distance} gave ${bucket}`);
   }
 });
@@ -419,7 +422,9 @@ test('a realistic list comes out grouped by pipeline then material', () => {
     { pipeline: 2, material: 5, distance: 2 },
   ];
   items.forEach((item, i) => {
-    list.push(opaqueSortKey(item.pipeline, item.material, opaqueDepthBucket(0.1, item.distance)), i);
+    // Depth is 0 for every batch in the real renderer; the sort under test is
+    // the state grouping, so vary it here only to prove it is the weakest field.
+    list.push(opaqueSortKey(item.pipeline, item.material, item.distance | 0), i);
   });
   list.sort();
 

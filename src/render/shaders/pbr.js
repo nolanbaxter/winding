@@ -399,5 +399,3 @@ fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) 
 
 /** Frame uniform size in bytes. Matches the struct above. */
 export const FRAME_BYTES = 448;
-/** Per-draw uniform size: mat4 model + mat3x3 normal matrix (48 bytes). */
-export const DRAW_BYTES = 112;
