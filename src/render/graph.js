@@ -58,6 +58,7 @@ export class RenderGraph {
     // Physical textures, cached across frames by descriptor. The aliasing pass
     // hands these out; without the cache every frame would recreate them.
     this._pool = new Map();
+    this._frame = 0;
 
     // Scratch for the sort, sized from passCount at compile() rather than up
     // front, for the same reason.
@@ -71,7 +72,7 @@ export class RenderGraph {
     this._edgeTo = new Uint32Array(64);
     this._edgeCount = 0;
 
-    this.stats = { passes: 0, executed: 0, culled: 0, edges: 0, transient: 0, aliased: 0 };
+    this.stats = { passes: 0, executed: 0, culled: 0, edges: 0, transient: 0, aliased: 0, evicted: 0 };
     this._compiled = false;
   }
 
@@ -81,13 +82,43 @@ export class RenderGraph {
     this.passCount = 0;
     this.resourceCount = 0;
     this._compiled = false;
-    // _pool maps a descriptor key to an ARRAY of entries, so this needs both
-    // loops -- setting inUse on the array itself silently pools nothing and
-    // every frame allocates fresh textures.
-    for (const entries of this._pool.values()) {
-      for (const entry of entries) entry.inUse = 0;
-    }
+    this._frame++;
+    this._evictUnused();
     return this;
+  }
+
+  /**
+   * Destroy pooled textures the last frame did not ask for.
+   *
+   * Without this the pool only ever grew. Its key is the descriptor, so every
+   * distinct surface size a window passes through leaves a whole frame's worth
+   * of transients behind -- and a window drag passes through hundreds. Measured
+   * over 120 widths with only the HDR target declared: 120 textures alive,
+   * 1.84 GB, none of it reachable again.
+   *
+   * The rule is derived rather than chosen: a frame declares what it needs, so
+   * a descriptor it did not declare is one it is not using. The grace of one
+   * frame is what keeps a pass that comes and goes -- dead-pass elimination can
+   * drop the bloom chain -- from thrashing on the boundary.
+   *
+   * destroy() is safe on a texture the GPU has not finished with; WebGPU defers
+   * the memory until submitted work referencing it completes.
+   */
+  _evictUnused() {
+    for (const [key, entries] of this._pool) {
+      let kept = 0;
+      for (const entry of entries) {
+        if (entry.lastFrame >= this._frame - 2) {
+          entries[kept++] = entry;
+          entry.inUse = 0;
+          continue;
+        }
+        entry.texture.destroy();
+        this.stats.evicted++;
+      }
+      entries.length = kept;
+      if (kept === 0) this._pool.delete(key);
+    }
   }
 
   /**
@@ -524,6 +555,7 @@ export class RenderGraph {
     for (const entry of entries) {
       if (entry.inUse) continue;
       entry.inUse = 1;
+      entry.lastFrame = this._frame;
       return entry;
     }
 
@@ -535,7 +567,7 @@ export class RenderGraph {
       usage: d.usage,
       sampleCount: d.sampleCount,
     });
-    const entry = { texture, view: texture.createView(), inUse: 1 };
+    const entry = { texture, view: texture.createView(), inUse: 1, lastFrame: this._frame };
     entries.push(entry);
     return entry;
   }

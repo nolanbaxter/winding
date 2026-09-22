@@ -230,6 +230,7 @@ export class PostStack {
     // changes, so caching by view rather than by pass index is what keeps this
     // correct without rebuilding every frame.
     this._bindGroups = new Map();
+    this._frame = 0;
     this._slot = 0;
     this.levels = 0;
 
@@ -312,6 +313,8 @@ export class PostStack {
    * swap chain. Everything between is a graph transient.
    */
   addPasses(graph, { sceneColor, surface, width, height, exposure }) {
+    this._frame++;
+    this._evictBindGroups();
     const levels = this.levelCountFor(width, height);
     this.levels = levels;
     this._offsets = [];
@@ -412,23 +415,44 @@ export class PostStack {
     (this._slotSources ??= [])[slot] = { primary, secondary };
   }
 
+  /**
+   * The bind group for one pair of source views, created once and cached.
+   *
+   * Keyed by the VIEWS rather than by pass index, because a graph transient can
+   * be handed a different physical texture when the aliasing assignment
+   * changes. Entries are dropped once a frame stops asking for them: the views
+   * they name belong to pooled textures the graph now destroys when a frame
+   * stops declaring them, so a cache that only grew would both leak and, worse,
+   * eventually hand the encoder a bind group over a destroyed texture.
+   */
   _bindGroupFor(primaryView, secondaryView) {
     const key = `${viewId(primaryView)}:${viewId(secondaryView)}`;
-    let bindGroup = this._bindGroups.get(key);
-    if (!bindGroup) {
-      bindGroup = this.rhi.device.createBindGroup({
-        label: `post:${key}`,
-        layout: this.layout,
-        entries: [
-          { binding: 0, resource: { buffer: this.paramsBuffer, size: PARAMS_BYTES } },
-          { binding: 1, resource: primaryView },
-          { binding: 2, resource: secondaryView },
-          { binding: 3, resource: this.sampler },
-        ],
-      });
-      this._bindGroups.set(key, bindGroup);
+    let entry = this._bindGroups.get(key);
+    if (!entry) {
+      entry = {
+        bindGroup: this.rhi.device.createBindGroup({
+          label: `post:${key}`,
+          layout: this.layout,
+          entries: [
+            { binding: 0, resource: { buffer: this.paramsBuffer, size: PARAMS_BYTES } },
+            { binding: 1, resource: primaryView },
+            { binding: 2, resource: secondaryView },
+            { binding: 3, resource: this.sampler },
+          ],
+        }),
+        lastFrame: 0,
+      };
+      this._bindGroups.set(key, entry);
     }
-    return bindGroup;
+    entry.lastFrame = this._frame;
+    return entry.bindGroup;
+  }
+
+  /** Drop bind groups naming views the last frame did not use. */
+  _evictBindGroups() {
+    for (const [key, entry] of this._bindGroups) {
+      if (entry.lastFrame < this._frame - 2) this._bindGroups.delete(key);
+    }
   }
 
   _draw(pass, pipeline, slot) {
