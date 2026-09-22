@@ -33,7 +33,9 @@ import { SkinPalette } from './skin.js';
 import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES } from './gpudriven.js';
-import { updateWorldBounds, unionWorldBounds, farthestViewDepth } from '../scene/bounds.js';
+import {
+  updateWorldBounds, unionWorldBounds, farthestViewDepth, updateSkinBounds, applySkinBounds,
+} from '../scene/bounds.js';
 import { HierarchicalDepth } from './hzb.js';
 import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 
@@ -374,6 +376,13 @@ export class Renderer {
       count, scene.localMin, scene.localMax, scene.worldMin, scene.worldMax,
       scene.transforms.world, scene.renderableMatrixSlot, scene.transforms.moved,
     );
+
+    // Skinned renderables get their bounds replaced: the pass above gave them
+    // a bind-pose box transformed by a model matrix the vertices do not follow.
+    if (scene.skins.length > 0) {
+      updateSkinBounds(scene.skins, scene.transforms.world);
+      applySkinBounds(count, scene.renderableSkin, scene.skins, scene.worldMin, scene.worldMax);
+    }
 
     // The scene's own extent, which is what the shadow and cluster ranges are
     // derived from. Recomputed only when something moved or the contents

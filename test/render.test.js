@@ -27,7 +27,11 @@ import {
   OPAQUE_PIPELINE_BITS, OPAQUE_MATERIAL_BITS, OPAQUE_DEPTH_BITS,
   TRANSPARENT_PIPELINE_BITS, TRANSPARENT_MATERIAL_BITS, TRANSPARENT_DEPTH_BITS,
 } from '../src/render/drawlist.js';
-import { updateWorldBounds, unionWorldBounds, farthestViewDepth } from '../src/scene/bounds.js';
+import {
+  updateWorldBounds, unionWorldBounds, farthestViewDepth, updateSkinBounds, applySkinBounds,
+} from '../src/scene/bounds.js';
+import { jointInfluenceRadii } from '../src/scene/gltf/skin.js';
+import { handleIndex } from '../src/core/handle.js';
 import {
   variantKey, variantPipelineState, ALPHA_OPAQUE, ALPHA_MASK, ALPHA_BLEND,
 } from '../src/render/material.js';
@@ -902,6 +906,175 @@ test('no shader template contains a stray backtick', () => {
     assert.equal(source.includes('`'), false, `${name} contains a backtick`);
     assert.equal(source.includes('${'), false, `${name} has an uninterpolated placeholder`);
   }
+});
+
+// ------------------------------------------------------------ skinned bounds
+
+console.log('\nskinned bounds');
+
+/**
+ * Where the skinning actually puts each vertex, computed independently.
+ *
+ * The reference the bounds are checked against. Deliberately the long way --
+ * blend the matrices per vertex and transform -- so it shares no code with the
+ * thing under test.
+ */
+function skinnedVertices(scene, skinIndex, positions, jointIndices, jointWeights, vertexCount) {
+  const skin = scene.skins[skinIndex];
+  const world = scene.transforms.world;
+  const out = [];
+
+  for (let v = 0; v < vertexCount; v++) {
+    const p = v * 3;
+    const g = v * 4;
+    const m = new Float64Array(16);
+
+    for (let k = 0; k < 4; k++) {
+      const w = jointWeights[g + k];
+      if (w <= 0) continue;
+      const j = jointIndices[g + k];
+      const joint = new Float32Array(16);
+      mat4Multiply(joint, world, skin.inverseBind, 0, handleIndex(skin.joints[j]) * 16, j * 16);
+      for (let e = 0; e < 16; e++) m[e] += joint[e] * w;
+    }
+
+    const x = positions[p], y = positions[p + 1], z = positions[p + 2];
+    out.push([
+      m[0] * x + m[4] * y + m[8] * z + m[12],
+      m[1] * x + m[5] * y + m[9] * z + m[13],
+      m[2] * x + m[6] * y + m[10] * z + m[14],
+    ]);
+  }
+  return out;
+}
+
+/** A two-joint quad: bottom edge on joint 0, top edge on joint 1. */
+function riggedScene() {
+  const positions = Float32Array.from([-1, 0, 0, 1, 0, 0, -1, 2, 0, 1, 2, 0]);
+  const jointIndices = Uint32Array.from([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
+  const jointWeights = Float32Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+  const scene = new Scene({ capacity: 32 });
+  scene.add({
+    nodes: [
+      { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [1, 2], mesh: 0, skin: 0 },
+      { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [], mesh: -1, skin: -1 },
+      { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [], mesh: -1, skin: -1 },
+    ],
+    meshes: [{ primitives: [{
+      indexCount: 6, materialId: 0, skinned: true,
+      bounds: { min: [-1, 0, 0], max: [1, 2, 0] },
+      jointIndices, jointWeights,
+    }] }],
+    skins: [{
+      name: 'rig',
+      joints: Uint32Array.from([1, 2]),
+      inverseBind: Float32Array.from([...identity, ...identity]),
+      jointRadii: jointInfluenceRadii(
+        positions, jointIndices, jointWeights, 4,
+        Float32Array.from([...identity, ...identity]), 2,
+      ),
+    }],
+    roots: [0], animations: [],
+  });
+  return { scene, positions, jointIndices, jointWeights };
+}
+
+function refreshBounds(scene) {
+  scene.update();
+  updateWorldBounds(
+    scene.renderableCount, scene.localMin, scene.localMax, scene.worldMin, scene.worldMax,
+    scene.transforms.world, scene.renderableMatrixSlot, null,
+  );
+  updateSkinBounds(scene.skins, scene.transforms.world);
+  applySkinBounds(
+    scene.renderableCount, scene.renderableSkin, scene.skins, scene.worldMin, scene.worldMax,
+  );
+}
+
+/** Every skinned vertex must be inside the renderable's world box. */
+function assertContains(scene, rig, what) {
+  const verts = skinnedVertices(scene, 0, rig.positions, rig.jointIndices, rig.jointWeights, 4);
+  const min = scene.worldMin.subarray(0, 3);
+  const max = scene.worldMax.subarray(0, 3);
+  for (const [i, v] of verts.entries()) {
+    for (let a = 0; a < 3; a++) {
+      assert.ok(v[a] >= min[a] - EPS && v[a] <= max[a] + EPS,
+        `${what}: vertex ${i} axis ${a} is ${v[a].toFixed(3)}, outside [${min[a].toFixed(3)}, ${max[a].toFixed(3)}]`);
+    }
+  }
+  return verts;
+}
+
+test('the box contains every vertex in bind pose', () => {
+  const rig = riggedScene();
+  refreshBounds(rig.scene);
+  assertContains(rig.scene, rig, 'bind pose');
+});
+
+test('the box follows a joint, where a transformed static box would not', () => {
+  // THE test for this step. The mesh node never moves, so the model matrix is
+  // unchanged and updateWorldBounds writes the same bind-pose box it always
+  // does. Only recomputing from the joints catches the arm going up.
+  const rig = riggedScene();
+  refreshBounds(rig.scene);
+  const before = rig.scene.worldMax[1];
+
+  // Raise joint 1 by 4. Nothing about the mesh node changes.
+  const joint = rig.scene.skins[0].joints[1];
+  rig.scene.transforms.setPosition(joint, 0, 4, 0);
+  refreshBounds(rig.scene);
+
+  const verts = assertContains(rig.scene, rig, 'joint raised');
+  const highest = Math.max(...verts.map((v) => v[1]));
+  assert.ok(highest > before,
+    'the test pose must put a vertex outside the old box, or this proves nothing');
+  assert.ok(rig.scene.worldMax[1] >= highest - EPS, 'and the box grew to hold it');
+});
+
+test('the box shrinks back, rather than only ever growing', () => {
+  // An AABB that is re-derived can shrink; one that is re-transformed from its
+  // own previous value inflates forever. This is the union of spheres, so it
+  // tracks both ways.
+  const rig = riggedScene();
+  const joint = rig.scene.skins[0].joints[1];
+  rig.scene.transforms.setPosition(joint, 0, 20, 0);
+  refreshBounds(rig.scene);
+  const tall = rig.scene.worldMax[1];
+
+  rig.scene.transforms.setPosition(joint, 0, 0, 0);
+  refreshBounds(rig.scene);
+  assert.ok(rig.scene.worldMax[1] < tall, `box stayed at ${rig.scene.worldMax[1]}, was ${tall}`);
+  assertContains(rig.scene, rig, 'returned to bind pose');
+});
+
+test('the box holds up through rotation and a moved root', () => {
+  const rig = riggedScene();
+  const [hip, chest] = rig.scene.skins[0].joints;
+  const root = rig.scene.renderableEntity[0];
+
+  for (const [angle, y, rx] of [[0.3, 1, 0], [1.2, -2, 3], [2.9, 0.5, -4]]) {
+    const q = quatCreate();
+    quatSetAxisAngle(q, [0, 0, 1], angle);
+    rig.scene.transforms.setRotation(chest, q);
+    rig.scene.transforms.setPosition(chest, rx, y, 0);
+    rig.scene.transforms.setPosition(hip, 0, y * 0.5, 0);
+    rig.scene.transforms.setPosition(root, rx * 0.5, y, 0);
+    refreshBounds(rig.scene);
+    assertContains(rig.scene, rig, `angle ${angle}`);
+  }
+});
+
+test('picking sees the posed box, not the authored one', () => {
+  // raycast refreshes bounds itself, so a click must land on where a character
+  // is standing rather than where it was rigged.
+  const rig = riggedScene();
+  const joint = rig.scene.skins[0].joints[1];
+  rig.scene.transforms.setPosition(joint, 0, 30, 0);
+
+  const hit = rig.scene.raycast(vec3Create(0, 31, 10), vec3Create(0, 0, -1));
+  assert.ok(hit, 'a ray through the raised geometry must hit it');
 });
 
 console.log(`\n${passed} checks passed\n`);

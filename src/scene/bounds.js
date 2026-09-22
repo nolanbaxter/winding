@@ -6,6 +6,7 @@
 // the "you forgot to call update()" failure this engine does not allow.
 
 import { aabbTransform } from '../core/math/aabb.js';
+import { handleIndex } from '../core/handle.js';
 
 /**
  * Recompute world-space bounds for every renderable whose transform moved.
@@ -82,4 +83,82 @@ export function farthestViewDepth(view, min, max) {
     if (depth > farthest) farthest = depth;
   }
   return farthest;
+}
+
+/**
+ * World bounds for every skinned instance, from where its joints are now.
+ *
+ * The reason this exists at all: a skinned mesh's vertices move without its
+ * model matrix moving. Transforming its bind-pose box by that matrix -- which
+ * is what every other renderable does -- gives the box the character had when
+ * it was authored, so raising an arm puts geometry outside its own bounds. It
+ * then gets frustum-culled with the arm on screen, or occlusion-culled behind
+ * something it now reaches past. Nothing errors; geometry just goes missing at
+ * angles nobody tested.
+ *
+ * A skinned vertex is a weighted average of its per-joint positions, so it
+ * lies inside their convex hull, so a union of spheres -- one per joint, at
+ * that joint's current world position, sized by how far its influence reached
+ * in bind pose -- contains every vertex the skin can produce. Conservative by
+ * construction, and the cost is per JOINT rather than per vertex.
+ *
+ * Computed once per skin instance, not per renderable: every primitive a
+ * character is made of shares its skeleton and therefore its box.
+ */
+export function updateSkinBounds(skins, world) {
+  for (const skin of skins) {
+    const { joints, jointRadii, boundsMin, boundsMax } = skin;
+    let started = false;
+
+    for (let j = 0; j < joints.length; j++) {
+      const radius = jointRadii[j];
+      // Zero means no vertex is influenced by this joint, so where it is says
+      // nothing about where the mesh is.
+      if (!(radius > 0)) continue;
+
+      const t = handleIndex(joints[j]) * 16 + 12;
+      const x = world[t], y = world[t + 1], z = world[t + 2];
+
+      if (!started) {
+        boundsMin[0] = x - radius; boundsMin[1] = y - radius; boundsMin[2] = z - radius;
+        boundsMax[0] = x + radius; boundsMax[1] = y + radius; boundsMax[2] = z + radius;
+        started = true;
+        continue;
+      }
+      if (x - radius < boundsMin[0]) boundsMin[0] = x - radius;
+      if (y - radius < boundsMin[1]) boundsMin[1] = y - radius;
+      if (z - radius < boundsMin[2]) boundsMin[2] = z - radius;
+      if (x + radius > boundsMax[0]) boundsMax[0] = x + radius;
+      if (y + radius > boundsMax[1]) boundsMax[1] = y + radius;
+      if (z + radius > boundsMax[2]) boundsMax[2] = z + radius;
+    }
+    skin.hasBounds = started;
+  }
+}
+
+/**
+ * Copy each skinned renderable's bounds from the skin that drives it.
+ *
+ * Runs after updateWorldBounds, overwriting what it wrote: that pass has no
+ * way to know a renderable is skinned, and giving it one would put skinning
+ * into a file whose whole point is that it reads only scene columns.
+ */
+export function applySkinBounds(count, renderableSkin, skins, worldMin, worldMax) {
+  let applied = 0;
+  for (let i = 0; i < count; i++) {
+    const s = renderableSkin[i];
+    if (s < 0) continue;
+    const skin = skins[s];
+    if (!skin || !skin.hasBounds) continue;
+
+    const o = i * 3;
+    worldMin[o] = skin.boundsMin[0];
+    worldMin[o + 1] = skin.boundsMin[1];
+    worldMin[o + 2] = skin.boundsMin[2];
+    worldMax[o] = skin.boundsMax[0];
+    worldMax[o + 1] = skin.boundsMax[1];
+    worldMax[o + 2] = skin.boundsMax[2];
+    applied++;
+  }
+  return applied;
 }

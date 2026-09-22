@@ -54,6 +54,12 @@ export function readSkins(json, buffers) {
       name: skin.name ?? `skin${i}`,
       joints,
       inverseBind,
+      /**
+       * How far each joint's influence reaches, filled in once the meshes this
+       * skin drives are known -- which is a pairing the node holds, not the
+       * mesh. Zero here means no vertex uses that joint.
+       */
+      jointRadii: new Float32Array(joints.length),
       /** The node the skeleton hangs from. A hint; nothing here needs it. */
       skeleton: skin.skeleton ?? -1,
     };
@@ -102,4 +108,50 @@ export function checkJointIndices(joints, jointCount, label) {
       );
     }
   }
+}
+
+/**
+ * How far each joint's influence reaches, in that joint's own space.
+ *
+ * The number a skinned bounding box is built from at runtime. A skinned
+ * vertex ends up at `sum(w_j * jointWorld_j * inverseBind_j) * v`, which is a
+ * weighted average of its per-joint positions and therefore inside their
+ * convex hull -- so a union of spheres, one per influencing joint, contains it.
+ * The radius of joint j's sphere is the farthest any vertex it influences sits
+ * from the joint's own origin, and `inverseBind_j * v` is exactly that vertex
+ * in joint j's space.
+ *
+ * ANY nonzero weight counts. A vertex with 0.001 on a distant joint still
+ * moves when that joint does, and a bound that excluded it would be a bound
+ * that is sometimes wrong -- which for culling means geometry vanishing.
+ *
+ * Exact while joints are rigid, which is what a skeleton is. A joint with
+ * scale inflates its own influence, and the sphere does not grow with it; the
+ * same assumption the vertex shader makes about normals.
+ */
+export function jointInfluenceRadii(
+  positions, jointIndices, jointWeights, vertexCount, inverseBind, jointCount, out = null,
+) {
+  const radii = out ?? new Float32Array(jointCount);
+
+  for (let v = 0; v < vertexCount; v++) {
+    const p = v * 3;
+    const x = positions[p], y = positions[p + 1], z = positions[p + 2];
+    const g = v * 4;
+
+    for (let k = 0; k < 4; k++) {
+      if (jointWeights[g + k] <= 0) continue;
+      const j = jointIndices[g + k];
+      const m = j * 16;
+
+      // Column-major: the vertex through this joint's inverse bind matrix.
+      const jx = inverseBind[m] * x + inverseBind[m + 4] * y + inverseBind[m + 8] * z + inverseBind[m + 12];
+      const jy = inverseBind[m + 1] * x + inverseBind[m + 5] * y + inverseBind[m + 9] * z + inverseBind[m + 13];
+      const jz = inverseBind[m + 2] * x + inverseBind[m + 6] * y + inverseBind[m + 10] * z + inverseBind[m + 14];
+
+      const distance = Math.hypot(jx, jy, jz);
+      if (distance > radii[j]) radii[j] = distance;
+    }
+  }
+  return radii;
 }

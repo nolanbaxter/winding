@@ -280,9 +280,27 @@ export async function run(canvas, onDone) {
     const primitive = rigged.meshes[0].primitives[0];
     if (!primitive.skinBuffer) throw new Error('the rigged primitive has no skin vertex buffer');
 
-    // Move a joint and confirm the palette follows, which is the whole point.
+    // Pose a joint and confirm the bounds follow it. The mesh node never
+    // moves, so a box transformed from the bind pose would be unchanged -- and
+    // the character would be culled with its arm on screen.
+    const riggedIndex = scene.renderableCount - 1;
+    const beforeTop = scene.worldMax[riggedIndex * 3 + 1];
+
+    const skin = scene.skins[scene.renderableSkin[riggedIndex]];
+    scene.transforms.setPosition(skin.joints[1], 0, 12, 0);
+    engine.renderFrame(scene, camera);
+    await engine.rhi.device.queue.onSubmittedWorkDone();
+
+    const afterTop = scene.worldMax[riggedIndex * 3 + 1];
+    if (!(afterTop > beforeTop + 5)) {
+      throw new Error(
+        `bounds did not follow the joint: top was ${beforeTop.toFixed(2)}, now ${afterTop.toFixed(2)}`,
+      );
+    }
+
     riggedNode.destroy();
-    return `${skinnedBatches} skinned batch, ${palette.jointCount} joints, bind pose identity`;
+    return `${skinnedBatches} skinned batch, ${palette.jointCount} joints, `
+      + `bind pose identity, bounds ${beforeTop.toFixed(1)} -> ${afterTop.toFixed(1)}`;
   });
 
   await step('order-independent transparency resolves into the scene', async () => {

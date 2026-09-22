@@ -27,7 +27,9 @@ import {
 import { mat4Decompose } from '../../core/math/mat4.js';
 import { parseContainer, resolveBuffers } from './glb.js';
 import { readAccessorAsFloat32, readAccessorAsUint32, componentCountOf } from './accessor.js';
-import { readSkins, normalizeWeights, checkJointIndices } from './skin.js';
+import {
+  readSkins, normalizeWeights, checkJointIndices, jointInfluenceRadii,
+} from './skin.js';
 import { generateTangents, unweldAndComputeFlatNormals } from './tangents.js';
 
 // The vertex format is the renderer's contract, defined in render/vertex.js.
@@ -112,10 +114,20 @@ function buildModel(json, buffers) {
     if (checked.has(key)) continue;
     checked.add(key);
 
-    const jointCount = skins[node.skin].joints.length;
+    const skin = skins[node.skin];
+    const jointCount = skin.joints.length;
     for (const primitive of meshes[node.mesh]?.primitives ?? []) {
       if (primitive.jointIndices === null) continue;
       checkJointIndices(primitive.jointIndices, jointCount, `mesh "${meshes[node.mesh].name}"`);
+
+      // Accumulated onto the SKIN rather than the primitive, and maxed across
+      // every mesh it drives. A skin is what a runtime bound is built from,
+      // and one skin driving two meshes wants a sphere big enough for both --
+      // conservative, which is the only direction a cull bound may err.
+      jointInfluenceRadii(
+        primitive.positions, primitive.jointIndices, primitive.jointWeights,
+        primitive.vertexCount, skin.inverseBind, jointCount, skin.jointRadii,
+      );
     }
   }
 

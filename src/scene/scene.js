@@ -13,7 +13,7 @@ import { DEBUG, assert, assertFinite } from '../core/assert.js';
 import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
 import { TransformStore } from './transform.js';
 import { Node } from './node.js';
-import { updateWorldBounds } from './bounds.js';
+import { updateWorldBounds, updateSkinBounds, applySkinBounds } from './bounds.js';
 import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
 import { vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
@@ -148,7 +148,16 @@ export class Scene {
         }
         joints[j] = jointEntity;
       }
-      this.skins.push({ joints, inverseBind: skin.inverseBind });
+      this.skins.push({
+        joints,
+        inverseBind: skin.inverseBind,
+        jointRadii: skin.jointRadii,
+        // Recomputed each frame from the joints' world positions. A skinned
+        // mesh's vertices move without its model matrix moving, so its bounds
+        // cannot come from transforming a static box.
+        boundsMin: new Float32Array(3),
+        boundsMax: new Float32Array(3),
+      });
     }
     this._pendingSkins.length = 0;
     // Multi-root assets get a wrapper so the caller always gets one handle back
@@ -424,6 +433,14 @@ export class Scene {
       this.renderableCount, this.localMin, this.localMax, this.worldMin, this.worldMax,
       this.transforms.world, this.renderableMatrixSlot, this.transforms.moved,
     );
+    // Picking has to see the pose too, or a click lands on where a character
+    // was authored rather than where it is standing.
+    if (this.skins.length > 0) {
+      updateSkinBounds(this.skins, this.transforms.world);
+      applySkinBounds(
+        this.renderableCount, this.renderableSkin, this.skins, this.worldMin, this.worldMax,
+      );
+    }
 
     const candidates = [];
 

@@ -81,7 +81,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 340 checks, Node, no browser
+npm test          # 345 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 14 checks on a real device
 ```
 
