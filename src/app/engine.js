@@ -37,10 +37,19 @@ export class Winding {
    * @param canvas a <canvas>; it is sized, configured and observed for you
    * @param options.environment  Environment settings, or an Environment to share
    * @param options.onDeviceLost called when the GPU goes away
+   *
+   * `shadows`, `post`, `shadowDistance` and `lightDistance` reach the renderer
+   * from here. They used to stop at this function -- accepted by
+   * Renderer.create and never passed on -- so the shadow map's size and cascade
+   * count, the bloom settings, and the two world-scale ranges were unreachable
+   * without constructing a Renderer yourself. The scale ones now derive from
+   * the scene by default, which is the better fix, but the others were simply
+   * lost.
    */
   static async create(canvas, options = {}) {
     const rhi = await createDevice(canvas, {
       label: options.label ?? 'winding',
+      powerPreference: options.powerPreference,
       onDeviceLost: options.onDeviceLost,
       onError: options.onError,
     });
@@ -48,6 +57,11 @@ export class Winding {
     const renderer = await Renderer.create(rhi, {
       maxDraws: options.maxDraws,
       exposure: options.exposure,
+      shadows: options.shadows,
+      post: options.post,
+      shadowDistance: options.shadowDistance,
+      lightDistance: options.lightDistance,
+      gpuTiming: options.gpuTiming,
     });
 
     const sharedEnvironment = options.environment instanceof Environment;

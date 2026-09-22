@@ -81,7 +81,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 315 checks, Node, no browser
+npm test          # 319 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 12 checks on a real device
 ```
 
@@ -182,10 +182,6 @@ These are real and currently unaddressed.
 - **Transparency sorts per object, not per fragment.** `BLEND` geometry is culled and sorted
   back-to-front on the CPU and drawn after all opaque batches, which is exact for separated convex
   objects and wrong for interpenetrating ones. Blended geometry also casts no shadow.
-- **The defaults assume a scene tens of units across.** `shadowDistance` and `lightDistance` are 60
-  world units, the bloom threshold assumes scene-linear 1.0 is white, and the procedural sky's sun
-  is what the exposure and that threshold were balanced against. A scene at millimetre or kilometre
-  scale needs all of them moved, and only two are reachable through `Winding.create`.
 - **The cluster grid is 16 by 9.** Tiles are derived from the real resolution, so coverage is
   correct at any size, but the froxels are only square at 16:9. A portrait or square viewport gets
   stretched cells, which overlap more lights and reach the 64-per-cluster cap sooner. Overflow past

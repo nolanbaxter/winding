@@ -25,7 +25,7 @@ import { GpuProfiler } from './timing.js';
 import { ClusteredLights, CLUSTER_X, CLUSTER_Y, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES } from './gpudriven.js';
-import { updateWorldBounds } from '../scene/bounds.js';
+import { updateWorldBounds, unionWorldBounds, farthestViewDepth } from '../scene/bounds.js';
 import { HierarchicalDepth } from './hzb.js';
 import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT } from './vertex.js';
 
@@ -38,14 +38,19 @@ const now = () => (globalThis.performance?.now?.() ?? Date.now());
 
 export class Renderer {
   static async create(rhi, {
-    maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = 60, post, gpuTiming = true,
+    maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
+    shadowDistance = null, post, gpuTiming = true,
   } = {}) {
-    const renderer = new Renderer(rhi, { maxDraws, exposure, shadows, lightDistance, post, gpuTiming });
+    const renderer = new Renderer(rhi, {
+      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming,
+    });
     await renderer._init();
     return renderer;
   }
 
-  constructor(rhi, { maxDraws, exposure, shadows, lightDistance, post, gpuTiming = true }) {
+  constructor(rhi, {
+    maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = true,
+  }) {
     this.shadowOptions = shadows ?? {};
     this.postOptions = post ?? {};
     this.rhi = rhi;
@@ -107,7 +112,25 @@ export class Renderer {
     this._frameBindGroups = new WeakMap();
     this._clusterRevision = 0;
 
-    this.lightDistance = lightDistance;
+    /**
+     * How far shadows are fitted and clustered lights resolved, in world units.
+     *
+     * Null means derive from the scene, which is the default and the only
+     * answer that is not a guess about scale. Both used to be a flat 60 -- true
+     * of Sponza and of nothing an order of magnitude either side of it, while
+     * the culler maintained the world bounds that answer the question every
+     * frame and nothing read them. A number you have to know to change is the
+     * failure this engine's design rule names.
+     *
+     * Pass a number to pin either one.
+     */
+    this.shadowDistance = shadowDistance ?? null;
+    this.lightDistance = lightDistance ?? null;
+
+    this._sceneMin = new Float32Array(3);
+    this._sceneMax = new Float32Array(3);
+    this._hasSceneBounds = false;
+    this._boundsRevision = -1;
     /**
      * Batches in draw order, sorted by pipeline then material.
      *
@@ -265,10 +288,22 @@ export class Renderer {
     const count = scene.renderableCount;
     this.stats.renderables = count;
 
-    updateWorldBounds(
+    const moved = updateWorldBounds(
       count, scene.localMin, scene.localMax, scene.worldMin, scene.worldMax,
       scene.transforms.world, scene.renderableMatrixSlot, scene.transforms.moved,
     );
+
+    // The scene's own extent, which is what the shadow and cluster ranges are
+    // derived from. Recomputed only when something moved or the contents
+    // changed -- a union cannot be updated in place, because a renderable that
+    // moves can shrink it as easily as grow it, but on a settled scene that
+    // means never paying for it at all.
+    if (moved > 0 || this._boundsRevision !== scene.revision) {
+      this._hasSceneBounds = unionWorldBounds(
+        count, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax,
+      );
+      this._boundsRevision = scene.revision;
+    }
 
     // Culling happens on the GPU. Nothing here reads back which objects survived
     // -- that answer only ever exists in the indirect argument buffer, which
@@ -310,9 +345,25 @@ export class Renderer {
     // pass rasterised with this frame's -- so a moving camera looked up its
     // shadows in the wrong patch of the map, and the first frame of all read
     // matrices that were still zero.
+    // Derived per frame unless pinned. The scene's far corner in view depth is
+    // exactly how far there is anything to shadow or light; beyond it both
+    // would be resolving empty space.
+    //
+    // The floor is the smallest legal value rather than a chosen one: both
+    // consumers require strictly more than the near plane, so with nothing in
+    // the scene -- where the number cannot matter -- twice near is the minimum
+    // that satisfies them.
+    const sceneDepth = this._hasSceneBounds
+      ? farthestViewDepth(camera.view, this._sceneMin, this._sceneMax)
+      : 0;
+    const derived = Math.max(sceneDepth, camera.near * 2);
+    const shadowRange = this.shadowDistance ?? derived;
+    const lightRange = this.lightDistance ?? derived;
+
+    this.shadows.shadowDistance = shadowRange;
     this.skybox.update(camera, 1.0);
     this.shadows.update(camera, scene.sun.direction);
-    this.clusters.update(scene, camera, this.lightDistance);
+    this.clusters.update(scene, camera, lightRange);
     // Growing the light list replaced lightBuffer, which every cached frame
     // bind group names. Dropping the cache rebuilds them on next use.
     if (this._clusterRevision !== this.clusters.buffersRevision) {

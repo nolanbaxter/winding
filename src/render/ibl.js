@@ -14,11 +14,13 @@
 // Everything happens once, at startup. Nothing here runs per frame.
 
 import { BRDF_WGSL } from './shaders/brdf.js';
-import { createCubemap, cubeView, cubeFaceView, clampSampler } from '../rhi/texture.js';
+import {
+  createCubemap, cubeView, cubeFaceView, clampSampler, generateMipmaps, mipLevelCountFor,
+} from '../rhi/texture.js';
 import { compileShaderSync } from '../rhi/shader.js';
 
 const FACE_COUNT = 6;
-const PARAMS_BYTES = 16;   // face:u32, roughness:f32, sampleCount:u32, pad
+const PARAMS_BYTES = 16;   // face:u32, roughness:f32, sampleCount:u32, envSize:f32
 
 // 64 samples is enough for a smooth result at these resolutions; the
 // low-discrepancy Hammersley sequence is what makes that true, since uniform
@@ -65,8 +67,34 @@ struct Params {
   face        : u32,
   roughness   : f32,
   sampleCount : u32,
-  padding     : u32,
+  // Edge length of ONE face of the source cubemap, in texels. Needed for the
+  // solid angle a single texel covers, which is what sets the mip below.
+  envSize     : f32,
 };
+
+/**
+ * Which source mip a sample should read, from the solid angle it represents.
+ *
+ * Karis, "Real Shading in Unreal Engine 4", the section on solving the bright
+ * dots. A fixed sample count over a full-resolution environment undersamples
+ * it: each sample stands for a cone of directions but reads a single texel, so
+ * a source with its energy concentrated in a few texels -- a sun, and every
+ * captured HDR -- either gets hit and blows the estimate up, or gets missed
+ * and vanishes. Neighbouring output texels make different choices frame to
+ * frame, which is the speckle that swims across rough metal.
+ *
+ * Reading a mip whose texels cover the sample's own solid angle turns the
+ * point sample into an average of what the cone actually contains.
+ *
+ *   saTexel  = 4pi / (6 * size * size)      one texel of the source cube
+ *   saSample = 1 / (sampleCount * pdf)      what one sample stands for
+ *   level    = 0.5 * log2(saSample / saTexel)
+ */
+fn sampleMip(pdf : f32, sampleCount : u32, envSize : f32) -> f32 {
+  let saTexel = 4.0 * PI / (6.0 * envSize * envSize);
+  let saSample = 1.0 / (f32(sampleCount) * max(pdf, 1e-6));
+  return max(0.5 * log2(saSample / saTexel), 0.0);
+}
 @group(0) @binding(0) var<uniform> params      : Params;
 @group(0) @binding(1) var          environment : texture_cube<f32>;
 @group(0) @binding(2) var          envSampler  : sampler;
@@ -111,7 +139,10 @@ fn fsIrradiance(v : VertexOut) -> @location(0) vec4<f32> {
                   + tangentY * (sin(phi) * sinTheta)
                   + n * cosTheta;
 
-    total = total + textureSampleLevel(environment, envSampler, direction, 0.0).rgb;
+    // pdf of a cosine-weighted hemisphere sample is cos(theta)/PI, and here
+    // cos(theta) IS cosTheta -- the sample was drawn about n.
+    let mip = sampleMip(cosTheta / PI, params.sampleCount, params.envSize);
+    total = total + textureSampleLevel(environment, envSampler, direction, mip).rgb;
   }
 
   return vec4<f32>(total / f32(params.sampleCount), 1.0);
@@ -137,9 +168,18 @@ fn fsPrefilter(v : VertexOut) -> @location(0) vec4<f32> {
 
     let NoL = dot(n, l);
     if (NoL > 0.0) {
+      // The GGX sample pdf, in the same half-vector form importanceSampleGGX
+      // drew from: D(h) * NoH / (4 * VoH). With N = V = R the two dots are the
+      // same, which is why only one appears.
+      let NoH = max(dot(n, h), 0.0);
+      let VoH = max(dot(view, h), 0.0);
+      let pdf = distributionGGX(NoH, params.roughness) * NoH / (4.0 * max(VoH, 1e-4));
+      // Roughness 0 is a mirror: one direction, no cone, so no blur.
+      let mip = select(sampleMip(pdf, params.sampleCount, params.envSize), 0.0, params.roughness == 0.0);
+
       // Weighting by NoL rather than averaging flat is a small cheat that
       // visibly reduces the bright fringe at the edge of rough reflections.
-      total = total + textureSampleLevel(environment, envSampler, l, 0.0).rgb * NoL;
+      total = total + textureSampleLevel(environment, envSampler, l, mip).rgb * NoL;
       totalWeight = totalWeight + NoL;
     }
   }
@@ -162,7 +202,13 @@ export class Environment {
 
     // rgba16float, not rgba8unorm: the sun is 60x brighter than white and
     // clamping it to 1.0 would flatten every reflection in the scene.
-    this.environment = createCubemap(rhi, { size, format: 'rgba16float', label: `${label}-sky` });
+    // A mip chain, because the convolutions below read DOWN it: a sample that
+    // stands for a wide cone reads a level whose texels cover that cone. The
+    // skybox samples level 0 and is unaffected.
+    this.environment = createCubemap(rhi, {
+      size, mipLevelCount: mipLevelCountFor(size, size),
+      format: 'rgba16float', label: `${label}-sky`,
+    });
     this.irradiance = createCubemap(rhi, {
       size: irradianceSize, format: 'rgba16float', label: `${label}-irradiance`,
     });
@@ -202,7 +248,7 @@ export class Environment {
       u32[0] = face;
       f32[1] = roughness;
       u32[2] = sampleCount;
-      u32[3] = 0;
+      f32[3] = size;
       return offset;
     };
 
@@ -317,22 +363,40 @@ export class Environment {
         cubeFaceView(this.environment, face), `sky:${face}`);
     }
 
-    // The convolution passes read `environment`, which the passes above wrote.
-    // Same encoder, same queue, so ordering is guaranteed -- but only because
-    // they are separate passes; a texture cannot be read and written in one.
+    // Submitted before the convolutions, because generateMipmaps runs on its
+    // own encoder and the convolutions read the levels it produces. Queue
+    // order is what sequences the three.
+    rhi.queue.submit([encoder.finish()]);
+    generateMipmaps(rhi, this.environment);
+
+    const convolve = device.createCommandEncoder({ label: 'ibl-convolve-passes' });
+    const convolveFace = (pipeline, bindGroup, offset, view, passLabel) => {
+      const pass = convolve.beginRenderPass({
+        label: passLabel,
+        colorAttachments: [{
+          view, loadOp: 'clear', storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup, [offset]);
+      pass.draw(3);
+      pass.end();
+    };
+
     for (let face = 0; face < FACE_COUNT; face++) {
-      facePass(irradiancePipeline, convolveBindGroup, irradianceOffsets[face],
+      convolveFace(irradiancePipeline, convolveBindGroup, irradianceOffsets[face],
         cubeFaceView(this.irradiance, face), `irradiance:${face}`);
     }
 
     for (let mip = 0; mip < prefilterMips; mip++) {
       for (let face = 0; face < FACE_COUNT; face++) {
-        facePass(prefilterPipeline, convolveBindGroup, prefilterOffsets[mip][face],
+        convolveFace(prefilterPipeline, convolveBindGroup, prefilterOffsets[mip][face],
           cubeFaceView(this.prefiltered, face, mip), `prefilter:${mip}:${face}`);
       }
     }
 
-    rhi.queue.submit([encoder.finish()]);
+    rhi.queue.submit([convolve.finish()]);
     paramsBuffer.destroy();
 
     this.passCount = passCount;

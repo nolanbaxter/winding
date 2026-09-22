@@ -34,3 +34,52 @@ export function updateWorldBounds(
   }
   return updated;
 }
+
+/**
+ * Union of every renderable's world bounds, into `outMin`/`outMax`.
+ *
+ * A full pass, not an incremental one: a renderable that MOVES can shrink the
+ * union as easily as grow it, so there is nothing to update in place. The
+ * caller decides how often to pay for it -- the renderer only does when
+ * something actually moved, which on a settled scene is never.
+ *
+ * Returns false and leaves the outputs alone for an empty scene, because there
+ * is no box that means "nothing" which a caller would not have to special-case
+ * anyway.
+ */
+export function unionWorldBounds(count, worldMin, worldMax, outMin, outMax) {
+  if (count === 0) return false;
+
+  outMin[0] = worldMin[0]; outMin[1] = worldMin[1]; outMin[2] = worldMin[2];
+  outMax[0] = worldMax[0]; outMax[1] = worldMax[1]; outMax[2] = worldMax[2];
+
+  for (let i = 1; i < count; i++) {
+    const o = i * 3;
+    if (worldMin[o] < outMin[0]) outMin[0] = worldMin[o];
+    if (worldMin[o + 1] < outMin[1]) outMin[1] = worldMin[o + 1];
+    if (worldMin[o + 2] < outMin[2]) outMin[2] = worldMin[o + 2];
+    if (worldMax[o] > outMax[0]) outMax[0] = worldMax[o];
+    if (worldMax[o + 1] > outMax[1]) outMax[1] = worldMax[o + 1];
+    if (worldMax[o + 2] > outMax[2]) outMax[2] = worldMax[o + 2];
+  }
+  return true;
+}
+
+/**
+ * The farthest view-space depth any corner of a world box reaches.
+ *
+ * Row 2 of the view matrix takes a world point to its view z, which is negative
+ * in front of the camera; depth is its negation. All eight corners, because a
+ * box behind the camera on one axis can still have a far corner in front.
+ */
+export function farthestViewDepth(view, min, max) {
+  let farthest = -Infinity;
+  for (let c = 0; c < 8; c++) {
+    const x = (c & 1) ? max[0] : min[0];
+    const y = (c & 2) ? max[1] : min[1];
+    const z = (c & 4) ? max[2] : min[2];
+    const depth = -(view[2] * x + view[6] * y + view[10] * z + view[14]);
+    if (depth > farthest) farthest = depth;
+  }
+  return farthest;
+}

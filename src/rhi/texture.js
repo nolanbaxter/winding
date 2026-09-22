@@ -105,30 +105,41 @@ export function generateMipmaps(rhi, texture) {
   const sampler = linearSampler(rhi);
   const encoder = rhi.device.createCommandEncoder({ label: 'mipmaps' });
 
-  for (let level = 1; level < texture.mipLevelCount; level++) {
-    const sourceView = texture.createView({
-      baseMipLevel: level - 1, mipLevelCount: 1, dimension: '2d',
-    });
-    const targetView = texture.createView({
-      baseMipLevel: level, mipLevelCount: 1, dimension: '2d',
-    });
+  // Every array layer, which is what makes this work for a cubemap: its six
+  // faces are six layers, and reducing only layer 0 would leave five of them
+  // undefined at every level but the base. Each face is filtered on its own --
+  // a box filter across a cube seam is not defined without neighbour lookups,
+  // and the error is confined to one texel at the edge.
+  const layers = texture.depthOrArrayLayers;
 
-    const bindGroup = rhi.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: sourceView },
-        { binding: 1, resource: sampler },
-      ],
-    });
+  for (let layer = 0; layer < layers; layer++) {
+    for (let level = 1; level < texture.mipLevelCount; level++) {
+      const sourceView = texture.createView({
+        baseMipLevel: level - 1, mipLevelCount: 1,
+        baseArrayLayer: layer, arrayLayerCount: 1, dimension: '2d',
+      });
+      const targetView = texture.createView({
+        baseMipLevel: level, mipLevelCount: 1,
+        baseArrayLayer: layer, arrayLayerCount: 1, dimension: '2d',
+      });
 
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: targetView, loadOp: 'clear', storeOp: 'store',
-        clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
-    });
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.draw(3);
-    pass.end();
+      const bindGroup = rhi.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: sourceView },
+          { binding: 1, resource: sampler },
+        ],
+      });
+
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{ view: targetView, loadOp: 'clear', storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3);
+      pass.end();
+    }
   }
 
   rhi.queue.submit([encoder.finish()]);

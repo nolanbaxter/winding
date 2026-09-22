@@ -21,7 +21,7 @@ import {
   OPAQUE_PIPELINE_BITS, OPAQUE_MATERIAL_BITS, OPAQUE_DEPTH_BITS,
   TRANSPARENT_PIPELINE_BITS, TRANSPARENT_MATERIAL_BITS, TRANSPARENT_DEPTH_BITS,
 } from '../src/render/drawlist.js';
-import { updateWorldBounds } from '../src/scene/bounds.js';
+import { updateWorldBounds, unionWorldBounds, farthestViewDepth } from '../src/scene/bounds.js';
 import {
   variantKey, variantPipelineState, ALPHA_OPAQUE, ALPHA_MASK, ALPHA_BLEND,
 } from '../src/render/material.js';
@@ -699,6 +699,63 @@ test('the batch tables do not grow with renderables that share a batch', () => {
   gpu.rebuildBatches(scene);
   assert.equal(gpu.batchCount, 1);
   assert.equal(gpu.batchCapacity, 256, 'nothing grew');
+});
+
+// -------------------------------------------------------------- scene extent
+
+console.log('\nscene extent');
+
+test('the union covers every renderable, and shrinks when one moves in', () => {
+  // Not incremental, and this is why: a renderable that MOVES can shrink the
+  // union as easily as grow it, so there is nothing to update in place.
+  const worldMin = Float32Array.from([-5, -1, -1, 1, 1, 1]);
+  const worldMax = Float32Array.from([-4, 0, 0, 9, 2, 2]);
+  const min = new Float32Array(3);
+  const max = new Float32Array(3);
+
+  assert.equal(unionWorldBounds(2, worldMin, worldMax, min, max), true);
+  vecClose(min, [-5, -1, -1], EPS, 'min');
+  vecClose(max, [9, 2, 2], EPS, 'max');
+
+  worldMin.set([0, 0, 0], 3);
+  worldMax.set([1, 1, 1], 3);
+  unionWorldBounds(2, worldMin, worldMax, min, max);
+  // max is now the union of [-4,0,0] and [1,1,1], down from 9 on x.
+  vecClose(max, [1, 1, 1], EPS, 'the far object came home, so the union shrank');
+});
+
+test('an empty scene has no bounds, rather than a box meaning nothing', () => {
+  const min = Float32Array.from([7, 7, 7]);
+  const max = Float32Array.from([8, 8, 8]);
+  assert.equal(unionWorldBounds(0, new Float32Array(0), new Float32Array(0), min, max), false);
+  vecClose(min, [7, 7, 7], EPS, 'outputs untouched');
+});
+
+test('scene depth is measured along the view axis, over all eight corners', () => {
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.position.set([0, 0, 0]);
+  camera.target.set([0, 0, -1]);
+  camera.update(1);
+
+  // A box from z = -2 to z = -10: the far face is 10 deep.
+  close(farthestViewDepth(camera.view, [-1, -1, -10], [1, 1, -2]), 10, EPS, 'straight ahead');
+
+  // Straddling the camera. The near corner is BEHIND it, which is a negative
+  // depth, and taking the max over corners is what keeps that from winning.
+  close(farthestViewDepth(camera.view, [-1, -1, -4], [1, 1, 3]), 4, EPS, 'straddling');
+
+  // Entirely behind: every corner is negative, and the caller floors it.
+  assert.ok(farthestViewDepth(camera.view, [-1, -1, 2], [1, 1, 5]) < 0, 'behind the camera');
+});
+
+test('a box off to the side is measured by depth, not by distance', () => {
+  // The bug class this engine has hit three times. A box 100 units to the RIGHT
+  // and 1 unit ahead is 1 deep, not 100 away.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.position.set([0, 0, 0]);
+  camera.target.set([0, 0, -1]);
+  camera.update(1);
+  close(farthestViewDepth(camera.view, [99, 0, -1], [101, 1, -1]), 1, EPS);
 });
 
 console.log(`\n${passed} checks passed\n`);
