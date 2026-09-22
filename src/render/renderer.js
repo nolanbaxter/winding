@@ -21,7 +21,7 @@ import { frustumCreate, frustumFromViewProjection, frustumTestAABB } from '../co
 import { grownCapacity } from '../core/grow.js';
 
 import {
-  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, ALPHA_BLEND,
+  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, ALPHA_BLEND,
 } from './material.js';
 import { PBR_SHADER, FRAME_BYTES } from './shaders/pbr.js';
 import { OIT_RESOLVE_SHADER } from './shaders/oit.js';
@@ -29,12 +29,13 @@ import { SkyboxPass } from './skybox.js';
 import { ShadowMaps } from './shadows.js';
 import { RenderGraph } from './graph.js';
 import { GpuProfiler } from './timing.js';
+import { SkinPalette } from './skin.js';
 import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES } from './gpudriven.js';
 import { updateWorldBounds, unionWorldBounds, farthestViewDepth } from '../scene/bounds.js';
 import { HierarchicalDepth } from './hzb.js';
-import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT } from './vertex.js';
+import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 
 const DEFAULT_MAX_DRAWS = 4096;
 
@@ -90,6 +91,10 @@ export class Renderer {
         // VERTEX stage: this is what replaces a bind group per draw.
         { binding: 9, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 10, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        // Every skinned instance's joint matrices. Bound for every pipeline,
+        // skinned or not, because a bind group layout is one object -- an
+        // unskinned vertex shader simply never reads it.
+        { binding: 11, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
     this.drawLayout = rhi.device.createBindGroupLayout({
@@ -177,6 +182,10 @@ export class Renderer {
      * turn on the thing that says what is slow gets optimized by guesswork.
      * Inert on a device without `timestamp-query`.
      */
+    /** Joint matrices for every skinned instance, rebuilt each frame. */
+    this.skinPalette = new SkinPalette(rhi);
+    this._paletteRevision = 0;
+
     this.gpuTiming = new GpuProfiler(rhi, { enabled: gpuTiming });
     this.graph = new RenderGraph(rhi, { profiler: this.gpuTiming });
     // Bound once: the graph holds a function per pass, and rebuilding these
@@ -247,17 +256,21 @@ export class Renderer {
     // that nothing in render() ever has to create a pipeline.
     const wanted = [];
     for (const variant of variants) {
-      wanted.push(variant & ~VARIANT_MIRRORED, variant | VARIANT_MIRRORED);
+      const base = variant & ~(VARIANT_MIRRORED | VARIANT_SKINNED);
+      wanted.push(base, base | VARIANT_MIRRORED,
+        base | VARIANT_SKINNED, base | VARIANT_MIRRORED | VARIANT_SKINNED);
     }
     for (const variant of wanted) {
       if (this._pipelineByVariant.has(variant)) continue;
 
       const state = variantPipelineState(variant);
+      const skinned = (variant & VARIANT_SKINNED) !== 0;
       const descriptor = {
         label: `pbr:v${variant}`,
         layout: this.pipelineLayout,
         shader: this.shader,
-        buffers: [VERTEX_LAYOUT],
+        vertexEntry: skinned ? 'vsSkinned' : 'vs',
+        buffers: skinned ? [VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT] : [VERTEX_LAYOUT],
         targets: [{ format: HDR_FORMAT, blend: state.blend }],
         primitive: state.primitive,
         depth: state.depth,
@@ -335,6 +348,7 @@ export class Renderer {
           { binding: 8, resource: { buffer: this.clusters.countBuffer } },
           { binding: 9, resource: { buffer: this.gpu.drawDataBuffer } },
           { binding: 10, resource: { buffer: this.gpu.visibleBuffer } },
+          { binding: 11, resource: { buffer: this.skinPalette.buffer } },
         ],
       });
       this._frameBindGroups.set(environment, bindGroup);
@@ -380,8 +394,18 @@ export class Renderer {
     // before the cull means the bind group always points at a live texture.
     this.hzb.resize(rhi.width, rhi.height, rhi.depthView());
     this.gpu.bindHzb(this.hzb.view);
-    this.gpu.update(scene, this.frustum, this.hzb, camera.viewProjection, writeDrawData);
+    this.gpu.update(scene, this.frustum, this.hzb, camera.viewProjection, writeDrawData,
+      this.skinPalette.offsets);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
+
+    // Palettes are rebuilt from this frame's pose, before anything reads them.
+    // A grow replaces the buffer the frame group names, so that invalidates
+    // the cache the same way a gpu grow does.
+    this.skinPalette.update(scene);
+    if (this._paletteRevision !== this.skinPalette.revision) {
+      this._frameBindGroups = new WeakMap();
+      this._paletteRevision = this.skinPalette.revision;
+    }
 
     // Both consumers of `moved` have now read it, so the record is spent.
     // Clearing here rather than in update() is what makes scene.update() safe
@@ -397,7 +421,10 @@ export class Renderer {
         // Winding is pipeline state, so it belongs in the pipeline field. Two
         // ids per material variant, which keeps the worst case at 12 of the 16
         // the narrower key can address.
-        const pipelineId = this.materials.pipelineIdOf[materialId] * 2 + this.gpu.batchMirrored[b];
+        // Winding and skinning are both pipeline state, so both belong in the
+        // pipeline field or the key claims two pipelines are one bucket.
+        const pipelineId = (this.materials.pipelineIdOf[materialId] * 2
+          + this.gpu.batchMirrored[b]) * 2 + this.gpu.batchSkinned[b];
         this.batchList.push(opaqueSortKey(pipelineId, materialId, 0), b);
       }
       this.batchList.sort();
@@ -762,8 +789,10 @@ export class Renderer {
       const materialId = gpu.batchMaterial[b];
       const primitive = gpu.batchPrimitive[b];
 
+      const skinned = gpu.batchSkinned[b] === 1;
       const variant = this.materials.variants[materialId]
-        | (gpu.batchMirrored[b] ? VARIANT_MIRRORED : 0);
+        | (gpu.batchMirrored[b] ? VARIANT_MIRRORED : 0)
+        | (skinned ? VARIANT_SKINNED : 0);
       const pipeline = this.pipelines.get(this._pipelineByVariant.get(variant));
       if (pipeline !== boundPipeline) {
         pass.setPipeline(pipeline);
@@ -776,6 +805,10 @@ export class Renderer {
 
       pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.batchOffset(b, phase)]);
       pass.setVertexBuffer(0, primitive.vertexBuffer);
+      // Slot 1 only for skinned pipelines. A pipeline declares how many vertex
+      // buffers it reads, so binding this on an unskinned one is a validation
+      // error rather than something harmlessly ignored.
+      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
       pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
       pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, phase));
     }
@@ -813,8 +846,10 @@ export class Renderer {
       const materialId = scene.renderableMaterial[i];
       const primitive = scene.renderablePrimitive[i];
 
+      const skinned = scene.renderableSkin[i] >= 0;
       const variant = this.materials.variants[materialId]
-        | (gpu.itemMirrored[i] ? VARIANT_MIRRORED : 0);
+        | (gpu.itemMirrored[i] ? VARIANT_MIRRORED : 0)
+        | (skinned ? VARIANT_SKINNED : 0);
       const pipeline = this.pipelines.get(pipelineByVariant.get(variant));
       if (pipeline !== boundPipeline) {
         pass.setPipeline(pipeline);
@@ -826,6 +861,7 @@ export class Renderer {
       }
 
       pass.setVertexBuffer(0, primitive.vertexBuffer);
+      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
       pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
       pass.drawIndexed(primitive.indexCount, 1, 0, 0, gpu.opaqueCount + k);
     }

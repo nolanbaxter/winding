@@ -55,9 +55,12 @@ struct Light {
  * shader instead of from the CPU.
  */
 struct DrawData {
-  model        : mat4x4<f32>,     //  0
-  normalMatrix : mat3x3<f32>,     // 64   occupies 48 bytes
-};                                // 112
+  model         : mat4x4<f32>,    //   0
+  normalMatrix  : mat3x3<f32>,    //  64   occupies 48 bytes
+  // Where this instance's joint matrices begin. Zero and unread for anything
+  // not skinned. The struct rounds to 128 either way: mat3x3 aligns to 16.
+  paletteOffset : u32,            // 112
+};                                // 128
 
 /** The only thing still bound per draw: where this batch's slice begins. */
 struct Batch {
@@ -91,6 +94,9 @@ struct Material {
 // Written by the cull compute shader: the compacted list of surviving objects,
 // grouped into one contiguous slice per batch.
 @group(0) @binding(10) var<storage, read> visibleItems  : array<u32>;
+// Every skinned instance's joint matrices, end to end. One buffer for the
+// frame, indexed by draw.paletteOffset + the vertex's joint.
+@group(0) @binding(11) var<storage, read> palette       : array<mat4x4<f32>>;
 
 @group(2) @binding(0) var<uniform> material     : Material;
 @group(2) @binding(1) var          baseColorMap : texture_2d<f32>;
@@ -257,6 +263,64 @@ fn clusterFor(fragCoord : vec2<f32>, viewDepth : f32) -> u32 {
   let slice = u32(clamp(raw, 0.0, f32(frame.clusterGrid.z - 1u)));
 
   return (slice * frame.clusterGrid.y + tileY) * frame.clusterGrid.x + tileX;
+}
+
+/**
+ * The skinned vertex path.
+ *
+ * glTF 3.7.3.3 is explicit that a skinned mesh's own node transform is
+ * IGNORED: the joints place it entirely, because each joint matrix already
+ * carries its node's world transform. So draw.model does not appear here.
+ * Using it as well would apply the skeleton root's transform twice.
+ *
+ * Each palette entry is jointWorld * inverseBind, built on the CPU from
+ * matrices the transform hierarchy already composes. draw.paletteOffset is
+ * where this INSTANCE's joints begin, which is what lets two characters in
+ * different poses share a batch and a draw call.
+ */
+@vertex
+fn vsSkinned(
+  @builtin(instance_index) instance : u32,
+  @location(0) position : vec3<f32>,
+  @location(1) normal   : vec3<f32>,
+  @location(2) uv       : vec2<f32>,
+  @location(3) tangent  : vec4<f32>,
+  @location(4) uv1      : vec2<f32>,
+  @location(5) color    : vec4<f32>,
+  @location(6) joints   : vec4<u32>,
+  @location(7) weights  : vec4<f32>,
+) -> VertexOut {
+  var out : VertexOut;
+
+  let draw = drawData[visibleItems[batch.firstVisible + instance]];
+  let base = draw.paletteOffset;
+
+  // Linear blend skinning: the weighted sum of matrices, applied once. Summing
+  // the MATRICES and transforming once is not the same as transforming four
+  // times and summing -- it is, for an affine transform, and it is one matrix
+  // multiply instead of four.
+  let skin = palette[base + joints.x] * weights.x
+           + palette[base + joints.y] * weights.y
+           + palette[base + joints.z] * weights.z
+           + palette[base + joints.w] * weights.w;
+
+  let world = skin * vec4<f32>(position, 1.0);
+  out.world = world.xyz;
+  out.clip = frame.viewProjection * world;
+
+  // The blended matrix's upper 3x3 for normals rather than its inverse
+  // transpose. Exact while the joints are rigid, which is what a skeleton is;
+  // it skews normals under non-uniform joint scale, which almost nothing
+  // authors and every real-time skinning path accepts.
+  let skin3 = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
+  out.normal = normalize(skin3 * normal);
+  out.tangent = normalize(skin3 * tangent.xyz);
+  out.bitangent = cross(out.normal, out.tangent) * tangent.w;
+
+  out.uv = uv;
+  out.uv1 = uv1;
+  out.color = color;
+  return out;
 }
 
 fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {

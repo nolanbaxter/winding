@@ -69,16 +69,24 @@ export function uvSetMask(uvSets = {}) {
  */
 export const VARIANT_DOUBLE_SIDED = 4;
 export const VARIANT_MIRRORED = 8;
+/**
+ * Skinned. A vertex-stage difference only -- the fragment side is identical --
+ * but a pipeline is one object, so it is a variant like the rest. It also
+ * carries a second vertex buffer, which is the other half of why it cannot be
+ * anything smaller.
+ */
+export const VARIANT_SKINNED = 16;
 
 /**
  * A pipeline variant. Packed small on purpose: it is also the pipeline id that
  * goes into the sort key, and the narrower of those fields is 4 bits wide.
  * Three alpha modes times two sidedness times two windings is 12 of 16.
  */
-export function variantKey(alphaMode, doubleSided, mirrored = false) {
+export function variantKey(alphaMode, doubleSided, mirrored = false, skinned = false) {
   return alphaMode
     | (doubleSided ? VARIANT_DOUBLE_SIDED : 0)
-    | (mirrored ? VARIANT_MIRRORED : 0);
+    | (mirrored ? VARIANT_MIRRORED : 0)
+    | (skinned ? VARIANT_SKINNED : 0);
 }
 
 export class MaterialRegistry {

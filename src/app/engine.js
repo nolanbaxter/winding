@@ -24,6 +24,7 @@ import { createBuffer } from '../rhi/buffer.js';
 import { Environment } from '../render/ibl.js';
 import { Renderer } from '../render/renderer.js';
 import { GLTFTextures } from '../render/textures.js';
+import { packSkinVertices } from '../render/vertex.js';
 import { Scene } from '../scene/scene.js';
 import { loadGLTF, DEFAULT_MATERIAL } from '../scene/gltf/parse.js';
 import { decodeImages } from '../scene/gltf/images.js';
@@ -171,6 +172,19 @@ export class Winding {
           data: primitive.indices,
           usage: GPUBufferUsage.INDEX,
         }),
+        /** Whether this primitive carries influences. The scene reads this. */
+        skinned: primitive.jointIndices != null,
+        // Null unless the mesh is rigged. A second vertex buffer, bound at
+        // slot 1 by skinned pipelines only, so static meshes carry nothing.
+        skinBuffer: primitive.jointIndices
+          ? createBuffer(this.rhi, {
+            label: `${mesh.name}[${p}].skin`,
+            data: new Uint8Array(packSkinVertices(
+              primitive.jointIndices, primitive.jointWeights, primitive.vertexCount,
+            )),
+            usage: GPUBufferUsage.VERTEX,
+          })
+          : null,
         indexCount: primitive.indexCount,
         bounds: primitive.bounds,
         // Only when asked. Scene.raycast tests triangles for primitives that have
@@ -197,7 +211,7 @@ export class Winding {
 
     return {
       nodes: model.nodes, meshes, roots: model.roots, materialIds,
-      animations: model.animations, source: model.source,
+      animations: model.animations, skins: model.skins, source: model.source,
     };
   }
 

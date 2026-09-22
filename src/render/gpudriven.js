@@ -30,8 +30,11 @@ import { compileShader } from '../rhi/shader.js';
 import { grownCapacity, growArray } from '../core/grow.js';
 import { FRUSTUM_PLANE_COUNT } from '../core/math/frustum.js';
 
-/** model mat4 (64) + normal mat3x3 (48). No alignment padding in storage. */
-export const DRAW_DATA_BYTES = 112;
+/**
+ * model mat4 (64) + normal mat3x3 (48) + paletteOffset u32 (4), rounded to the
+ * struct's 16-byte alignment. 128.
+ */
+export const DRAW_DATA_BYTES = 128;
 /** indexCount, instanceCount, firstIndex, baseVertex, firstInstance */
 export const INDIRECT_BYTES = 20;
 /** Per-batch uniform: where this batch's slice of the visible list starts. */
@@ -251,6 +254,8 @@ export class GpuDriven {
 
     // Per-object data, indexed by the shader rather than bound per draw.
     this.drawData = new Float32Array(capacity * (DRAW_DATA_BYTES / 4));
+    /** Same memory, integer view: paletteOffset is a u32 in the WGSL struct. */
+    this.drawDataU32 = new Uint32Array(this.drawData.buffer);
     this.drawDataBuffer = device.createBuffer({
       label: 'draw-data',
       size: capacity * DRAW_DATA_BYTES,
@@ -346,6 +351,7 @@ export class GpuDriven {
     this.batchPrimitive = [];
     this.batchMaterial = new Uint16Array(this.batchCapacity);
     this.batchMirrored = new Uint8Array(this.batchCapacity);
+    this.batchSkinned = new Uint8Array(this.batchCapacity);
     this.batchSize = new Uint32Array(this.batchCapacity);
 
     // Blended renderables, which never enter a batch. See rebuildBatches.
@@ -479,6 +485,7 @@ export class GpuDriven {
     // filled after the loop and can start empty.
     this.batchMaterial = growArray(this.batchMaterial, capacity);
     this.batchMirrored = growArray(this.batchMirrored, capacity);
+    this.batchSkinned = growArray(this.batchSkinned, capacity);
     this.batchSize = growArray(this.batchSize, capacity);
 
     this.batchFirst = new Uint32Array(capacity);
@@ -564,7 +571,10 @@ export class GpuDriven {
       // and one indirect draw has one front face -- so the mirrored copies of
       // a mesh form their own batch even though they share its geometry and
       // material.
-      const key = `${primitiveId(primitive)}:${material}:${mirrored ? 1 : 0}`;
+      // Skinning is part of the batch for the same reason winding is: it is a
+      // different pipeline, and it binds a second vertex buffer besides.
+      const skinned = scene.renderableSkin[i] >= 0;
+      const key = `${primitiveId(primitive)}:${material}:${mirrored ? 1 : 0}:${skinned ? 1 : 0}`;
 
       let batch = batchOf.get(key);
       if (batch === undefined) {
@@ -577,6 +587,7 @@ export class GpuDriven {
         this.batchPrimitive.push(primitive);
         this.batchMaterial[batch] = material;
         this.batchMirrored[batch] = mirrored ? 1 : 0;
+        this.batchSkinned[batch] = skinned ? 1 : 0;
         this.batchSize[batch] = 0;
       }
       this.itemBatch[i] = batch;
@@ -638,7 +649,7 @@ export class GpuDriven {
   }
 
   /** Upload this frame's transforms, bounds and reset argument buffer. */
-  update(scene, frustum, hzb, viewProjection, writeDrawData) {
+  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets) {
     if (scene.revision !== this.sceneRevision) this.rebuildBatches(scene);
 
     const count = scene.renderableCount;
@@ -659,7 +670,12 @@ export class GpuDriven {
     for (let i = 0; i < count; i++) {
       if (!full && moved[scene.renderableMatrixSlot[i]] === 0) continue;
 
-      writeDrawData(this.drawData, i * (DRAW_DATA_BYTES / 4), scene, i);
+      const drawFloat = i * (DRAW_DATA_BYTES / 4);
+      writeDrawData(this.drawData, drawFloat, scene, i);
+      // Where this instance's joints begin. Zero for anything unskinned, which
+      // the unskinned vertex shader never reads anyway.
+      const skin = scene.renderableSkin[i];
+      this.drawDataU32[drawFloat + 28] = skin >= 0 ? paletteOffsets[skin] : 0;
 
       const b = i * 8;
       const o = i * 3;

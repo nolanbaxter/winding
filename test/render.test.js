@@ -15,6 +15,12 @@ import { vec3Create } from '../src/core/math/vec3.js';
 import { Camera } from '../src/scene/camera.js';
 import { Scene } from '../src/scene/scene.js';
 import { GpuDriven } from '../src/render/gpudriven.js';
+import { SkinPalette } from '../src/render/skin.js';
+import { PBR_SHADER } from '../src/render/shaders/pbr.js';
+import { OIT_RESOLVE_SHADER } from '../src/render/shaders/oit.js';
+import { HZB_SHADER } from '../src/render/hzb.js';
+import { CLUSTER_SHADER } from '../src/render/clustered.js';
+import { POST_SHADER } from '../src/render/post.js';
 import {
   DrawList, opaqueSortKey, transparentSortKey,
   transparentDepthBucket,
@@ -293,15 +299,17 @@ test('depth buckets derive from the reverse-Z curve, far-first for blending', ()
   // Only the transparent bucket exists now. The opaque key's depth field is
   // always zero, because a BATCH has no single depth -- so the function that
   // would have filled it had no caller and is gone.
+  // Derived, not written down: the field width has moved twice.
+  const max = (1 << TRANSPARENT_DEPTH_BITS) - 1;
   const near = 0.1;
   let previous = Infinity;
   for (const distance of [0.1, 1, 10, 1000, 1e6]) {
     const bucket = transparentDepthBucket(near, distance);
     assert.ok(bucket <= previous, `not monotonic at ${distance}`);
-    assert.ok(bucket >= 0 && bucket <= 65535, `out of range at ${distance}: ${bucket}`);
+    assert.ok(bucket >= 0 && bucket <= max, `out of range at ${distance}: ${bucket}`);
     previous = bucket;
   }
-  assert.equal(transparentDepthBucket(near, near), 65535, 'at the near plane, drawn last');
+  assert.equal(transparentDepthBucket(near, near), max, 'at the near plane, drawn last');
 });
 
 test('transparent buckets run the other way, far-first', () => {
@@ -549,6 +557,7 @@ function growableGpu(materials) {
   gpu.batchFirst = new Uint32Array(gpu.batchCapacity);
   gpu.batchMaterial = new Uint16Array(gpu.batchCapacity);
   gpu.batchMirrored = new Uint8Array(gpu.batchCapacity);
+  gpu.batchSkinned = new Uint8Array(gpu.batchCapacity);
   gpu.batchSize = new Uint32Array(gpu.batchCapacity);
   gpu.indirectData = new Uint32Array(gpu.batchCapacity * 2 * 5);
   gpu.batchStaging = new ArrayBuffer(gpu.alignment * (gpu.batchCapacity * 2 + 1));
@@ -571,6 +580,7 @@ function batchesFor(scene) {
   gpu.batchOrder = new Uint32Array(16);
   gpu.batchMaterial = new Uint16Array(16);
   gpu.batchMirrored = new Uint8Array(16);
+  gpu.batchSkinned = new Uint8Array(16);
   gpu.batchSize = new Uint32Array(16);
   gpu.batchPrimitive = [];
   gpu.transparentItems = new Uint32Array(16);
@@ -756,6 +766,142 @@ test('a box off to the side is measured by depth, not by distance', () => {
   camera.target.set([0, 0, -1]);
   camera.update(1);
   close(farthestViewDepth(camera.view, [99, 0, -1], [101, 1, -1]), 1, EPS);
+});
+
+// -------------------------------------------------------------- bind pose
+
+console.log('\nskin palette');
+
+/** A scene with one rigged quad whose joints the caller can pose. */
+function skinnedScene({ jointPositions = [[0, 0, 0], [0, 0, 0]] } = {}) {
+  const scene = new Scene({ capacity: 32 });
+  const primitive = {
+    indexCount: 6, materialId: 0,
+    bounds: { min: [0, 0, 0], max: [1, 1, 0] },
+    skinned: true,
+    jointIndices: new Uint32Array(16),
+    jointWeights: new Float32Array(16),
+  };
+  const asset = {
+    nodes: [
+      { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [1, 2], mesh: 0, skin: 0 },
+      { position: jointPositions[0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [], mesh: -1, skin: -1 },
+      { position: jointPositions[1], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [], mesh: -1, skin: -1 },
+    ],
+    meshes: [{ primitives: [primitive] }],
+    // Bind pose: both joints at the origin, so the inverse bind matrices are
+    // identity and a palette entry is just the joint's world matrix.
+    skins: [{
+      name: 'rig',
+      joints: Uint32Array.from([1, 2]),
+      inverseBind: Float32Array.from([
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+      ]),
+    }],
+    roots: [0],
+    animations: [],
+  };
+  scene.add(asset);
+  scene.update();
+  return scene;
+}
+
+/** SkinPalette.update with no GPU: the matrix maths is what is under test. */
+function paletteFor(scene) {
+  const palette = Object.create(SkinPalette.prototype);
+  palette.capacity = 256;
+  palette.data = new Float32Array(256 * 16);
+  palette.offsets = new Uint32Array(64);
+  palette.jointCount = 0;
+  palette.revision = 0;
+  palette.buffer = {};
+  palette.rhi = { queue: { writeBuffer() {} } };
+  palette.update(scene);
+  return palette;
+}
+
+test('in bind pose every joint matrix is identity', () => {
+  // The whole of step 2 rests on this: a character in bind pose must come out
+  // exactly where the unskinned mesh would. Any error in the multiply order,
+  // the inverse bind, or the joint-to-entity mapping shows up here as a
+  // matrix that is not identity, before any animation exists to confuse it.
+  const palette = paletteFor(skinnedScene());
+  assert.equal(palette.jointCount, 2);
+
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  for (let j = 0; j < 2; j++) {
+    for (let k = 0; k < 16; k++) {
+      close(palette.data[j * 16 + k], identity[k], EPS, `joint ${j} element ${k}`);
+    }
+  }
+});
+
+test('moving a joint moves only its own matrix', () => {
+  const palette = paletteFor(skinnedScene({ jointPositions: [[0, 0, 0], [5, 0, 0]] }));
+  // Column-major: the translation is elements 12..14.
+  vecClose(palette.data.subarray(12, 15), [0, 0, 0], EPS, 'joint 0 stayed');
+  vecClose(palette.data.subarray(28, 31), [5, 0, 0], EPS, 'joint 1 moved');
+});
+
+test('the mesh node transform does not enter the palette', () => {
+  // glTF 3.7.3.3: a skinned mesh's own node transform is ignored, because the
+  // joints place it entirely. Applying it as well would move the character
+  // twice, which looks like a doubled translation rather than an error.
+  const scene = skinnedScene();
+  const meshEntity = scene.renderableEntity[0];
+  scene.transforms.setPosition(meshEntity, 100, 0, 0);
+  scene.update();
+
+  const palette = paletteFor(scene);
+  // The joints are CHILDREN of the mesh node, so their world matrices do move
+  // -- that is inheritance, not the mesh node being applied to the palette.
+  vecClose(palette.data.subarray(12, 15), [100, 0, 0], EPS, 'joint inherited the parent');
+  // And nothing doubled it.
+  assert.ok(palette.data[12] < 150, `translation was applied twice: ${palette.data[12]}`);
+});
+
+test('two instances get separate palette slices', () => {
+  // The reason paletteOffset is per-instance draw data rather than per batch:
+  // two characters in different poses still share a pipeline and a draw call.
+  const scene = skinnedScene();
+  scene.add({
+    nodes: [
+      { position: [9, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [1], mesh: 0, skin: 0 },
+      { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [], mesh: -1, skin: -1 },
+    ],
+    meshes: [{ primitives: [{
+      indexCount: 6, materialId: 0, bounds: { min: [0, 0, 0], max: [1, 1, 0] },
+      skinned: true,
+    jointIndices: new Uint32Array(16), jointWeights: new Float32Array(16),
+    }] }],
+    skins: [{ name: 'rig2', joints: Uint32Array.from([1]), inverseBind: Float32Array.from([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    ]) }],
+    roots: [0], animations: [],
+  });
+  scene.update();
+
+  const palette = paletteFor(scene);
+  assert.equal(scene.skins.length, 2);
+  assert.equal(palette.offsets[0], 0);
+  assert.equal(palette.offsets[1], 2, 'the second skin starts after the first two joints');
+  assert.equal(palette.jointCount, 3);
+  vecClose(palette.data.subarray(2 * 16 + 12, 2 * 16 + 15), [9, 0, 0], EPS, 'second instance');
+});
+
+test('no shader template contains a stray backtick', () => {
+  // This has bitten twice: a backtick in a WGSL comment terminates the
+  // template literal, and the file then fails to parse with an error pointing
+  // at whatever word followed it. Cheap to check, invisible to review.
+  const shaders = {
+    PBR_SHADER, OIT_RESOLVE_SHADER, HZB_SHADER, CLUSTER_SHADER, POST_SHADER,
+  };
+  for (const [name, source] of Object.entries(shaders)) {
+    assert.ok(source && source.length > 0, `${name} is empty, so it was truncated`);
+    assert.equal(source.includes('`'), false, `${name} contains a backtick`);
+    assert.equal(source.includes('${'), false, `${name} has an uninterpolated placeholder`);
+  }
 });
 
 console.log(`\n${passed} checks passed\n`);

@@ -49,3 +49,47 @@ export function packVertexColor(r, g, b, a) {
     | (Math.max(0, Math.min(1, g)) * 255 + 0.5) << 8
     | (Math.max(0, Math.min(1, r)) * 255 + 0.5)) >>> 0;
 }
+
+/**
+ * The skinning influences, in a SECOND vertex buffer bound only by skinned
+ * pipelines.
+ *
+ * Not folded into the layout above, which is the opposite call from the one
+ * uv1 and COLOR_0 got. Those are data any mesh might carry and they need no
+ * shader change, so one format with identity defaults beat a family of them.
+ * These are meaningful only for skinned meshes AND come with a mandatory
+ * vertex-shader difference, so the pipeline variant exists either way and this
+ * rides along free -- a static mesh binds one buffer and pays nothing.
+ *
+ * Indices are uint16x4: glTF allows unsigned byte or short, and a skeleton
+ * past 65535 joints is not a thing. Weights are float32x4 because they were
+ * renormalized on the CPU, so they are no longer whatever the file quantised
+ * them to.
+ */
+export const SKIN_STRIDE_BYTES = 24;
+
+export const SKIN_BUFFER_LAYOUT = {
+  arrayStride: SKIN_STRIDE_BYTES,
+  attributes: [
+    { shaderLocation: 6, offset: 0, format: 'uint16x4' },     // JOINTS_0
+    { shaderLocation: 7, offset: 8, format: 'float32x4' },    // WEIGHTS_0
+  ],
+};
+
+/** Interleave joint indices and weights into the layout above. */
+export function packSkinVertices(jointIndices, jointWeights, vertexCount) {
+  const out = new ArrayBuffer(vertexCount * SKIN_STRIDE_BYTES);
+  const u16 = new Uint16Array(out);
+  const f32 = new Float32Array(out);
+  for (let v = 0; v < vertexCount; v++) {
+    const o = v * (SKIN_STRIDE_BYTES / 2);
+    const g = v * 4;
+    u16[o] = jointIndices[g]; u16[o + 1] = jointIndices[g + 1];
+    u16[o + 2] = jointIndices[g + 2]; u16[o + 3] = jointIndices[g + 3];
+
+    const w = v * (SKIN_STRIDE_BYTES / 4) + 2;
+    f32[w] = jointWeights[g]; f32[w + 1] = jointWeights[g + 1];
+    f32[w + 2] = jointWeights[g + 2]; f32[w + 3] = jointWeights[g + 3];
+  }
+  return out;
+}

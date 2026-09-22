@@ -86,7 +86,7 @@ export const LIGHT_BYTES = 64;
  */
 export const DEFAULT_LIGHT_CAPACITY = 256;
 
-const CLUSTER_SHADER = /* wgsl */ `
+export const CLUSTER_SHADER = /* wgsl */ `
 struct Params {
   // Inverse projection, to turn screen tiles back into view-space rays.
   invProjection : mat4x4<f32>,

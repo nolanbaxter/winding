@@ -40,7 +40,7 @@ export const HZB_FORMAT = 'r32float';
 
 const PARAMS_BYTES = 16;
 
-const HZB_SHADER = /* wgsl */ `
+export const HZB_SHADER = /* wgsl */ `
 struct Params {
   srcSize : vec2<u32>,
   dstSize : vec2<u32>,

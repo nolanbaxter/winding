@@ -304,3 +304,66 @@ export async function buildDemoGLB({ arms = 6, glass = 3 } = {}) {
 
   return encodeGLB(json, bytes);
 }
+
+/**
+ * A rigged quad: two joints, both at the origin with identity inverse binds.
+ *
+ * Bind pose on purpose. With an identity palette a skinned draw must produce
+ * exactly the vertices an unskinned one would, which makes it the strongest
+ * check available before any animation exists -- an error in the multiply
+ * order, the joint-to-entity map or the vertex buffer shows up as a deformed
+ * or vanished mesh rather than as something subtly off.
+ */
+export function buildRiggedGLB() {
+  const positions = Float32Array.from([
+    -1, 0, 0, 1, 0, 0, -1, 2, 0, 1, 2, 0,
+  ]);
+  const normals = Float32Array.from([
+    0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+  ]);
+  const uvs = Float32Array.from([0, 1, 1, 1, 0, 0, 1, 0]);
+  const indices = Uint16Array.from([0, 1, 2, 2, 1, 3]);
+  // Bottom edge to joint 0, top edge to joint 1.
+  const joints = Uint16Array.from([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
+  const weights = Float32Array.from([
+    1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0,
+  ]);
+  const inverseBind = Float32Array.from([
+    1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+  ]);
+
+  const { bytes, views } = packBuffer([positions, indices, normals, uvs, joints, weights, inverseBind]);
+
+  return encodeGLB({
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [-1, 0, 0], max: [1, 2, 0] },
+      { bufferView: 1, componentType: 5123, count: 6, type: 'SCALAR' },
+      { bufferView: 2, componentType: 5126, count: 4, type: 'VEC3' },
+      { bufferView: 3, componentType: 5126, count: 4, type: 'VEC2' },
+      { bufferView: 4, componentType: 5123, count: 4, type: 'VEC4' },
+      { bufferView: 5, componentType: 5126, count: 4, type: 'VEC4' },
+      { bufferView: 6, componentType: 5126, count: 2, type: 'MAT4' },
+    ],
+    materials: [{ pbrMetallicRoughness: { baseColorFactor: [0.8, 0.3, 0.3, 1] } }],
+    meshes: [{
+      name: 'rigged',
+      primitives: [{
+        attributes: { POSITION: 0, NORMAL: 2, TEXCOORD_0: 3, JOINTS_0: 4, WEIGHTS_0: 5 },
+        indices: 1,
+        material: 0,
+      }],
+    }],
+    skins: [{ joints: [1, 2], inverseBindMatrices: 6 }],
+    nodes: [
+      { name: 'rigged-root', mesh: 0, skin: 0, children: [1, 2] },
+      { name: 'joint-hip' },
+      { name: 'joint-chest' },
+    ],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  }, bytes);
+}

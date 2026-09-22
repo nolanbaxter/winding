@@ -30,7 +30,7 @@ export const HDR_FORMAT = 'rgba16float';
 const PARAMS_BYTES = 32;
 const MAX_BLOOM_LEVELS = 6;
 
-const POST_SHADER = /* wgsl */ `
+export const POST_SHADER = /* wgsl */ `
 struct Params {
   texelSize : vec2<f32>,   // 1 / source size
   threshold : f32,

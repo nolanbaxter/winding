@@ -43,6 +43,9 @@ export class Scene {
     /** Primitive descriptors: GPU buffers + index count. Held, never called. */
     this.renderablePrimitive = new Array(renderableCapacity);
 
+    /** Index into this.skins, or -1: which palette a renderable reads. */
+    this.renderableSkin = new Int32Array(renderableCapacity).fill(-1);
+
     this.localMin = new Float32Array(renderableCapacity * 3);
     this.localMax = new Float32Array(renderableCapacity * 3);
     this.worldMin = new Float32Array(renderableCapacity * 3);
@@ -66,6 +69,9 @@ export class Scene {
     this.lights = new Float32Array(lightCapacity * LIGHT_FLOATS);
 
     this._childrenOf = new Map();   // entity -> [entity], asset declaration order
+    /** Resolved skin instances: joint ENTITIES plus the bind pose. */
+    this.skins = [];
+    this._pendingSkins = [];
     /** Root entity -> AnimationPlayer, for asset instances that have clips. */
     this._players = new Map();
   }
@@ -95,8 +101,25 @@ export class Scene {
       });
 
       if (node.mesh >= 0) {
+        // A skin instance per (node, skin), because `created` is this
+        // instance's node-to-entity map -- two copies of one character need
+        // two palettes, which is the same reason the animation player is per
+        // instance. Deferred until after the walk, since a joint node may not
+        // have been visited yet.
+        // Indexed against this.skins, which accumulates across every add() --
+        // the pending list is only this call's tail of it.
+        const skinIndex = node.skin >= 0 && asset.skins?.[node.skin] !== undefined
+          ? this.skins.length + this._pendingSkins.push({ skin: asset.skins[node.skin], created }) - 1
+          : -1;
         for (const primitive of asset.meshes[node.mesh].primitives) {
-          this._addRenderable(entity, primitive);
+          // Only a mesh that HAS influences is skinned. A rigged mesh
+          // instanced under a node with no skin renders static, which is what
+          // the pairing living on the node means.
+          // primitive.skinned, not primitive.jointIndices: by the time a
+          // primitive reaches the scene it is the renderer's object, which
+          // carries GPU buffers rather than the arrays they were built from.
+          const skinned = skinIndex >= 0 && primitive.skinned ? skinIndex : -1;
+          this._addRenderable(entity, primitive, skinned);
         }
       }
 
@@ -110,6 +133,24 @@ export class Scene {
     const parentEntity = parent ? parent.entity : NULL_HANDLE;
     for (const root of asset.roots) roots.push(visit(root, parentEntity));
 
+    // Joints resolve now, not during the walk: a skin may name a node the walk
+    // had not reached yet, and `created` is only complete once it is done.
+    for (const pending of this._pendingSkins) {
+      const { skin, created: map } = pending;
+      const joints = new Uint32Array(skin.joints.length);
+      for (let j = 0; j < skin.joints.length; j++) {
+        const jointEntity = map[skin.joints[j]];
+        if (jointEntity === undefined || jointEntity === NULL_HANDLE) {
+          throw new Error(
+            `Scene.add: skin "${skin.name}" names node ${skin.joints[j]}, which is not in the ` +
+            'asset\'s default scene, so it has no entity to drive it',
+          );
+        }
+        joints[j] = jointEntity;
+      }
+      this.skins.push({ joints, inverseBind: skin.inverseBind });
+    }
+    this._pendingSkins.length = 0;
     // Multi-root assets get a wrapper so the caller always gets one handle back
     // and can move the whole thing with a single setPosition.
     let handle;
@@ -132,7 +173,7 @@ export class Scene {
     return new Node(this, handle);
   }
 
-  _addRenderable(entity, primitive) {
+  _addRenderable(entity, primitive, skin = -1) {
     if (this.renderableCount >= this.renderableCapacity) {
       this._growRenderables(this.renderableCount + 1);
     }
@@ -143,6 +184,7 @@ export class Scene {
     this.renderableMatrixSlot[i] = handleIndex(entity);
     this.renderableMaterial[i] = primitive.materialId;
     this.renderablePrimitive[i] = primitive;
+    this.renderableSkin[i] = skin;
 
     this.localMin.set(primitive.bounds.min, i * 3);
     this.localMax.set(primitive.bounds.max, i * 3);
@@ -157,6 +199,7 @@ export class Scene {
     this.renderableMaterial = growArray(this.renderableMaterial, capacity);
     this.renderablePrimitive.length = capacity;
 
+    this.renderableSkin = growArray(this.renderableSkin, capacity);
     this.localMin = growArray(this.localMin, capacity, 3);
     this.localMax = growArray(this.localMax, capacity, 3);
     // World bounds are recomputed from local every time they are read, so these

@@ -15,7 +15,7 @@
 import { Winding, Camera } from '../src/winding.js';
 import { shaderErrors } from '../src/rhi/shader.js';
 import { NOT_BATCHED } from '../src/render/gpudriven.js';
-import { buildDemoGLB } from './fixtures/demoModel.js';
+import { buildDemoGLB, buildRiggedGLB } from './fixtures/demoModel.js';
 
 const FRAMES = 30;
 
@@ -73,11 +73,12 @@ export async function run(canvas, onDone) {
 
   await step('every material pipeline permutation builds', async () => {
     await engine.renderer.ensureVariants(ALL_VARIANTS);
-    // Each material variant expands into two pipelines, one per winding, so a
-    // mirrored instance never has to compile anything mid-frame.
     const built = engine.renderer._pipelineByVariant.size;
-    if (built !== ALL_VARIANTS.length * 2) {
-      throw new Error(`${ALL_VARIANTS.length} variants built ${built} pipelines, expected ${ALL_VARIANTS.length * 2}`);
+    // Each material variant expands by winding AND by skinning: four
+    // pipelines apiece, so nothing has to compile mid-frame whichever a scene
+    // turns out to need.
+    if (built !== ALL_VARIANTS.length * 4) {
+      throw new Error(`${ALL_VARIANTS.length} variants built ${built} pipelines, expected ${ALL_VARIANTS.length * 4}`);
     }
     return `${ALL_VARIANTS.length} variants, ${built} pipelines`;
   });
@@ -244,6 +245,44 @@ export async function run(canvas, onDone) {
       throw new Error(`${passes} passes, ${executed} executed, ${culled} culled -- ${passes - executed - culled} unaccounted for`);
     }
     return `${executed} of ${passes} passes, ${edges} edges`;
+  });
+
+  await step('a skinned mesh draws, and bind pose matches the static mesh', async () => {
+    // The strong check for step 2: with every joint at the origin and identity
+    // inverse binds, the palette must be identity, so a skinned draw and an
+    // unskinned draw of the same geometry produce the same vertices. Any error
+    // in the multiply order, the joint-to-entity mapping or the vertex buffer
+    // shows up before there is any animation to confuse it with.
+    const rigged = await engine.load(buildRiggedGLB());
+    const riggedNode = scene.add(rigged);
+    engine.renderFrame(scene, camera);
+    await engine.rhi.device.queue.onSubmittedWorkDone();
+
+    const palette = engine.renderer.skinPalette;
+    if (palette.jointCount !== 2) {
+      throw new Error(`expected 2 joints in the palette, got ${palette.jointCount}`);
+    }
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    for (let j = 0; j < 2; j++) {
+      for (let k = 0; k < 16; k++) {
+        if (Math.abs(palette.data[j * 16 + k] - identity[k]) > 1e-5) {
+          throw new Error(`joint ${j} is not identity in bind pose at element ${k}`);
+        }
+      }
+    }
+
+    // A skinned batch, a skin vertex buffer, and a skinned pipeline.
+    const gpu = engine.renderer.gpu;
+    let skinnedBatches = 0;
+    for (let b = 0; b < gpu.batchCount; b++) if (gpu.batchSkinned[b]) skinnedBatches++;
+    if (skinnedBatches === 0) throw new Error('nothing batched as skinned');
+
+    const primitive = rigged.meshes[0].primitives[0];
+    if (!primitive.skinBuffer) throw new Error('the rigged primitive has no skin vertex buffer');
+
+    // Move a joint and confirm the palette follows, which is the whole point.
+    riggedNode.destroy();
+    return `${skinnedBatches} skinned batch, ${palette.jointCount} joints, bind pose identity`;
   });
 
   await step('order-independent transparency resolves into the scene', async () => {

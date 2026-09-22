@@ -43,8 +43,12 @@ export const OPAQUE_DEPTH_BITS = 10;       // 1024 depth buckets
 // ids are a dense index over variantKey(alphaMode, doubleSided), and that has
 // at most SIX distinct values, so 8 bits were holding 3 bits of information
 // right next to a field that was 4 bits short.
-export const TRANSPARENT_DEPTH_BITS = 16;  // fine ordering: blending needs it
-export const TRANSPARENT_PIPELINE_BITS = 4;
+// Pipeline widened from 4 when skinning arrived: three alpha modes times two
+// sidedness times two windings times two skinning is 24 distinct pipelines,
+// past what 4 bits holds. The bit came from depth, which had 65536 buckets for
+// an ordering that cannot resolve better than a pixel anyway.
+export const TRANSPARENT_DEPTH_BITS = 15;  // fine ordering: blending needs it
+export const TRANSPARENT_PIPELINE_BITS = 5;
 export const TRANSPARENT_MATERIAL_BITS = OPAQUE_MATERIAL_BITS;
 
 assert(OPAQUE_PIPELINE_BITS + OPAQUE_MATERIAL_BITS + OPAQUE_DEPTH_BITS === 32,
