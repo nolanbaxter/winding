@@ -114,6 +114,36 @@ export async function run(canvas, onDone) {
     await engine.rhi.device.queue.onSubmittedWorkDone();
   });
 
+  await step('GPU pass timing reports a duration per pass', async () => {
+    const profiler = engine.renderer.gpuTiming;
+    if (!profiler.supported) return 'skipped: no timestamp-query on this adapter';
+
+    // Chrome quantises timestamps to 65536ns, so most passes read as 0 on any
+    // given frame. Only the mean over a few hundred frames means anything.
+    const SAMPLES = 400;
+    profiler.resetAverages();
+    for (let i = 0; i < SAMPLES * 3 && profiler.samples < SAMPLES; i++) {
+      camera.position.set([Math.sin(i * 0.02) * 8, 2, Math.cos(i * 0.02) * 8]);
+      engine.renderFrame(scene, camera);
+      await engine.rhi.device.queue.onSubmittedWorkDone();
+    }
+    if (profiler.samples === 0) throw new Error('no timing readback completed');
+
+    for (const { name, ms } of profiler.average) {
+      if (!Number.isFinite(ms) || ms < 0) throw new Error(`pass ${name} averaged ${ms}ms`);
+    }
+    if (profiler.averageTotalMs <= 0) {
+      throw new Error('every pass averaged 0ms, which means the queries never landed');
+    }
+
+    console.log(`[gpu timing] ${profiler.samples} samples, ${profiler.averageTotalMs.toFixed(3)}ms total:`,
+      profiler.average.map((p) => `${p.name}=${p.ms.toFixed(4)}`).join(' '));
+
+    const top = profiler.slowest(3).map((p) => `${p.name} ${p.ms.toFixed(3)}ms`).join(', ');
+    return `${profiler.average.length} passes over ${profiler.samples} frames, `
+      + `${profiler.averageTotalMs.toFixed(2)}ms; slowest ${top}`;
+  });
+
   await step('blended geometry is held out of the batched path', async () => {
     const gpu = engine.renderer.gpu;
     if (gpu.transparentCount === 0) throw new Error('the demo asset has no BLEND material to test with');

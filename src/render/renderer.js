@@ -21,6 +21,7 @@ import { PBR_SHADER, FRAME_BYTES } from './shaders/pbr.js';
 import { SkyboxPass } from './skybox.js';
 import { ShadowMaps } from './shadows.js';
 import { RenderGraph } from './graph.js';
+import { GpuProfiler } from './timing.js';
 import { ClusteredLights, CLUSTER_X, CLUSTER_Y, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES } from './gpudriven.js';
@@ -36,13 +37,15 @@ const FORWARD = vec3Create();
 const now = () => (globalThis.performance?.now?.() ?? Date.now());
 
 export class Renderer {
-  static async create(rhi, { maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = 60, post } = {}) {
-    const renderer = new Renderer(rhi, { maxDraws, exposure, shadows, lightDistance, post });
+  static async create(rhi, {
+    maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = 60, post, gpuTiming = true,
+  } = {}) {
+    const renderer = new Renderer(rhi, { maxDraws, exposure, shadows, lightDistance, post, gpuTiming });
     await renderer._init();
     return renderer;
   }
 
-  constructor(rhi, { maxDraws, exposure, shadows, lightDistance, post }) {
+  constructor(rhi, { maxDraws, exposure, shadows, lightDistance, post, gpuTiming = true }) {
     this.shadowOptions = shadows ?? {};
     this.postOptions = post ?? {};
     this.rhi = rhi;
@@ -125,7 +128,16 @@ export class Renderer {
     // a frame. One entry per blended object, not per batch.
     this.transparentList = new DrawList(maxDraws);
     this._transparentOrder = new Uint32Array(maxDraws);
-    this.graph = new RenderGraph(rhi);
+    /**
+     * GPU milliseconds per pass, to sit beside the CPU phases below.
+     *
+     * On by default for the same reason those are: the cost is two timestamps
+     * per pass and an async copy, and a renderer that makes you remember to
+     * turn on the thing that says what is slow gets optimized by guesswork.
+     * Inert on a device without `timestamp-query`.
+     */
+    this.gpuTiming = new GpuProfiler(rhi, { enabled: gpuTiming });
+    this.graph = new RenderGraph(rhi, { profiler: this.gpuTiming });
     // Bound once: the graph holds a function per pass, and rebuilding these
     // every frame would allocate a closure per pass per frame.
     this._forwardExecute = (pass) => this._encodeForward(pass);
@@ -415,6 +427,10 @@ export class Renderer {
     // was rendered in.
     this.gpu.lastViewProjection.set(camera.viewProjection);
 
+    // After the last pass is recorded and before the encoder is closed: this
+    // only copies queries the GPU will have written by the time it runs.
+    this.gpuTiming.resolve(encoder);
+
     const tEnd = now();
     this.timing.transforms = tAfterTransforms - tFrame;
     this.timing.upload = tAfterUpload - tAfterTransforms;
@@ -422,6 +438,9 @@ export class Renderer {
     this.timing.encode = tEnd - tAfterGraph;
     this.timing.total = tEnd - tFrame;
     rhi.queue.submit([encoder.finish()]);
+    // After the submit, never before: the command buffer above writes the
+    // buffer this maps, and a buffer with a map pending cannot be written.
+    this.gpuTiming.readback();
   }
 
   /**

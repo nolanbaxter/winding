@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { RenderGraph } from '../src/render/graph.js';
+import { GpuProfiler } from '../src/render/timing.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -472,5 +473,208 @@ test('the bloom chain shape compiles and orders correctly', () => {
   assert.ok(order.indexOf('down:3') < order.indexOf('up:2'), 'downsample before upsample');
   assert.ok(order.indexOf('up:2') < order.indexOf('up:0'), 'upsample walks back up');
 });
+
+// ------------------------------------------------------------------ timing
+
+console.log('\nGPU pass timing');
+
+// The profiler names WebGPU's usage flags the way every other module does, so
+// Node needs them to exist. Real values, in case anything ever ORs them.
+globalThis.GPUBufferUsage ??= {
+  MAP_READ: 0x0001, COPY_SRC: 0x0004, COPY_DST: 0x0008, QUERY_RESOLVE: 0x0200,
+};
+globalThis.GPUMapMode ??= { READ: 0x0001 };
+
+
+/**
+ * A device that records what the profiler asks of it. Timestamps are handed
+ * back as a fixed ramp so durations are predictable: pass i takes (i+1) ms.
+ */
+function timingRhi({ feature = true } = {}) {
+  const copies = [];
+  const resolves = [];
+  return {
+    copies,
+    resolves,
+    features: { has: (name) => feature && name === 'timestamp-query' },
+    device: {
+      createQuerySet: (desc) => ({ ...desc, destroy() {} }),
+      createBuffer(desc) {
+        const bytes = new ArrayBuffer(desc.size);
+        return {
+          size: desc.size,
+          destroy() {},
+          mapAsync: () => Promise.resolve(),
+          getMappedRange() {
+            const stamps = new BigInt64Array(bytes);
+            for (let i = 0; i < stamps.length / 2; i++) {
+              stamps[i * 2] = BigInt(i) * 1000000n;
+              stamps[i * 2 + 1] = BigInt(i) * 1000000n + BigInt(i + 1) * 1000000n;
+            }
+            return bytes;
+          },
+          unmap() {},
+        };
+      },
+    },
+  };
+}
+
+const encoderStub = () => ({
+  resolves: [],
+  resolveQuerySet(set, first, count) { this.resolves.push({ first, count }); },
+  copyBufferToBuffer() {},
+});
+
+test('a device without the feature makes every call inert', () => {
+  const profiler = new GpuProfiler(timingRhi({ feature: false }));
+  assert.equal(profiler.supported, false);
+  profiler.begin();
+  assert.equal(profiler.writesFor(0, 'forward'), undefined);
+  profiler.resolve(encoderStub());
+  assert.deepEqual(profiler.results, []);
+});
+
+test('enabled:false turns it off on a device that does support it', () => {
+  const profiler = new GpuProfiler(timingRhi(), { enabled: false });
+  assert.equal(profiler.supported, false);
+  profiler.begin();
+  assert.equal(profiler.writesFor(0, 'forward'), undefined);
+});
+
+test('each pass gets its own pair of query indices', () => {
+  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 4 });
+  profiler.begin();
+  const first = profiler.writesFor(0, 'cull');
+  const second = profiler.writesFor(1, 'forward');
+  assert.equal(first.beginningOfPassWriteIndex, 0);
+  assert.equal(first.endOfPassWriteIndex, 1);
+  assert.equal(second.beginningOfPassWriteIndex, 2);
+  assert.equal(second.endOfPassWriteIndex, 3);
+  assert.equal(first.querySet, second.querySet, 'one set for the whole frame');
+});
+
+test('passes past the query set are untimed rather than an error', () => {
+  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 1 });
+  profiler.begin();
+  assert.ok(profiler.writesFor(0, 'in'));
+  assert.equal(profiler.writesFor(1, 'out'), undefined);
+});
+
+test('begin() forgets the previous frame, so names cannot accumulate', () => {
+  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 8 });
+  profiler.begin();
+  profiler.writesFor(0, 'a');
+  profiler.begin();
+  const again = profiler.writesFor(0, 'a');
+  assert.equal(again.beginningOfPassWriteIndex, 0, 'indices restart with the frame');
+});
+
+test('resolve only covers the passes that actually ran', () => {
+  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 64 });
+  profiler.begin();
+  profiler.writesFor(0, 'a');
+  profiler.writesFor(1, 'b');
+  const encoder = encoderStub();
+  profiler.resolve(encoder);
+  assert.deepEqual(encoder.resolves, [{ first: 0, count: 4 }],
+    'resolving all 64 slots would read queries nothing wrote');
+});
+
+test('a frame with no passes resolves nothing', () => {
+  const profiler = new GpuProfiler(timingRhi());
+  profiler.begin();
+  const encoder = encoderStub();
+  profiler.resolve(encoder);
+  assert.deepEqual(encoder.resolves, []);
+});
+
+test('the ring skips instead of stalling when every buffer is in flight', () => {
+  const profiler = new GpuProfiler(timingRhi(), { depth: 2 });
+  const encoder = encoderStub();
+  // Three frames back to back, nothing given a chance to unmap in between.
+  for (let i = 0; i < 3; i++) {
+    profiler.begin();
+    profiler.writesFor(0, 'a');
+    profiler.resolve(encoder);
+    profiler.readback();
+  }
+  assert.equal(encoder.resolves.length, 2, 'the third frame is dropped, not queued');
+});
+
+test('readback without a resolve does nothing, and does not repeat itself', () => {
+  const profiler = new GpuProfiler(timingRhi(), { depth: 1 });
+  profiler.readback();
+
+  profiler.begin();
+  profiler.writesFor(0, 'a');
+  profiler.resolve(encoderStub());
+  profiler.readback();
+  // A second readback must not map the same buffer twice: WebGPU rejects that,
+  // and the ring would lose the slot.
+  profiler.readback();
+});
+
+test('the graph hands every pass its timestamp writes, render and compute', () => {
+  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 8 });
+  const graph = new RenderGraph(fakeRhi(), { profiler });
+  graph.begin();
+  // An imported target: a transient nothing reads is a dead pass, and a dead
+  // pass is never recorded, so there would be nothing to check.
+  const target = graph.importTexture('surface', {});
+  const buffer = graph.importBuffer('counts', {});
+  graph.addPass({ name: 'cull', type: 'compute', writes: [buffer], execute: () => {} });
+  graph.addPass({
+    name: 'forward',
+    color: [{ resource: target, clear: [0, 0, 0, 1] }],
+    reads: [buffer],
+    execute: () => {},
+  });
+  graph.compile();
+
+  const seen = [];
+  graph.execute({
+    beginComputePass(desc) { seen.push(desc); return { end() {} }; },
+    beginRenderPass(desc) { seen.push(desc); return { end() {} }; },
+  });
+
+  assert.equal(seen.length, 2);
+  for (const desc of seen) {
+    assert.ok(desc.timestampWrites, `${desc.label} is timed`);
+  }
+  assert.equal(seen[0].timestampWrites.endOfPassWriteIndex + 1,
+    seen[1].timestampWrites.beginningOfPassWriteIndex,
+    'indices follow execution order, not declaration order');
+});
+
+test('no profiler means no timestampWrites key to confuse a driver', () => {
+  const graph = new RenderGraph(fakeRhi());
+  graph.begin();
+  const target = graph.importTexture('surface', {});
+  graph.addPass({ name: 'only', color: [{ resource: target, clear: [0, 0, 0, 1] }], execute: () => {} });
+  graph.compile();
+
+  let seen = null;
+  graph.execute({ beginRenderPass(desc) { seen = desc; return { end() {} }; } });
+  assert.equal(seen.timestampWrites, undefined);
+});
+
+// Readback is a promise, so this one sits outside the sync helper.
+{
+  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 8 });
+  profiler.begin();
+  profiler.writesFor(0, 'cull');
+  profiler.writesFor(1, 'forward');
+  profiler.resolve(encoderStub());
+  profiler.readback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // The fake ramps pass i to (i+1) ms.
+  assert.deepEqual(profiler.results, [{ name: 'cull', ms: 1 }, { name: 'forward', ms: 2 }]);
+  assert.equal(profiler.totalMs, 3);
+  assert.deepEqual(profiler.slowest(1), [{ name: 'forward', ms: 2 }]);
+  passed++;
+  console.log('  ok  a resolved readback reports a duration per named pass');
+}
 
 console.log(`\n${passed} checks passed\n`);

@@ -42,8 +42,10 @@ const DEFAULT_MAX_PASSES = 32;
 const DEFAULT_MAX_RESOURCES = 64;
 
 export class RenderGraph {
-  constructor(rhi, { maxPasses = DEFAULT_MAX_PASSES, maxResources = DEFAULT_MAX_RESOURCES } = {}) {
+  constructor(rhi, { maxPasses = DEFAULT_MAX_PASSES, maxResources = DEFAULT_MAX_RESOURCES, profiler = null } = {}) {
     this.rhi = rhi;
+    /** Optional GpuProfiler. Every pass gets its timestamp writes from here. */
+    this.profiler = profiler;
     this.maxPasses = maxPasses;
     this.maxResources = maxResources;
 
@@ -73,6 +75,7 @@ export class RenderGraph {
 
   /** Start a new frame's declaration. Frees nothing; resets counters. */
   begin() {
+    this.profiler?.begin();
     this.passCount = 0;
     this.resourceCount = 0;
     this._compiled = false;
@@ -564,8 +567,12 @@ export class RenderGraph {
     for (let step = 0; step < this._orderCount; step++) {
       const pass = this._passes[this._order[step]];
 
+      // Undefined when there is no profiler, which is what a pass descriptor
+      // wants for "do not time this".
+      const timestampWrites = this.profiler?.writesFor(step, pass.name);
+
       if (pass.type === 'compute') {
-        const computePass = encoder.beginComputePass({ label: pass.name });
+        const computePass = encoder.beginComputePass({ label: pass.name, timestampWrites });
         pass.execute(computePass, this);
         computePass.end();
         continue;
@@ -596,6 +603,7 @@ export class RenderGraph {
         label: pass.name,
         colorAttachments,
         depthStencilAttachment,
+        timestampWrites,
       });
       pass.execute(encoded, this);
       encoded.end();
