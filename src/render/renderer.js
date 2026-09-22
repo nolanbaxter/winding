@@ -322,7 +322,7 @@ export class Renderer {
     this.frameData[22] = -scene.sun.direction[2];
     this.frameData[23] = environment.prefilterMips;
     this.frameData.set(scene.sun.color, 24);
-    this.frameData[27] = this.shadows.cascadeCount;
+    this.frameData[27] = this.shadows.activeCascades;
 
     // Cascade matrices (4 x mat4), splits, texel sizes, then the bias params.
     this.frameData.set(this.shadows.matrices, 28);

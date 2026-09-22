@@ -15,6 +15,7 @@ import {
   textureImageIndex, textureSamplerIndex, samplerDescriptor, materialTextureSlots,
 } from '../src/scene/gltf/images.js';
 import { TransformStore } from '../src/scene/transform.js';
+import { unweldAndComputeFlatNormals } from '../src/scene/gltf/tangents.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -733,6 +734,34 @@ await atest('rejects a sampler whose value count does not match its times', asyn
     loadGLTF(makeGLB(json, parseContainer(glb).binary)),
     /2 times but 9 values/,
   );
+});
+
+// ------------------------------------------------------- degenerate input
+
+console.log('\ndegenerate geometry');
+
+test('a zero-area triangle gets a unit normal, not a zero one', () => {
+  // Three collinear points. Exporters emit these at welded seams and collapsed
+  // quads, so it is ordinary input rather than a malformed file. A zero normal
+  // reaches the shader's normalize(tbn * tangentNormal) and poisons every
+  // fragment of that face with NaN.
+  const { normals } = unweldAndComputeFlatNormals(
+    new Float32Array([0, 0, 0, 1, 0, 0, 2, 0, 0]), new Uint32Array([0, 1, 2]), [],
+  );
+  for (let v = 0; v < 3; v++) {
+    const n = normals.subarray(v * 3, v * 3 + 3);
+    close(Math.hypot(n[0], n[1], n[2]), 1, EPS, `vertex ${v} normal is unit length`);
+  }
+});
+
+test('a real triangle still gets its geometric normal', () => {
+  // The negative control: the fallback must not have swallowed the real case.
+  const { normals } = unweldAndComputeFlatNormals(
+    new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), new Uint32Array([0, 1, 2]), [],
+  );
+  close(normals[0], 0, EPS, 'x');
+  close(normals[1], 0, EPS, 'y');
+  close(normals[2], 1, EPS, 'z is the winding normal');
 });
 
 console.log(`\n${passed} checks passed\n`);

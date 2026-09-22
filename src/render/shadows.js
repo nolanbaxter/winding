@@ -173,6 +173,11 @@ export class ShadowMaps {
     this.rhi = rhi;
     this.size = size;
     this.cascadeCount = cascades;
+    /**
+     * Cascades fitted this frame. Zero when there is no sun to fit them to,
+     * which is what keeps the shadow passes off the graph entirely.
+     */
+    this.activeCascades = cascades;
     this.shadowDistance = shadowDistance;
     this.lambda = lambda;
     this.casterExtent = casterExtent;
@@ -310,6 +315,22 @@ export class ShadowMaps {
    * Call once per frame, before rendering the shadow pass.
    */
   update(camera, lightDirection) {
+    // A zero direction is the natural way to say "no sun", because sun.direction
+    // is a plain mutable field the API invites you to write into. Normalizing it
+    // yields (0,0,0), which makes eye === target in mat4LookAt and fills every
+    // cascade matrix with NaN -- and a NaN shadow lookup does not fail loudly,
+    // it just poisons the lighting. So the degenerate case is answered here
+    // instead: no cascades, which selectCascade already reads as "unshadowed"
+    // because the splits are zero.
+    const lengthSq = lightDirection[0] * lightDirection[0]
+      + lightDirection[1] * lightDirection[1]
+      + lightDirection[2] * lightDirection[2];
+    this.activeCascades = lengthSq > 0 ? this.cascadeCount : 0;
+    if (this.activeCascades === 0) {
+      this.splits.fill(0);
+      return;
+    }
+
     vec3Normalize(this._lightDirection, lightDirection);
     const splits = cascadeSplits(camera.near, this.shadowDistance, this.cascadeCount, this.lambda);
 
@@ -404,7 +425,7 @@ export class ShadowMaps {
       this._gpuRevision = gpu.buffersRevision;
     }
 
-    for (let cascade = 0; cascade < this.cascadeCount; cascade++) {
+    for (let cascade = 0; cascade < this.activeCascades; cascade++) {
       graph.addPass({
         name: `shadow:${cascade}`,
         depth: {

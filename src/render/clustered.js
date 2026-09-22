@@ -309,6 +309,22 @@ export class ClusteredLights {
     this.lightData.set(scene.lights.subarray(0, count * (LIGHT_BYTES / 4)));
     this.rhi.queue.writeBuffer(this.lightBuffer, 0, this.lightData, 0, count * (LIGHT_BYTES / 4));
 
+    // Unconditional, and for the same reason cascadeSplits throws: the slice
+    // mapping is log(lightDistance / near), and there is no value of it that
+    // fails loudly. A near of 0 gives log(0) = -Infinity and then
+    // Infinity/Infinity = NaN; lightDistance === near gives a ratio of 0 and a
+    // division by it; lightDistance < near inverts the mapping. Each one ends
+    // as NaN slice bounds, every light assigned to no cluster, and a scene that
+    // renders perfectly except that nothing is lit.
+    if (!(camera.near > 0)) {
+      throw new Error(`ClusteredLights: camera near must be positive, got ${camera.near}`);
+    }
+    if (!(lightDistance > camera.near)) {
+      throw new Error(
+        `ClusteredLights: lightDistance ${lightDistance} must be beyond the near plane ${camera.near}`,
+      );
+    }
+
     // slice = log(d) * scale + bias, inverted in the shader to get the depth
     // range of a slice. Precomputed here so the shader does two operations.
     const ratio = Math.log(lightDistance / camera.near);

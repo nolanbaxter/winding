@@ -177,7 +177,19 @@ export function unweldAndComputeFlatNormals(positions, indices, extraAttributes)
     let ny = e1z * e2x - e1x * e2z;
     let nz = e1x * e2y - e1y * e2x;
     const length = Math.hypot(nx, ny, nz);
-    if (length > 0) { nx /= length; ny /= length; nz /= length; }
+    if (length > 0) {
+      nx /= length; ny /= length; nz /= length;
+    } else {
+      // A zero-area triangle has no normal to compute. Exporters emit them
+      // routinely at welded UV seams and collapsed quads, so this is not an
+      // exotic input. Leaving (0,0,0) would reach the shader's
+      // normalize(tbn * tangentNormal) and hand it a basis containing a zero
+      // column -- NaN, which then spreads through the lighting for every
+      // fragment of that face. Any unit vector is as defensible as another
+      // here, and +Y matches the up axis the rest of the engine assumes.
+      // The tangent path twenty lines up already does exactly this.
+      nx = 0; ny = 1; nz = 0;
+    }
 
     for (let corner = 0; corner < 3; corner++) {
       const o = b + corner * 3;
