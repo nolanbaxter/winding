@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 
 import { AnimationPlayer, sampleClip } from '../src/scene/animation.js';
 import { Scene } from '../src/scene/scene.js';
-import { NULL_HANDLE } from '../src/core/handle.js';
+import { NULL_HANDLE, HandleAllocator, handleIndex } from '../src/core/handle.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -42,15 +42,18 @@ function clip(path, times, values, interpolation = 'LINEAR', name = 'clip') {
 function recorder() {
   return {
     position: null, rotation: null, scale: null,
-    // sampleClip checks liveness before writing, so the stub has to model it.
-    used: new Uint8Array(64).fill(1),
     setPosition(e, x, y, z) { this.position = [x, y, z]; },
     setScale(e, x, y, z) { this.scale = [x, y, z]; },
     setRotation(e, q) { this.rotation = [q[0], q[1], q[2], q[3]]; },
   };
 }
 
-const ENTITY_OF = [1];
+// A REAL allocator, not a stub that models liveness. The bug this file now
+// pins was invisible to a stub, because the stub modelled the slot and the
+// allocator is the only thing that knows the generation.
+const ENTITIES = new HandleAllocator(64);
+const LIVE = ENTITIES.alloc();
+const ENTITY_OF = [LIVE];
 
 // ------------------------------------------------------------- interpolation
 
@@ -59,23 +62,23 @@ console.log('\ninterpolation');
 test('LINEAR interpolates between the surrounding keyframes', () => {
   const c = clip('translation', [0, 2], [0, 0, 0, 10, 20, 30]);
   const t = recorder();
-  sampleClip(c, 0.5, t, ENTITY_OF);
+  sampleClip(c, 0.5, t, ENTITY_OF, ENTITIES);
   assert.deepEqual(t.position, [2.5, 5, 7.5]);
 });
 
 test('STEP holds the earlier keyframe until the next one arrives', () => {
   const c = clip('translation', [0, 2], [0, 0, 0, 10, 20, 30], 'STEP');
   const t = recorder();
-  sampleClip(c, 1.999, t, ENTITY_OF);
+  sampleClip(c, 1.999, t, ENTITY_OF, ENTITIES);
   assert.deepEqual(t.position, [0, 0, 0], 'still on the first key');
-  sampleClip(c, 2, t, ENTITY_OF);
+  sampleClip(c, 2, t, ENTITY_OF, ENTITIES);
   assert.deepEqual(t.position, [10, 20, 30]);
 });
 
 test('a time before the first key clamps rather than extrapolating', () => {
   const c = clip('translation', [1, 2], [5, 5, 5, 9, 9, 9]);
   const t = recorder();
-  sampleClip(c, 0, t, ENTITY_OF);
+  sampleClip(c, 0, t, ENTITY_OF, ENTITIES);
   assert.deepEqual(t.position, [5, 5, 5]);
 });
 
@@ -83,21 +86,21 @@ test('a time past the last key holds the final value', () => {
   // A short channel in a long clip: glTF says hold, not loop and not snap back.
   const c = clip('translation', [0, 1], [0, 0, 0, 9, 9, 9]);
   const t = recorder();
-  sampleClip(c, 100, t, ENTITY_OF);
+  sampleClip(c, 100, t, ENTITY_OF, ENTITIES);
   assert.deepEqual(t.position, [9, 9, 9]);
 });
 
 test('coincident keyframes do not divide by zero', () => {
   const c = clip('translation', [1, 1], [0, 0, 0, 4, 4, 4]);
   const t = recorder();
-  sampleClip(c, 1, t, ENTITY_OF);
+  sampleClip(c, 1, t, ENTITY_OF, ENTITIES);
   assert.ok(t.position.every(Number.isFinite), `got ${t.position}`);
 });
 
 test('a single-keyframe channel is a constant', () => {
   const c = clip('scale', [0], [2, 3, 4]);
   const t = recorder();
-  sampleClip(c, 12.5, t, ENTITY_OF);
+  sampleClip(c, 12.5, t, ENTITY_OF, ENTITIES);
   assert.deepEqual(t.scale, [2, 3, 4]);
 });
 
@@ -109,7 +112,7 @@ test('rotation LINEAR slerps, and does not lerp-and-normalize', () => {
   const half = Math.PI / 4;                       // half of 90 degrees
   const c = clip('rotation', [0, 1], [0, 0, 0, 1, 0, Math.sin(half), 0, Math.cos(half)]);
   const t = recorder();
-  sampleClip(c, 0.25, t, ENTITY_OF);
+  sampleClip(c, 0.25, t, ENTITY_OF, ENTITIES);
 
   const angle = 2 * Math.acos(t.rotation[3]);
   close(angle, (Math.PI / 2) * 0.25, 1e-4, 'swept angle');
@@ -129,7 +132,7 @@ test('CUBICSPLINE follows the Hermite curve, not a straight line', () => {
   ];
   const c = clip('translation', [0, 1], values, 'CUBICSPLINE');
   const t = recorder();
-  sampleClip(c, 0.25, t, ENTITY_OF);
+  sampleClip(c, 0.25, t, ENTITY_OF, ENTITIES);
   close(t.position[0], 0.15625, 1e-6, 'hermite value');
 });
 
@@ -142,7 +145,7 @@ test('CUBICSPLINE tangents actually bend the curve', () => {
   ];
   const c = clip('translation', [0, 1], values, 'CUBICSPLINE');
   const t = recorder();
-  sampleClip(c, 0.25, t, ENTITY_OF);
+  sampleClip(c, 0.25, t, ENTITY_OF, ENTITIES);
   assert.ok(Math.abs(t.position[0] - 0.15625) > 1e-3, `tangent ignored: ${t.position[0]}`);
 });
 
@@ -150,7 +153,7 @@ test('a channel targeting a node this instance does not have is skipped', () => 
   const c = clip('translation', [0, 1], [0, 0, 0, 1, 1, 1]);
   c.channels[0].node = 7;
   const t = recorder();
-  sampleClip(c, 0.5, t, [1]);          // no index 7
+  sampleClip(c, 0.5, t, ENTITY_OF, ENTITIES);   // no index 7
   assert.equal(t.position, null);
 });
 
@@ -161,23 +164,45 @@ test('a channel whose node was never instantiated does not drive entity 0', () =
   const c = clip('translation', [0, 1], [0, 0, 0, 100, 200, 300]);
   c.channels[0].node = 1;
   const t = recorder();
-  sampleClip(c, 1, t, [5, NULL_HANDLE]);   // node 1 was never reached
+  sampleClip(c, 1, t, [LIVE, NULL_HANDLE], ENTITIES);   // node 1 was never reached
   assert.equal(t.position, null, 'wrote into the null entity');
 });
 
 test('a channel pointing at a freed entity is skipped', () => {
-  // A player outlives the removal of a child of its instance. The handle packs
-  // its slot in the upper 24 bits, so a live-looking small integer is index 0.
   const c = clip('translation', [0, 1], [0, 0, 0, 1, 1, 1]);
-  const freed = (3 << 8) | 1;           // slot 3, generation 1
+  const entities = new HandleAllocator(8);
+  const doomed = entities.alloc();
   const t = recorder();
-  t.used[3] = 0;
-  sampleClip(c, 1, t, [freed]);
-  assert.equal(t.position, null);
 
-  t.used[3] = 1;                        // and it samples again once alive
-  sampleClip(c, 1, t, [freed]);
-  assert.deepEqual(t.position, [1, 1, 1]);
+  sampleClip(c, 1, t, [doomed], entities);
+  assert.deepEqual(t.position, [1, 1, 1], 'samples while it is alive');
+
+  t.position = null;
+  entities.free(doomed);
+  sampleClip(c, 1, t, [doomed], entities);
+  assert.equal(t.position, null, 'and not once it is freed');
+});
+
+test('a channel pointing at a RECYCLED slot is skipped', () => {
+  // The case a slot test cannot see, and the one that actually happens:
+  // handles are recycled last-in-first-out, so the very next alloc() takes the
+  // slot back and marks it live. Only the generation distinguishes the stale
+  // handle from the new occupant.
+  const c = clip('translation', [0, 1], [0, 0, 0, 1, 1, 1]);
+  const entities = new HandleAllocator(8);
+  const doomed = entities.alloc();
+  entities.free(doomed);
+  const reused = entities.alloc();
+
+  assert.equal(handleIndex(doomed), handleIndex(reused), 'the slot really was reused');
+  assert.notEqual(doomed, reused, 'but the handle is a different one');
+
+  const t = recorder();
+  sampleClip(c, 1, t, [doomed], entities);
+  assert.equal(t.position, null, 'the stale handle must not drive its replacement');
+
+  sampleClip(c, 1, t, [reused], entities);
+  assert.deepEqual(t.position, [1, 1, 1], 'the live one still works');
 });
 
 // ------------------------------------------------------------------ playback
@@ -185,7 +210,7 @@ test('a channel pointing at a freed entity is skipped', () => {
 console.log('\nplayback');
 
 test('play selects by name or by index, and reports an unknown clip', () => {
-  const player = new AnimationPlayer([clip('translation', [0, 1], [0, 0, 0, 1, 1, 1], 'LINEAR', 'walk')], [1]);
+  const player = new AnimationPlayer([clip('translation', [0, 1], [0, 0, 0, 1, 1, 1], 'LINEAR', 'walk')], ENTITY_OF, ENTITIES);
   assert.equal(player.play('walk'), true);
   assert.equal(player.play(0), true);
   assert.equal(player.play('nope'), false);
@@ -193,7 +218,7 @@ test('play selects by name or by index, and reports an unknown clip', () => {
 });
 
 test('a looping clip wraps instead of running off the end', () => {
-  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], [1]);
+  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], ENTITY_OF, ENTITIES);
   const t = recorder();
   player.play(0, { loop: true });
 
@@ -207,7 +232,7 @@ test('a looping clip wraps instead of running off the end', () => {
 });
 
 test('a non-looping clip stops at the end and stays there', () => {
-  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], [1]);
+  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], ENTITY_OF, ENTITIES);
   const t = recorder();
   player.play(0, { loop: false });
 
@@ -222,7 +247,7 @@ test('a non-looping clip stops at the end and stays there', () => {
 });
 
 test('speed scales time, and a negative speed wraps backwards', () => {
-  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], [1]);
+  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], ENTITY_OF, ENTITIES);
   const t = recorder();
 
   player.play(0, { speed: 2 });
@@ -235,7 +260,7 @@ test('speed scales time, and a negative speed wraps backwards', () => {
 });
 
 test('stop leaves the pose alone and halts further sampling', () => {
-  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], [1]);
+  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], ENTITY_OF, ENTITIES);
   const t = recorder();
   player.play(0);
   player.advance(1, t);

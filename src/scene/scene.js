@@ -126,7 +126,7 @@ export class Scene {
     // which is the whole reason two copies of one asset can play the same clip
     // at different times. It is kept only when there is something to play.
     if (asset.animations?.length > 0) {
-      this._players.set(handle, new AnimationPlayer(asset.animations, created));
+      this._players.set(handle, new AnimationPlayer(asset.animations, created, this.entities));
     }
 
     return new Node(this, handle);

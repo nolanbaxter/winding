@@ -10,7 +10,6 @@
 // that moved a node without marking it would compose to a stale matrix.
 
 import { quatSlerp, quatNormalize } from '../core/math/quat.js';
-import { NULL_HANDLE, handleIndex } from '../core/handle.js';
 
 const STEP = 'STEP';
 const CUBICSPLINE = 'CUBICSPLINE';
@@ -117,23 +116,25 @@ function sampleChannel(channel, time) {
  *
  * `entityOf` maps a clip's node indices onto the entities of one instance --
  * which is what lets two copies of the same asset play the same clip at
- * different times without sharing a frame of state.
+ * different times without sharing a frame of state. `entities` is the scene's
+ * allocator, and it is the only thing that can answer whether a handle is
+ * still the one it was.
  */
-export function sampleClip(clip, time, transforms, entityOf) {
+export function sampleClip(clip, time, transforms, entityOf, entities) {
   for (const channel of clip.channels) {
+    // One question, asked of the one object that knows the answer. A channel
+    // can point at nothing in three ways -- a node index this instance has no
+    // slot for (undefined), a node outside the asset's default scene (the map
+    // is pre-filled with NULL_HANDLE, which is 0), or a child that has since
+    // been removed. alive() rejects all three, because it compares the
+    // GENERATION and not just the slot.
+    //
+    // Testing the slot instead, as this did, misses the case that actually
+    // happens: handles are recycled last-in-first-out, so the very next alloc()
+    // reuses the freed slot and marks it live again. The stale handle then
+    // passed, and the clip drove whatever object had taken its place.
+    if (!entities.alive(entityOf[channel.node])) continue;
     const entity = entityOf[channel.node];
-
-    // Three ways a channel can point at nothing, and all three have to be
-    // caught before the write:
-    //   undefined     the clip names a node index this instance has no slot for
-    //   NULL_HANDLE   the map is pre-filled with it and only nodes reachable
-    //                 from the asset's roots get overwritten, so a channel
-    //                 aimed outside the default scene would drive entity 0
-    //   freed         a player outlives the removal of a child of its instance
-    // NULL_HANDLE is 0, so testing for undefined alone leaves the second case
-    // writing into whatever was added to the scene first.
-    if (entity === undefined || entity === NULL_HANDLE) continue;
-    if (transforms.used[handleIndex(entity)] === 0) continue;
 
     const components = sampleChannel(channel, time);
     if (components === 0) continue;
@@ -162,9 +163,10 @@ export function sampleClip(clip, time, transforms, entityOf) {
  * than this -- doing it badly here would be worse than not doing it.
  */
 export class AnimationPlayer {
-  constructor(clips, entityOf) {
+  constructor(clips, entityOf, entities) {
     this.clips = clips;
     this.entityOf = entityOf;
+    this.entities = entities;
     this.clip = null;
     this.time = 0;
     this.speed = 1;
@@ -224,7 +226,7 @@ export class AnimationPlayer {
       }
     }
 
-    sampleClip(clip, this.time, transforms, this.entityOf);
+    sampleClip(clip, this.time, transforms, this.entityOf, this.entities);
     return true;
   }
 }
