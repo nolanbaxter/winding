@@ -56,6 +56,19 @@ export function createTexture2D(rhi, {
   width, height, srgb = false, mipmapped = false, label,
   usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 }) {
+  // Unconditional, because the failure it prevents is silent. createTexture
+  // does not throw for an oversized descriptor -- it raises a validation error
+  // on the device's error scope and hands back an INVALID texture, after which
+  // the upload, the mip generation and every draw that binds it are no-ops.
+  // The result is a material that renders with no texture and no message. The
+  // limit is 8192 on a lot of hardware and scanned or film assets do exceed it.
+  const max = rhi.limits.maxTextureDimension2D;
+  if (width > max || height > max) {
+    throw new Error(
+      `createTexture2D: ${label ?? 'texture'} is ${width}x${height}, past this device's ${max} limit`,
+    );
+  }
+
   const mipLevelCount = mipmapped ? mipLevelCountFor(width, height) : 1;
   return rhi.device.createTexture({
     label,

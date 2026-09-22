@@ -108,11 +108,18 @@ export function samplerDescriptor(sampler = {}) {
 
   let minFilter = 'linear';
   let mipmapFilter = 'linear';
+  // glTF's two unsuffixed minFilters mean NO mip chain, not "some mip mode".
+  // WebGPU has no way to say that in the filter fields, so it is said with the
+  // LOD clamps instead. Mapping them to a mipmapFilter and leaving the clamps
+  // open -- which is what this did -- gives the pixel-art and UI-atlas assets
+  // that bother to ask for NEAREST a full chain and LOD selection, so they
+  // blur and swim at distance, which is the exact thing they asked not to do.
+  let mipped = true;
   switch (sampler.minFilter) {
     case GLTF_NEAREST:
-      minFilter = 'nearest'; mipmapFilter = 'nearest'; break;
+      minFilter = 'nearest'; mipmapFilter = 'nearest'; mipped = false; break;
     case GLTF_LINEAR:
-      minFilter = 'linear'; mipmapFilter = 'nearest'; break;
+      minFilter = 'linear'; mipmapFilter = 'nearest'; mipped = false; break;
     case GLTF_NEAREST_MIPMAP_NEAREST:
       minFilter = 'nearest'; mipmapFilter = 'nearest'; break;
     case GLTF_LINEAR_MIPMAP_NEAREST:
@@ -131,9 +138,12 @@ export function samplerDescriptor(sampler = {}) {
     addressModeU: addressMode(sampler.wrapS),
     addressModeV: addressMode(sampler.wrapT),
     addressModeW: 'repeat',
+    // Pinning both clamps to 0 is WebGPU's way of saying "level 0 only".
+    ...(mipped ? {} : { lodMinClamp: 0, lodMaxClamp: 0 }),
     // Anisotropy is only legal when all three filters are linear; asking for it
     // alongside a nearest filter is a validation error, not a silent downgrade.
-    maxAnisotropy: magFilter === 'linear' && minFilter === 'linear' && mipmapFilter === 'linear'
+    // It is also meaningless without mips.
+    maxAnisotropy: mipped && magFilter === 'linear' && minFilter === 'linear' && mipmapFilter === 'linear'
       ? 16 : 1,
   };
 }
