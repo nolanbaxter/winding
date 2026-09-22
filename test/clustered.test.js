@@ -7,7 +7,10 @@
 
 import assert from 'node:assert/strict';
 
-import { sliceFor, CLUSTER_Z, MAX_LIGHTS_PER_CLUSTER, CLUSTER_COUNT } from '../src/render/clustered.js';
+import {
+  sliceFor, CLUSTER_Z, MAX_LIGHTS_PER_CLUSTER, CLUSTER_COUNT, ClusteredLights, LIGHT_BYTES,
+} from '../src/render/clustered.js';
+import { Camera } from '../src/scene/camera.js';
 import { Scene, LIGHT_FLOATS, LIGHT_POINT, LIGHT_SPOT } from '../src/scene/scene.js';
 import { RenderGraph } from '../src/render/graph.js';
 
@@ -242,6 +245,75 @@ test('a compute pass nothing consumes is still culled', () => {
   graph.addPass({ name: 'forward', color: [{ resource: surface, clear: 0 }], execute() {} });
   graph.compile();
   assert.equal(graph.stats.executed, 1);
+});
+
+// --------------------------------------------------------- last slice reach
+
+console.log('\nlast slice reach');
+
+/** ClusteredLights.update without a GPU: only the maths is under test. */
+function reachFor(lights, { lightDistance = 60 } = {}) {
+  const c = Object.create(ClusteredLights.prototype);
+  c.lightCapacity = 64;
+  c.lightData = new Float32Array(64 * (LIGHT_BYTES / 4));
+  c.paramsData = new ArrayBuffer(256);
+  c.paramsF32 = new Float32Array(c.paramsData);
+  c.paramsU32 = new Uint32Array(c.paramsData);
+  c.tileSize = new Float32Array(2);
+  c.rhi = { width: 1920, height: 1080, queue: { writeBuffer() {} } };
+  c.lightBuffer = {};
+  c.paramsBuffer = {};
+
+  const scene = {
+    lightCount: lights.length,
+    lights: new Float32Array(lights.length * (LIGHT_BYTES / 4)),
+  };
+  lights.forEach((l, i) => {
+    const o = i * (LIGHT_BYTES / 4);
+    scene.lights[o] = l.position[0];
+    scene.lights[o + 1] = l.position[1];
+    scene.lights[o + 2] = l.position[2];
+    scene.lights[o + 3] = l.radius;
+  });
+
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.position.set([0, 0, 0]);
+  camera.target.set([0, 0, -1]);
+  camera.update(16 / 9);
+
+  c.update(scene, camera, lightDistance);
+  return c.lightReach;
+}
+
+test('with no lights the last slice stops at lightDistance', () => {
+  assert.equal(reachFor([]), 60);
+});
+
+test('a light inside the grid does not stretch it', () => {
+  assert.equal(reachFor([{ position: [0, 0, -10], radius: 5 }]), 60);
+});
+
+test('a light past lightDistance stretches the last slice to cover it', () => {
+  // The bug: the exponential mapping ends the final cell exactly at
+  // lightDistance, so this light sat outside every cluster box and was
+  // assigned to none -- while the fragment shader clamped fragments out there
+  // into that same cell and read a list the light was never in.
+  close(reachFor([{ position: [0, 0, -200], radius: 12 }]), 212, EPS,
+    'centre depth plus radius');
+});
+
+test('reach follows the camera, not the world origin', () => {
+  // View depth, not distance from the origin. A light behind the camera has a
+  // negative depth and must not stretch anything.
+  assert.equal(reachFor([{ position: [0, 0, 500], radius: 5 }]), 60, 'behind the camera');
+});
+
+test('the farthest light wins', () => {
+  close(reachFor([
+    { position: [0, 0, -80], radius: 1 },
+    { position: [0, 0, -300], radius: 20 },
+    { position: [0, 0, -120], radius: 1 },
+  ]), 320, EPS);
 });
 
 console.log(`\n${passed} checks passed\n`);

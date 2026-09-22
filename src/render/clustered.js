@@ -19,10 +19,18 @@
 //   slice = log(distance) * scale + bias
 //
 // which needs a far distance to normalize against -- and this engine famously
-// does not have one. So `lightDistance` is a genuine parameter
-// here rather than a missing one: it is the range over which clustered lights
-// are resolved, not a draw distance. Anything beyond it lands in the last
-// slice and is still lit, just by a coarser cell.
+// does not have one. So `lightDistance` is a genuine parameter here rather than
+// a missing one: it is the range over which clustered lights are RESOLVED, not
+// a draw distance. Anything beyond it falls into the last slice and is still
+// lit, just by one coarse cell instead of a fitted one.
+//
+// That last sentence is only true because the last slice is stretched to cover
+// it. The exponential mapping ends the final cell exactly at lightDistance, so
+// a light past that used to sit outside every cluster box and match nothing,
+// while the fragment shader clamped fragments out there INTO that same cell --
+// they read a light list the light was never added to and came out unlit. The
+// slice's far edge is now the farthest any light actually reaches, computed
+// from the light list each frame. See buildClusters.
 
 import { DEBUG, assert } from '../core/assert.js';
 import { grownCapacity } from '../core/grow.js';
@@ -58,7 +66,7 @@ struct Params {
   invProjection : mat4x4<f32>,
   view          : mat4x4<f32>,
   grid          : vec4<u32>,   // x, y, z cells; w = light count
-  depth         : vec4<f32>,   // x near, y lightDistance, z sliceScale, w sliceBias
+  depth         : vec4<f32>,   // x near, y lightDistance, z farthest light reach
   screen        : vec4<f32>,   // x, y = screen size; z, w = tile size in pixels
 };
 
@@ -112,7 +120,21 @@ fn buildClusters(@builtin(global_invocation_id) id : vec3<u32>) {
   let near = params.depth.x;
   let ratio = params.depth.y / near;
   let sliceNear = near * pow(ratio, f32(id.z) / f32(params.grid.z));
-  let sliceFar  = near * pow(ratio, f32(id.z + 1u) / f32(params.grid.z));
+  var sliceFar = near * pow(ratio, f32(id.z + 1u) / f32(params.grid.z));
+
+  // The last slice swallows everything past the grid. The fragment shader
+  // clamps any depth beyond lightDistance into this same slice, so if the box
+  // stopped at lightDistance -- which is exactly what pow() returns here -- a
+  // light out there would be tested against a shell it is nowhere near, match
+  // nothing, and land in no cluster at all. The fragment would then read a
+  // light list built for the wrong band and come out unlit, which made
+  // lightDistance a hard cutoff for punctual lights rather than the resolution
+  // knob it is documented as.
+  //
+  // The far edge is the farthest any light actually reaches, computed on the
+  // CPU from the light list itself. Nothing exists past it, so extending
+  // further would buy nothing, and it is derived rather than chosen.
+  if (id.z == params.grid.z - 1u) { sliceFar = max(sliceFar, params.depth.z); }
 
   // Four points: the tile's two corners projected onto each slice plane. The
   // other four corners of the froxel are covered because the AABB of these
@@ -309,6 +331,27 @@ export class ClusteredLights {
     this.lightData.set(scene.lights.subarray(0, count * (LIGHT_BYTES / 4)));
     this.rhi.queue.writeBuffer(this.lightBuffer, 0, this.lightData, 0, count * (LIGHT_BYTES / 4));
 
+    // How far the farthest light actually reaches, in view depth. The last
+    // cluster slice is stretched to this, because the fragment shader clamps
+    // everything past lightDistance into that slice and a light outside its
+    // box is in no cluster at all. Derived from the light list, so it is
+    // exactly far enough and never further.
+    //
+    // Row 2 of the view matrix takes a world point to its view z, which is
+    // negative in front of the camera; depth is its negation. A light lights
+    // out to its radius, so that is what has to be inside the box.
+    const view = camera.view;
+    let reach = lightDistance;   // published as lightReach below
+    for (let i = 0; i < count; i++) {
+      const o = i * (LIGHT_BYTES / 4);
+      const x = this.lightData[o], y = this.lightData[o + 1], z = this.lightData[o + 2];
+      const radius = this.lightData[o + 3];
+      const depth = -(view[2] * x + view[6] * y + view[10] * z + view[14]);
+      if (depth + radius > reach) reach = depth + radius;
+    }
+    /** Far edge of the last slice this frame. Never less than lightDistance. */
+    this.lightReach = reach;
+
     // Unconditional, and for the same reason cascadeSplits throws: the slice
     // mapping is log(lightDistance / near), and there is no value of it that
     // fails loudly. A near of 0 gives log(0) = -Infinity and then
@@ -325,8 +368,10 @@ export class ClusteredLights {
       );
     }
 
-    // slice = log(d) * scale + bias, inverted in the shader to get the depth
-    // range of a slice. Precomputed here so the shader does two operations.
+    // slice = log(d) * scale + bias. Precomputed for the PBR shader, which
+    // does two operations instead of a log and a divide per fragment. The
+    // CLUSTER shader does not use these -- it needs the inverse mapping and
+    // re-derives it with pow() from near and lightDistance.
     const ratio = Math.log(lightDistance / camera.near);
     this.sliceScale = CLUSTER_Z / ratio;
     this.sliceBias = -(CLUSTER_Z * Math.log(camera.near)) / ratio;
@@ -341,8 +386,8 @@ export class ClusteredLights {
     u32[32] = CLUSTER_X; u32[33] = CLUSTER_Y; u32[34] = CLUSTER_Z; u32[35] = count;
     f32[36] = camera.near;
     f32[37] = lightDistance;
-    f32[38] = this.sliceScale;
-    f32[39] = this.sliceBias;
+    f32[38] = reach;
+    f32[39] = 0;
     f32[40] = this.rhi.width;
     f32[41] = this.rhi.height;
     f32[42] = this.tileSize[0];
