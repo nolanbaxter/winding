@@ -9,7 +9,7 @@
 // every frame to update bounds and cull. The Node objects users hold are
 // cursors over this (see node.js), not entries in it.
 
-import { DEBUG, assert, assertFinite } from '../core/assert.js';
+import { assertFinite } from '../core/assert.js';
 import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
 import { TransformStore } from './transform.js';
 import { Node } from './node.js';
@@ -119,7 +119,20 @@ export class Scene {
 
     const visit = (nodeIndex, parentEntity) => {
       const node = asset.nodes[nodeIndex];
-      if (DEBUG) assert(created[nodeIndex] === NULL_HANDLE, 'asset node graph is not a tree');
+      // Unconditional, not DEBUG-only. glTF node graphs must be forests, and a
+      // node reached twice is a diamond or a cycle. A cycle does not return; a
+      // diamond quietly builds the subtree TWICE, and every downstream map --
+      // `created`, the animation player's node table, the skin's joint
+      // resolution -- keeps only the second copy. The clip then drives one of
+      // the two and the other sits frozen, which reads as an asset bug rather
+      // than a loader one. One comparison per node is not a reason to ship
+      // that in a release build.
+      if (created[nodeIndex] !== NULL_HANDLE) {
+        throw new Error(
+          `Scene.add: node ${nodeIndex} ("${node?.name ?? '?'}") has more than one parent, `
+          + 'so the asset graph is not a tree',
+        );
+      }
 
       const entity = this.entities.alloc();
       created[nodeIndex] = entity;

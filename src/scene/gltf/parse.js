@@ -527,10 +527,24 @@ function readNodes(json) {
 }
 
 function findRoots(json, nodes) {
-  const scene = json.scenes?.[json.scene ?? 0];
-  if (scene?.nodes) return scene.nodes.slice();
+  const index = json.scene ?? 0;
+  const scene = json.scenes?.[index];
 
-  // No scene declared: anything nothing else claims as a child is a root.
+  // A DECLARED scene is authoritative, including when it is empty. `scenes:
+  // [{}]` is legal and means a document whose contents are all referenced
+  // rather than instantiated -- a library of meshes, which is a real way to
+  // ship one. Falling through to orphan detection there loads every node in
+  // the file, which is the opposite of what the document says.
+  if (scene !== undefined) return (scene.nodes ?? []).slice();
+
+  // An explicit `scene` that names nothing is malformed, and recovering from
+  // it would mean loading something other than what was asked for.
+  if (json.scene !== undefined) {
+    throw new Error(`glTF: scene ${json.scene} is the default scene but does not exist`);
+  }
+
+  // No scene declared at all: the spec leaves the choice to the runtime, so
+  // anything nothing else claims as a child is a root.
   const isChild = new Uint8Array(nodes.length);
   for (const node of nodes) for (const child of node.children) isChild[child] = 1;
 

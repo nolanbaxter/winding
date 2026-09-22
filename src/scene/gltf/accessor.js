@@ -73,6 +73,18 @@ export function readAccessorAsUint32(json, buffers, accessorIndex, expectedType 
   if (comp.signed && comp.name !== 'FLOAT') {
     throw new Error(`glTF: accessor ${accessorIndex} uses signed ${comp.name} where an unsigned integer is required`);
   }
+  // FLOAT fell through the test above, because FLOAT is signed and the clause
+  // excluding it was written to let the float READER share this guard. Here it
+  // is not survivable: the fast path views the buffer as Float32Array and
+  // copies into a Uint32Array, which truncates every value toward zero. An
+  // index of 2.0 reads as 2 and nothing looks wrong until one is 65535.9.
+  // The spec allows neither -- indices are unsigned byte, short or int, and
+  // joints are unsigned byte or short -- so this is a malformed file.
+  if (comp.name === 'FLOAT') {
+    throw new Error(
+      `glTF: accessor ${accessorIndex} stores FLOAT where an unsigned integer is required`,
+    );
+  }
 
   const perElement = componentCountOf(expectedType);
   const out = new Uint32Array(accessor.count * perElement);
@@ -108,6 +120,19 @@ function readInto(out, json, buffers, accessor, comp, perElement, normalized) {
 
   const buffer = buffers[view.buffer];
   if (!buffer) throw new Error(`glTF: buffer ${view.buffer} was not resolved`);
+
+  // MAT2 and MAT3 pad each COLUMN to four bytes when the component is
+  // smaller than that, so their elements are not `bytes * count` long and the
+  // arithmetic below would read every matrix after the first from the wrong
+  // place. Nothing in this engine can reach it -- the only matrices read are
+  // inverse binds, which are MAT4, where the rule does not apply -- so this
+  // refuses rather than implementing a layout no asset here uses. A file that
+  // needs it gets a message naming exactly what is missing.
+  if ((accessor.type === 'MAT2' || accessor.type === 'MAT3') && comp.bytes < 4) {
+    throw new Error(
+      `glTF: ${accessor.type} of ${comp.name} needs column padding, which this reader does not do`,
+    );
+  }
 
   const elementBytes = comp.bytes * perElement;
   const stride = view.byteStride ?? elementBytes;

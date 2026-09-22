@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-22
+
+Four files that loaded wrong rather than failing. All four were in the
+deferred ledger rather than newly found -- the morph work produced almost no
+patch debt of its own, because the two real bugs it turned up were fixed in
+the commits that found them.
+
+Every one of these is the same shape: a malformed or unusual document that
+produced plausible geometry instead of an error. Nothing threw, nothing
+logged, and the result looked like an asset problem.
+
+### Fixed
+
+- **A node with two parents was instantiated twice in release builds.**
+  `Scene.add` guarded the forest rule with a DEBUG-only assert. Past it, a
+  diamond built the subtree twice and every downstream map -- the
+  node-to-entity table, the animation player's, the skin's joint resolution --
+  kept only the second copy. A clip then drove one of the two and the other
+  sat frozen. Now an unconditional throw naming the node; one comparison per
+  node is not a reason to ship that.
+
+- **Float index accessors truncated silently.** FLOAT is signed, and the
+  signed guard excluded it so the float reader could share it. The fast path
+  then viewed the buffer as `Float32Array` and copied into a `Uint32Array`,
+  truncating toward zero. An index of 2.0 read as 2, and nothing looked wrong
+  until one was 65535.9. Refused now, for indices and joints alike.
+
+- **A declared but empty default scene loaded the whole document.**
+  `"scenes": [{}]` is legal and means a document whose contents are all
+  referenced rather than instantiated -- a mesh library, which is a real way
+  to ship one. The check was `scene?.nodes`, so an empty scene fell through
+  to orphan detection and instantiated every node in the file. A declared
+  scene is now authoritative whether or not it has nodes, and an explicit
+  `scene` index that names nothing is an error rather than a silent fallback.
+
+- **MAT2/MAT3 accessors of small components read at the wrong stride.** glTF
+  pads each column to four bytes there, so the element is not
+  `bytes * count` long and every matrix after the first came from the wrong
+  place. Nothing in this engine can reach it -- the only matrices read are
+  MAT4 inverse binds, where the rule does not apply -- so it is refused with a
+  message naming what is missing rather than implementing a layout no asset
+  here uses.
+
+### Changed
+
+- `scene.js` no longer imports `DEBUG` or `assert`; the one use it had is now
+  unconditional.
+
+
 ## [0.6.0] - 2026-09-22
 
 **Morph targets**, the last deformation glTF describes that this engine did
@@ -649,7 +698,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/nolanbaxter/winding/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/nolanbaxter/winding/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nolanbaxter/winding/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nolanbaxter/winding/compare/v0.3.1...v0.4.0

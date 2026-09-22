@@ -1439,4 +1439,91 @@ await atest('the joint range check pairs a mesh with the skin that drives it', a
   assert.equal(Math.max(...model.meshes[0].primitives[0].jointIndices), 1);
 });
 
+// --------------------------------------------------- malformed but plausible
+
+console.log('\nfiles that used to load wrong rather than fail');
+
+await atest('a float index accessor is refused, not truncated', async () => {
+  // FLOAT is signed, and the signed guard excluded it so the float reader
+  // could share it. The fast path then views the buffer as Float32Array and
+  // copies into a Uint32Array, which truncates toward zero: an index of 2.0
+  // reads as 2 and nothing looks wrong until one is 65535.9.
+  const glb = quadGLB();
+  const { json, binary } = parseContainer(glb);
+  json.accessors[1].componentType = 5126;              // FLOAT indices
+  await assert.rejects(
+    () => loadGLTF(makeGLB(json, binary)),
+    /stores FLOAT where an unsigned integer is required/,
+  );
+});
+
+await atest('a float JOINTS_0 accessor is refused too', async () => {
+  const glb = skinnedGLB();
+  const { json, binary } = parseContainer(glb);
+  json.accessors[4].componentType = 5126;
+  await assert.rejects(
+    () => loadGLTF(makeGLB(json, binary)),
+    /stores FLOAT where an unsigned integer is required/,
+  );
+});
+
+await atest('a MAT3 of bytes is refused rather than read at the wrong stride', async () => {
+  // glTF pads each COLUMN of a MAT2/MAT3 to four bytes when the component is
+  // smaller, so the element is not bytes * count long and every matrix after
+  // the first would be read from the wrong place. Nothing here can reach it --
+  // the only matrices read are MAT4 inverse binds, where the rule does not
+  // apply -- so it says so rather than implementing a layout nothing uses.
+  const glb = skinnedGLB();
+  const { json, binary } = parseContainer(glb);
+  json.accessors[6].type = 'MAT3';
+  json.accessors[6].componentType = 5121;
+  await assert.rejects(
+    () => loadGLTF(makeGLB(json, binary)),
+    /MAT3 of UNSIGNED_BYTE needs column padding/,
+  );
+});
+
+await atest('a MAT4 of floats needs no padding and still loads', async () => {
+  // The other half of the rule: four-byte components are already aligned, so
+  // the guard above must not refuse the one matrix layout this engine reads.
+  const model = await loadGLTF(skinnedGLB());
+  assert.equal(model.skins[0].inverseBind.length, 32);
+});
+
+await atest('a declared but empty default scene instantiates nothing', async () => {
+  // `scenes: [{}]` is legal and means a document whose contents are all
+  // referenced rather than instantiated -- a library of meshes, which is a
+  // real way to ship one. Falling through to orphan detection loaded every
+  // node in the file, which is the opposite of what the document says.
+  const model = await loadGLTF(quadGLB({ scenes: [{}] }));
+  assert.equal(model.nodes.length, 1, 'the node is still in the document');
+  assert.deepEqual(model.roots, [], 'and none of it is a root');
+
+  const entities = new HandleAllocator(16);
+  const transforms = new TransformStore(16);
+  const { renderables } = instantiate(model, entities, transforms);
+  assert.equal(renderables.length, 0, 'so nothing is instantiated');
+});
+
+await atest('a default scene index that names nothing is refused', async () => {
+  const glb = quadGLB();
+  const { json, binary } = parseContainer(glb);
+  json.scene = 7;
+  await assert.rejects(
+    () => loadGLTF(makeGLB(json, binary)),
+    /scene 7 is the default scene but does not exist/,
+  );
+});
+
+await atest('a document with no scenes at all still loads its orphans', async () => {
+  // The documented fallback, which the change above must not have eaten: with
+  // no scene declared the spec leaves the choice to the runtime.
+  const glb = quadGLB();
+  const { json, binary } = parseContainer(glb);
+  delete json.scenes;
+  delete json.scene;
+  const model = await loadGLTF(makeGLB(json, binary));
+  assert.deepEqual(model.roots, [0]);
+});
+
 console.log(`\n${passed} checks passed\n`);

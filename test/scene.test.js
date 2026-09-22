@@ -700,4 +700,51 @@ test('a skinned and morphed renderable gets both corrections', () => {
   close(max[2], 3, EPS, 'grown by 0.5 * 4');
 });
 
+// ------------------------------------------------ asset graphs that are not trees
+
+console.log('\nasset graphs that are not trees');
+
+/** An asset whose node 2 is claimed as a child by both node 0 and node 1. */
+function diamondAsset() {
+  const node = (name, children = []) => ({
+    name,
+    position: Float32Array.from([0, 0, 0]),
+    rotation: Float32Array.from([0, 0, 0, 1]),
+    scale: Float32Array.from([1, 1, 1]),
+    children,
+    mesh: -1,
+    skin: -1,
+    weights: null,
+  });
+  return {
+    nodes: [node('left', [2]), node('right', [2]), node('shared')],
+    meshes: [],
+    roots: [0, 1],
+  };
+}
+
+test('a node with two parents is refused, not instantiated twice', () => {
+  // This was a DEBUG-only assert, so a release build built the subtree TWICE
+  // and every downstream map -- the node-to-entity table, the animation
+  // player's, the skin's joint resolution -- kept only the second copy. A
+  // clip then drove one of the two and the other sat frozen, which reads as
+  // an asset bug rather than a loader one.
+  const scene = new Scene({ capacity: 16 });
+  assert.throws(
+    () => scene.add(diamondAsset()),
+    /node 2 \("shared"\) has more than one parent/,
+  );
+});
+
+test('an ordinary tree still adds', () => {
+  // The guard must not fire on a node that is simply a child, which is every
+  // node in every well-formed asset.
+  const scene = new Scene({ capacity: 16 });
+  const asset = diamondAsset();
+  asset.nodes[1].children = [];
+  asset.roots = [0, 1];
+  const root = scene.add(asset);
+  assert.ok(root.alive);
+});
+
 console.log(`\n${passed} checks passed\n`);
