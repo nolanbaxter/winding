@@ -64,27 +64,41 @@ fn vs(@builtin(vertex_index) index : u32) -> VertexOut {
 /**
  * Level 0, straight off the depth buffer.
  *
- * The pyramid is the largest power of two that fits the screen, so one output
- * texel covers between one and two input texels on each axis. A 2x2 gather
- * from the floored source position therefore always covers the full footprint
- * -- and covering it matters, because a texel left out could make the result
- * too LARGE, which over-occludes and deletes visible geometry.
+ * The pyramid is the largest power of two that fits the screen, so the scale is
+ * in [1, 2) and one output texel covers a source interval shorter than two
+ * texels -- which still STRADDLES three of them whenever it is unaligned. At
+ * 1920 -> 1024 that is 75% of the row: texel 1 owns [1.875, 3.75), touching
+ * source texels 1, 2 and 3.
+ *
+ * So the gather is 3x3, clamped to the footprint's own last texel rather than
+ * to the level. Clamping to that last texel means an oversized gather re-reads
+ * one it already has instead of stealing one from the neighbouring output texel,
+ * which keeps the reduction exact in both directions.
+ *
+ * Covering the footprint matters because this is a MIN and a missing texel can
+ * only raise the result. Under reverse-Z a larger value is nearer, so the
+ * pyramid would claim a nearer weakest-occluder than really exists, and the
+ * cull test would delete geometry that is actually visible.
  */
 @fragment
 fn fsFirst(v : VertexOut) -> @location(0) f32 {
   let dst = vec2<u32>(v.position.xy);
   let scale = vec2<f32>(params.srcSize) / vec2<f32>(params.dstSize);
-  let base = vec2<i32>(vec2<f32>(dst) * scale);
   let limit = vec2<i32>(params.srcSize) - vec2<i32>(1, 1);
 
-  var nearest = 1e30;
-  for (var y = 0; y < 2; y = y + 1) {
-    for (var x = 0; x < 2; x = x + 1) {
-      let c = min(base + vec2<i32>(x, y), limit);
-      nearest = min(nearest, textureLoad(depthSource, c, 0));
+  let lo = vec2<i32>(vec2<f32>(dst) * scale);
+  // The last source texel this output texel owns. The interval is half-open,
+  // so ceil() lands one past it.
+  let hi = min(vec2<i32>(ceil(vec2<f32>(dst + vec2<u32>(1u, 1u)) * scale)) - vec2<i32>(1, 1), limit);
+
+  var farthest = 1e30;
+  for (var y = 0; y < 3; y = y + 1) {
+    for (var x = 0; x < 3; x = x + 1) {
+      let c = min(lo + vec2<i32>(x, y), hi);
+      farthest = min(farthest, textureLoad(depthSource, c, 0));
     }
   }
-  return nearest;
+  return farthest;
 }
 
 /** Every level after the first: an exact 2x2 min, since the sizes are powers of two. */

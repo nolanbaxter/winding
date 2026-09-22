@@ -37,6 +37,7 @@
 // nothing to the heap.
 
 import { DEBUG, assert } from '../core/assert.js';
+import { grownCapacity, growArray } from '../core/grow.js';
 
 const DEFAULT_MAX_PASSES = 32;
 const DEFAULT_MAX_RESOURCES = 64;
@@ -141,10 +142,49 @@ export class RenderGraph {
     return handle;
   }
 
+  /**
+   * Widen the pass tables. Called when a frame declares more than fits.
+   *
+   * These were a hard ceiling, and the engine's own frame had already reached
+   * it: the pass count is 10 plus one per depth-pyramid mip plus two per bloom
+   * level, so it is a function of RESOLUTION. 31 at 1080p, exactly 32 at 1440p
+   * and 4K, and 33 at 5K -- where the old limit threw, every frame, on hardware
+   * that could otherwise run it. Growing is what the rest of the engine does
+   * with a capacity, and it is what the README already claims happens here.
+   *
+   * Contents are not preserved: begin() resets every counter, so a grow can
+   * only happen part-way through a declaration that is about to be rebuilt from
+   * scratch next frame anyway. The records themselves are pooled, so the ones
+   * already handed out stay valid -- only the flat index arrays are replaced,
+   * and nothing reads those until compile().
+   */
+  _growPasses(needed) {
+    const capacity = grownCapacity(this.maxPasses, needed);
+    while (this._passes.length < capacity) this._passes.push(makePassRecord());
+
+    this._order = new Uint32Array(capacity);
+    this._live = new Uint8Array(capacity);
+    this._indegree = new Uint32Array(capacity);
+    this._queue = new Uint32Array(capacity);
+
+    const edges = growArray(this._edgeFrom, capacity * 8);
+    edges.set(this._edgeFrom);
+    this._edgeFrom = edges;
+    const edgesTo = growArray(this._edgeTo, capacity * 8);
+    edgesTo.set(this._edgeTo);
+    this._edgeTo = edgesTo;
+
+    this.maxPasses = capacity;
+  }
+
+  _growResources(needed) {
+    const capacity = grownCapacity(this.maxResources, needed);
+    while (this._resources.length < capacity) this._resources.push(makeResourceRecord());
+    this.maxResources = capacity;
+  }
+
   _allocResource(name) {
-    if (this.resourceCount >= this.maxResources) {
-      throw new Error(`RenderGraph: more than ${this.maxResources} resources`);
-    }
+    if (this.resourceCount >= this.maxResources) this._growResources(this.resourceCount + 1);
     const handle = this.resourceCount++;
     const resource = this._resources[handle];
     resource.name = name;
@@ -170,9 +210,7 @@ export class RenderGraph {
    * @param desc.execute (passEncoder, graph) => void
    */
   addPass(desc) {
-    if (this.passCount >= this.maxPasses) {
-      throw new Error(`RenderGraph: more than ${this.maxPasses} passes`);
-    }
+    if (this.passCount >= this.maxPasses) this._growPasses(this.passCount + 1);
     const index = this.passCount++;
     const pass = this._passes[index];
 

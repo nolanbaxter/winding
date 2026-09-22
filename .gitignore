@@ -26,3 +26,6 @@ DESIGN.md
 # depends on it and that has to work from a clean clone.
 examples/
 tools/
+
+# Working notes, not shipped
+AUDIT.md
