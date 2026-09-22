@@ -36,10 +36,36 @@ import { DEBUG, assert } from '../core/assert.js';
 import { grownCapacity } from '../core/grow.js';
 import { compileShader } from '../rhi/shader.js';
 
-export const CLUSTER_X = 16;
-export const CLUSTER_Y = 9;
+/**
+ * Screen tiles in the froxel grid. A budget, not a shape.
+ *
+ * It sizes the index buffer -- CLUSTER_TILES * CLUSTER_Z * MAX_LIGHTS_PER_CLUSTER
+ * -- so it has to be fixed. How those tiles are ARRANGED is not fixed, and used
+ * to be: a hardcoded 16 by 9 made froxels square at exactly one aspect ratio
+ * and stretched everywhere else. A portrait phone canvas got cells 3x taller
+ * than wide, which overlap roughly 3x as many light spheres and reach the
+ * per-cluster cap at a third of the light count a 16:9 monitor manages -- and
+ * overflow past that cap is dropped silently.
+ *
+ * 144 is what 16 by 9 was, so the default viewport's grid is unchanged.
+ */
+export const CLUSTER_TILES = 144;
 export const CLUSTER_Z = 24;
-export const CLUSTER_COUNT = CLUSTER_X * CLUSTER_Y * CLUSTER_Z;
+export const CLUSTER_COUNT = CLUSTER_TILES * CLUSTER_Z;
+
+/**
+ * Split the tile budget to match an aspect ratio, keeping froxels near square.
+ *
+ * `x * y <= CLUSTER_TILES` is the invariant the index buffer depends on, which
+ * is why y floors rather than rounds: rounding both can land above the budget
+ * (at 3:2, 15 x 10 is 150).
+ */
+export function clusterGridFor(aspect) {
+  const safe = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+  const x = Math.max(1, Math.min(CLUSTER_TILES, Math.round(Math.sqrt(CLUSTER_TILES * safe))));
+  const y = Math.max(1, Math.floor(CLUSTER_TILES / x));
+  return { x, y };
+}
 
 /**
  * Lights per cell. Overflow is dropped, which shows as a light winking out in
@@ -204,6 +230,12 @@ export class ClusteredLights {
     const device = rhi.device;
 
     this.lightCapacity = DEFAULT_LIGHT_CAPACITY;
+    /**
+     * Tiles across and down. Derived from the viewport in update(); these are
+     * the 16:9 split so a caller that reads them before a frame sees the shape
+     * the grid has always had rather than zeros.
+     */
+    ({ x: this.gridX, y: this.gridY } = clusterGridFor(16 / 9));
     this.lightData = new Float32Array(this.lightCapacity * (LIGHT_BYTES / 4));
     this.lightBuffer = device.createBuffer({
       label: 'lights',
@@ -376,14 +408,20 @@ export class ClusteredLights {
     this.sliceScale = CLUSTER_Z / ratio;
     this.sliceBias = -(CLUSTER_Z * Math.log(camera.near)) / ratio;
 
-    this.tileSize[0] = this.rhi.width / CLUSTER_X;
-    this.tileSize[1] = this.rhi.height / CLUSTER_Y;
+    // The grid follows the viewport, so froxels stay near square as it is
+    // resized or rotated. Recomputed each frame because it is two integers
+    // from one divide -- cheaper than tracking whether the aspect moved.
+    const grid = clusterGridFor(this.rhi.width / this.rhi.height);
+    this.gridX = grid.x;
+    this.gridY = grid.y;
+    this.tileSize[0] = this.rhi.width / this.gridX;
+    this.tileSize[1] = this.rhi.height / this.gridY;
 
     const f32 = this.paramsF32;
     const u32 = this.paramsU32;
     f32.set(camera.inverseProjection, 0);
     f32.set(camera.view, 16);
-    u32[32] = CLUSTER_X; u32[33] = CLUSTER_Y; u32[34] = CLUSTER_Z; u32[35] = count;
+    u32[32] = this.gridX; u32[33] = this.gridY; u32[34] = CLUSTER_Z; u32[35] = count;
     f32[36] = camera.near;
     f32[37] = lightDistance;
     f32[38] = reach;
@@ -425,7 +463,7 @@ export class ClusteredLights {
     // workgroup_size is (4,4,4), so the grid rounds up to whole workgroups and
     // the shader bounds-checks the leftovers.
     pass.dispatchWorkgroups(
-      Math.ceil(CLUSTER_X / 4), Math.ceil(CLUSTER_Y / 4), Math.ceil(CLUSTER_Z / 4),
+      Math.ceil(this.gridX / 4), Math.ceil(this.gridY / 4), Math.ceil(CLUSTER_Z / 4),
     );
   }
 

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
   sliceFor, CLUSTER_Z, MAX_LIGHTS_PER_CLUSTER, CLUSTER_COUNT, ClusteredLights, LIGHT_BYTES,
+  clusterGridFor, CLUSTER_TILES,
 } from '../src/render/clustered.js';
 import { Camera } from '../src/scene/camera.js';
 import { Scene, LIGHT_FLOATS, LIGHT_POINT, LIGHT_SPOT } from '../src/scene/scene.js';
@@ -82,7 +83,7 @@ test('slicing is exponential, not uniform', () => {
 test('the grid is a sane size for the index buffer it implies', () => {
   // 16 x 9 x 24 cells at 64 lights each. Worth stating, because the index
   // buffer is the one allocation here that scales with all four numbers.
-  assert.equal(CLUSTER_COUNT, 16 * 9 * 24);
+  assert.equal(CLUSTER_COUNT, CLUSTER_TILES * CLUSTER_Z);
   const indexBytes = CLUSTER_COUNT * MAX_LIGHTS_PER_CLUSTER * 4;
   assert.ok(indexBytes < 2 * 1024 * 1024, `${indexBytes} bytes is too much`);
 });
@@ -314,6 +315,49 @@ test('the farthest light wins', () => {
     { position: [0, 0, -300], radius: 20 },
     { position: [0, 0, -120], radius: 1 },
   ]), 320, EPS);
+});
+
+// ----------------------------------------------------------------- grid shape
+
+console.log('\nfroxel grid shape');
+
+test('the 16:9 grid is exactly what it always was', () => {
+  // The default viewport must not move, or this change would be a silent
+  // quality shift on every existing scene rather than a fix for other shapes.
+  const g = clusterGridFor(16 / 9);
+  assert.equal(g.x, 16);
+  assert.equal(g.y, 9);
+  assert.equal(g.x * g.y, CLUSTER_TILES);
+});
+
+test('froxels stay near square at any aspect', () => {
+  // The defect: a hardcoded 16 by 9 made cells 3x taller than wide on a
+  // portrait canvas, which overlap ~3x as many light spheres and reach the
+  // per-cluster cap at a third of the light count -- dropped silently.
+  for (const [w, h] of [[1920, 1080], [1080, 1920], [1024, 1024], [3440, 1440], [1440, 960]]) {
+    const g = clusterGridFor(w / h);
+    const froxel = (w / g.x) / (h / g.y);
+    assert.ok(froxel > 0.8 && froxel < 1.25,
+      `${w}x${h} gave ${g.x}x${g.y}, froxel aspect ${froxel.toFixed(2)}`);
+  }
+});
+
+test('the tile budget is never exceeded, which the index buffer depends on', () => {
+  // y floors rather than rounds for exactly this reason: rounding both lands
+  // at 15 x 10 = 150 for 3:2, past a budget that sizes a GPU buffer.
+  for (let aspect = 0.05; aspect < 20; aspect += 0.01) {
+    const g = clusterGridFor(aspect);
+    assert.ok(g.x >= 1 && g.y >= 1, `aspect ${aspect} gave ${g.x}x${g.y}`);
+    assert.ok(g.x * g.y <= CLUSTER_TILES,
+      `aspect ${aspect.toFixed(2)} gave ${g.x}x${g.y} = ${g.x * g.y}, over ${CLUSTER_TILES}`);
+  }
+});
+
+test('a degenerate aspect still gives a usable grid', () => {
+  for (const bad of [0, -1, NaN, Infinity]) {
+    const g = clusterGridFor(bad);
+    assert.ok(g.x >= 1 && g.y >= 1 && g.x * g.y <= CLUSTER_TILES, `aspect ${bad}`);
+  }
 });
 
 console.log(`\n${passed} checks passed\n`);

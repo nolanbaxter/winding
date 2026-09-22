@@ -22,7 +22,7 @@ import { SkyboxPass } from './skybox.js';
 import { ShadowMaps } from './shadows.js';
 import { RenderGraph } from './graph.js';
 import { GpuProfiler } from './timing.js';
-import { ClusteredLights, CLUSTER_X, CLUSTER_Y, CLUSTER_Z } from './clustered.js';
+import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES } from './gpudriven.js';
 import { updateWorldBounds, unionWorldBounds, farthestViewDepth } from '../scene/bounds.js';
@@ -395,8 +395,10 @@ export class Renderer {
 
     // Cluster grid dims are u32 in the shader, so they are written through a
     // Uint32 view of the same buffer rather than as floats.
-    this.frameU32[104] = CLUSTER_X;
-    this.frameU32[105] = CLUSTER_Y;
+    // The grid follows the viewport aspect, so the shader is told the shape
+    // this frame has rather than a constant it would disagree with.
+    this.frameU32[104] = this.clusters.gridX;
+    this.frameU32[105] = this.clusters.gridY;
     this.frameU32[106] = CLUSTER_Z;
     this.frameU32[107] = this.clusters.lightCount;
     this.frameData[108] = this.clusters.sliceScale;

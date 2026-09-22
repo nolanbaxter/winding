@@ -81,7 +81,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 319 checks, Node, no browser
+npm test          # 323 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 12 checks on a real device
 ```
 
@@ -116,7 +116,9 @@ third". A default frame is 29 passes ordered from 60 dependency edges; the exact
 with resolution, since the depth pyramid takes one pass per mip.
 
 **Clustered forward lighting.** The view frustum is diced into froxels with exponential Z slicing; a
-fragment only ever evaluates the handful of lights whose radius reaches its cluster.
+fragment only ever evaluates the handful of lights whose radius reaches its cluster. The grid splits
+a fixed tile budget to match the viewport aspect, so the cells stay near cubic on a phone, a square
+editor pane or an ultrawide rather than only at 16:9.
 
 **Cascaded shadow maps.** Sphere-fitted cascades (rotation invariant, so they don't shimmer when the
 camera turns), texel snapping, normal-offset bias, front-face culling.
@@ -182,10 +184,6 @@ These are real and currently unaddressed.
 - **Transparency sorts per object, not per fragment.** `BLEND` geometry is culled and sorted
   back-to-front on the CPU and drawn after all opaque batches, which is exact for separated convex
   objects and wrong for interpenetrating ones. Blended geometry also casts no shadow.
-- **The cluster grid is 16 by 9.** Tiles are derived from the real resolution, so coverage is
-  correct at any size, but the froxels are only square at 16:9. A portrait or square viewport gets
-  stretched cells, which overlap more lights and reach the 64-per-cluster cap sooner. Overflow past
-  that cap drops lights silently.
 - **Device loss is reported, not recovered.** The callback fires; rebuilding the GPU state is on you.
 - **Resource aliasing is idle in the default frame.** Transients share memory when their lifetimes do
   not overlap, but every same-size pair in the bloom chain overlaps by construction, so nothing is
