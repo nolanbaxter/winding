@@ -81,7 +81,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 345 checks, Node, no browser
+npm test          # 348 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 14 checks on a real device
 ```
 
@@ -127,7 +127,7 @@ camera turns), texel snapping, normal-offset bias, front-face culling.
 light is split-sum, baked at startup into irradiance and prefiltered cubemaps; the BRDF term is an
 analytic polynomial rather than a lookup texture, which removes a texture and a generation pass.
 
-**glTF 2.0 import.** Geometry, materials, images and animations, including byte-strided and
+**glTF 2.0 import.** Geometry, materials, images, skins and animations, including byte-strided and
 normalized accessors, sparse accessors, generated tangents, both UV sets with per-texture
 `texCoord`, and vertex colours. Not skins or morph targets.
 
@@ -177,8 +177,8 @@ giving up the rest of the frame. There is never a wall, only a floor.
 
 These are real and currently unaddressed.
 
-- **No skinning or morph targets.** Animation drives node transforms only, so a rigid-body clip plays
-  correctly and a skinned character does not deform. `weights` channels are dropped on import.
+- **No morph targets.** Skinning is in; morph targets are a separate mechanism -- per-target vertex
+  deltas and per-instance weights -- and a `weights` animation channel is still dropped on import.
 - **One clip at a time per instance.** Cross-fading needs a weight per channel and somewhere to
   accumulate partial poses, which is a different data structure than the player has.
 - **Transparency sorts per object, not per fragment.** `BLEND` geometry is culled and sorted

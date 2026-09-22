@@ -14,9 +14,10 @@ import { quatCreate, quatSetAxisAngle } from '../src/core/math/quat.js';
 import { vec3Create } from '../src/core/math/vec3.js';
 import { Camera } from '../src/scene/camera.js';
 import { Scene } from '../src/scene/scene.js';
-import { GpuDriven } from '../src/render/gpudriven.js';
+import { GpuDriven, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
 import { SkinPalette } from '../src/render/skin.js';
 import { PBR_SHADER } from '../src/render/shaders/pbr.js';
+import { SHADOW_SHADER } from '../src/render/shadows.js';
 import { OIT_RESOLVE_SHADER } from '../src/render/shaders/oit.js';
 import { HZB_SHADER } from '../src/render/hzb.js';
 import { CLUSTER_SHADER } from '../src/render/clustered.js';
@@ -892,6 +893,43 @@ test('two instances get separate palette slices', () => {
   assert.equal(palette.offsets[1], 2, 'the second skin starts after the first two joints');
   assert.equal(palette.jointCount, 3);
   vecClose(palette.data.subarray(2 * 16 + 12, 2 * 16 + 15), [9, 0, 0], EPS, 'second instance');
+});
+
+test('every shader that reads DrawData agrees on its layout', () => {
+  // The bug this exists for: the shadow shader declared DrawData without
+  // paletteOffset, so WGSL sized it at 112 while the CPU wrote a 128-byte
+  // stride. Instance 0 landed correctly and every one after it was misaligned
+  // -- shadows in the wrong places, no error anywhere, and a GPU suite that
+  // only checks for device errors cannot see it.
+  const members = (source) => {
+    const body = source.match(/struct DrawData \{([\s\S]*?)\n\};/);
+    assert.ok(body, 'a shader reading DrawData must declare it');
+    return body[1]
+      .split('\n')
+      .map((line) => line.replace(/\/\/.*$/, '').trim())
+      .filter((line) => line.length > 0)
+      .map((line) => line.split(':').map((part) => part.trim()).join(':'));
+  };
+
+  const forward = members(PBR_SHADER);
+  const shadow = members(SHADOW_SHADER);
+  assert.deepEqual(shadow, forward,
+    'the shadow pass reads the same buffer, so it must see the same struct');
+
+  // And the struct the two agree on must be the stride the CPU writes.
+  // WGSL: mat4x4 is 64 with align 16; mat3x3 is 48 with align 16; u32 is 4.
+  const SIZES = { 'mat4x4<f32>': [64, 16], 'mat3x3<f32>': [48, 16], u32: [4, 4] };
+  let end = 0;
+  let structAlign = 1;
+  for (const member of forward) {
+    const type = member.split(':')[1].replace(/,$/, '');
+    const [size, align] = SIZES[type] ?? [0, 0];
+    assert.ok(size > 0, `unknown member type ${type}; teach this check about it`);
+    end = Math.ceil(end / align) * align + size;
+    structAlign = Math.max(structAlign, align);
+  }
+  assert.equal(Math.ceil(end / structAlign) * structAlign, DRAW_DATA_BYTES,
+    'the declared struct does not match the stride the CPU writes');
 });
 
 test('no shader template contains a stray backtick', () => {

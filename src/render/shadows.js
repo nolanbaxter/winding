@@ -32,19 +32,25 @@ import { vec3Create, vec3Normalize } from '../core/math/vec3.js';
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout, GROUP_FRAME, GROUP_DRAW } from '../rhi/bindgroups.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
-import { VERTEX_BUFFER_LAYOUT } from './vertex.js';
+import { VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 
 export const MAX_CASCADES = 4;
 
 /** Depth-only. No fragment stage at all -- half the work of the forward pass. */
-const SHADOW_SHADER = /* wgsl */ `
+export const SHADOW_SHADER = /* wgsl */ `
 struct Cascade {
   viewProjection : mat4x4<f32>,
 };
 
 struct DrawData {
-  model        : mat4x4<f32>,
-  normalMatrix : mat3x3<f32>,
+  model         : mat4x4<f32>,
+  normalMatrix  : mat3x3<f32>,
+  // Unread by the unskinned path below, and NOT optional. WGSL sizes a struct
+  // from its members, so leaving this out makes the shadow pass read a
+  // 112-byte stride out of a buffer the CPU writes at 128 -- instance 0 lands
+  // correctly and every one after it is misaligned, which is shadows in the
+  // wrong places and no error anywhere.
+  paletteOffset : u32,
 };
 
 struct Batch {
@@ -56,6 +62,7 @@ struct Batch {
 // The shadow pass culls nothing, so it walks a static batch-ordered list
 // rather than the compacted one the cull shader writes.
 @group(0) @binding(2) var<storage, read> order : array<u32>;
+@group(0) @binding(3) var<storage, read> palette : array<mat4x4<f32>>;
 @group(3) @binding(0) var<uniform> batch : Batch;
 
 @vertex
@@ -65,6 +72,29 @@ fn vs(
 ) -> @builtin(position) vec4<f32> {
   let draw = drawData[order[batch.firstVisible + instance]];
   return cascade.viewProjection * draw.model * vec4<f32>(position, 1.0);
+}
+
+// The same skinning the forward pass does, for the same reason it has to: a
+// caster that deforms and a shadow that does not is a character walking beside
+// its own silhouette standing still.
+@vertex
+fn vsSkinned(
+  @builtin(instance_index) instance : u32,
+  @location(0) position : vec3<f32>,
+  @location(6) joints   : vec4<u32>,
+  @location(7) weights  : vec4<f32>,
+) -> @builtin(position) vec4<f32> {
+  let draw = drawData[order[batch.firstVisible + instance]];
+  let base = draw.paletteOffset;
+
+  let skin = palette[base + joints.x] * weights.x
+           + palette[base + joints.y] * weights.y
+           + palette[base + joints.z] * weights.z
+           + palette[base + joints.w] * weights.w;
+
+  // No draw.model, for the same reason the forward path omits it: the joints
+  // place a skinned mesh entirely.
+  return cascade.viewProjection * skin * vec4<f32>(position, 1.0);
 }
 `;
 
@@ -243,6 +273,7 @@ export class ShadowMaps {
         },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
 
@@ -253,13 +284,14 @@ export class ShadowMaps {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.cascadeStaging = new ArrayBuffer(this.alignment * MAX_CASCADES);
-    this._makeCascadeBindGroup = (gpu) => rhi.device.createBindGroup({
+    this._makeCascadeBindGroup = (gpu, palette) => rhi.device.createBindGroup({
       label: 'shadow-cascade',
       layout: this.cascadeLayout,
       entries: [
         { binding: 0, resource: { buffer: this.cascadeBuffer, size: 64 } },
         { binding: 1, resource: { buffer: gpu.drawDataBuffer } },
         { binding: 2, resource: { buffer: gpu.batchOrderBuffer } },
+        { binding: 3, resource: { buffer: palette.buffer } },
       ],
     });
 
@@ -298,8 +330,19 @@ export class ShadowMaps {
         depthBiasSlopeScale: this.depthBiasSlope,
       },
     };
+
+    // The same pipeline with the skinning vertex path and the influence buffer
+    // at slot 1. Everything else -- the front-face cull, the bias, the absent
+    // fragment stage -- is identical, because a skinned caster casts the same
+    // kind of shadow.
+    this.skinnedDescriptor = {
+      ...this.descriptor,
+      label: 'shadow-skinned',
+      vertexEntry: 'vsSkinned',
+      buffers: [VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT],
+    };
     this._pipelines = pipelines;
-    await pipelines.warm([this.descriptor]);
+    await pipelines.warm([this.descriptor, this.skinnedDescriptor]);
 
     // One bound executor per cascade, built once. The graph stores a function
     // per pass, and building them per frame would allocate MAX_CASCADES
@@ -412,17 +455,21 @@ export class ShadowMaps {
    * the matrix does not depend on which cascade is drawing, and writing it per
    * cascade would quadruple the ring for nothing.
    */
-  addPasses(graph, resource, gpu, batchBindGroup) {
+  addPasses(graph, resource, gpu, batchBindGroup, palette) {
     this._gpu = gpu;
     this._batchBindGroup = batchBindGroup;
     // Built on first use: the buffers it references belong to GpuDriven, which
     // is created after this object.
     // Names gpu.drawDataBuffer and gpu.batchOrderBuffer, both of which are
-    // replaced when GpuDriven grows. Caching this on first use alone would hold
-    // a group pointing at destroyed buffers.
-    if (this.cascadeBindGroup === undefined || this._gpuRevision !== gpu.buffersRevision) {
-      this.cascadeBindGroup = this._makeCascadeBindGroup(gpu);
+    // replaced when GpuDriven grows, and the joint palette, which is replaced
+    // when it grows. Caching on first use alone would hold a group pointing at
+    // destroyed buffers.
+    if (this.cascadeBindGroup === undefined
+      || this._gpuRevision !== gpu.buffersRevision
+      || this._paletteRevision !== palette.revision) {
+      this.cascadeBindGroup = this._makeCascadeBindGroup(gpu, palette);
       this._gpuRevision = gpu.buffersRevision;
+      this._paletteRevision = palette.revision;
     }
 
     for (let cascade = 0; cascade < this.activeCascades; cascade++) {
@@ -441,9 +488,11 @@ export class ShadowMaps {
 
   _encodeCascade(pass, cascade) {
     const gpu = this._gpu;
-    pass.setPipeline(this._pipelines.get(this.descriptor));
     pass.setBindGroup(GROUP_FRAME, this.cascadeBindGroup, [cascade * this.alignment]);
     this.pipelineLayout.bindEmptyGroups(pass);
+    // Batches arrive sorted, so skinned and unskinned come in runs and this
+    // switches once rather than per draw.
+    let boundSkinned = -1;
 
     // Instanced, one call per batch. The shadow pass culls nothing, so the
     // instance count is simply the batch size and the shader walks the static
@@ -455,8 +504,14 @@ export class ShadowMaps {
     // matrix and produces five.
     for (let b = 0; b < gpu.batchCount; b++) {
       const primitive = gpu.batchPrimitive[b];
+      const skinned = gpu.batchSkinned[b];
+      if (skinned !== boundSkinned) {
+        pass.setPipeline(this._pipelines.get(skinned ? this.skinnedDescriptor : this.descriptor));
+        boundSkinned = skinned;
+      }
       pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
       pass.setVertexBuffer(0, primitive.vertexBuffer);
+      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
       pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
       pass.drawIndexed(primitive.indexCount, gpu.batchSize[b]);
     }

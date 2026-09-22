@@ -552,7 +552,7 @@ export class Renderer {
       visibleResource: visibleEarly,
     });
 
-    this.shadows.addPasses(graph, shadowMap, this.gpu, this.drawBindGroup);
+    this.shadows.addPasses(graph, shadowMap, this.gpu, this.drawBindGroup, this.skinPalette);
     this.clusters.addPasses(graph, {
       boundsResource: clusterBounds,
       lightsResource: lightBuffer,
