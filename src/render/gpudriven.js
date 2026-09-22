@@ -27,7 +27,7 @@
 
 import { DEBUG, assert } from '../core/assert.js';
 import { compileShader } from '../rhi/shader.js';
-import { grownCapacity } from '../core/grow.js';
+import { grownCapacity, growArray } from '../core/grow.js';
 import { FRUSTUM_PLANE_COUNT } from '../core/math/frustum.js';
 
 /** model mat4 (64) + normal mat3x3 (48). No alignment padding in storage. */
@@ -236,6 +236,12 @@ export class GpuDriven {
   constructor(rhi, capacity, materials) {
     this.rhi = rhi;
     this.capacity = capacity;
+    /**
+     * Capacity of everything indexed by BATCH, which grows on its own.
+     * batchCount <= renderableCount is a bound so loose it is the point of
+     * batching, so sizing these per renderable wasted most of it.
+     */
+    this.batchCapacity = Math.min(capacity, 256);
     /** Read for isTransparent() only: which renderables skip the batched path. */
     this.materials = materials;
     this.batchCount = 0;
@@ -266,17 +272,17 @@ export class GpuDriven {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
-    this.batchFirst = new Uint32Array(capacity);
+    this.batchFirst = new Uint32Array(this.batchCapacity);
     this.batchFirstBuffer = device.createBuffer({
       label: 'batch-first',
-      size: capacity * 4,
+      size: this.batchCapacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
-    this.indirectData = new Uint32Array(capacity * 2 * (INDIRECT_BYTES / 4));
+    this.indirectData = new Uint32Array(this.batchCapacity * 2 * (INDIRECT_BYTES / 4));
     this.indirectBuffer = device.createBuffer({
       label: 'indirect-args',
-      size: capacity * 2 * INDIRECT_BYTES,
+      size: this.batchCapacity * 2 * INDIRECT_BYTES,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
@@ -316,7 +322,7 @@ export class GpuDriven {
     // a base of 0, which is what the transparent draws bind. They index the
     // visible list absolutely, by firstInstance, rather than relative to a
     // batch base.
-    this.batchStaging = new ArrayBuffer(this.alignment * (capacity * 2 + 1));
+    this.batchStaging = new ArrayBuffer(this.alignment * (this.batchCapacity * 2 + 1));
     this.batchBuffer = device.createBuffer({
       label: 'batch-info',
       size: this.batchStaging.byteLength,
@@ -338,9 +344,9 @@ export class GpuDriven {
 
     /** primitive + materialId per batch, in CPU-side arrays. */
     this.batchPrimitive = [];
-    this.batchMaterial = new Uint16Array(capacity);
-    this.batchMirrored = new Uint8Array(capacity);
-    this.batchSize = new Uint32Array(capacity);
+    this.batchMaterial = new Uint16Array(this.batchCapacity);
+    this.batchMirrored = new Uint8Array(this.batchCapacity);
+    this.batchSize = new Uint32Array(this.batchCapacity);
 
     // Blended renderables, which never enter a batch. See rebuildBatches.
     this.transparentItems = new Uint32Array(capacity);
@@ -417,41 +423,25 @@ export class GpuDriven {
 
     this.drawData = new Float32Array(capacity * (DRAW_DATA_BYTES / 4));
     this.boundsData = new Float32Array(capacity * 8);
-    this.indirectData = new Uint32Array(capacity * 2 * (INDIRECT_BYTES / 4));
     this.itemBatch = new Uint32Array(capacity);
     this.itemMirrored = new Uint8Array(capacity);
-    this.batchFirst = new Uint32Array(capacity);
     this.batchOrder = new Uint32Array(capacity);
-    this.batchMaterial = new Uint16Array(capacity);
-    this.batchMirrored = new Uint8Array(capacity);
-    this.batchSize = new Uint32Array(capacity);
     this.transparentItems = new Uint32Array(capacity);
-    this.batchStaging = new ArrayBuffer(this.alignment * (capacity * 2 + 1));
     this._zeroFlags = new Uint32Array(capacity);
 
     for (const buffer of [
-      this.drawDataBuffer, this.boundsBuffer, this.itemBatchBuffer, this.batchFirstBuffer,
-      this.indirectBuffer, this.visibleBuffer, this.batchOrderBuffer, this.batchBuffer,
-      this.visibleFlagsBuffer,
+      this.drawDataBuffer, this.boundsBuffer, this.itemBatchBuffer,
+      this.visibleBuffer, this.batchOrderBuffer, this.visibleFlagsBuffer,
     ]) buffer.destroy();
 
     this.drawDataBuffer = device.createBuffer({ label: 'draw-data', size: capacity * DRAW_DATA_BYTES, usage: STORAGE });
     this.boundsBuffer = device.createBuffer({ label: 'cull-bounds', size: capacity * 32, usage: STORAGE });
     this.itemBatchBuffer = device.createBuffer({ label: 'item-batch', size: capacity * 4, usage: STORAGE });
-    this.batchFirstBuffer = device.createBuffer({ label: 'batch-first', size: capacity * 4, usage: STORAGE });
-    this.indirectBuffer = device.createBuffer({
-      label: 'indirect-args', size: capacity * 2 * INDIRECT_BYTES,
-      usage: GPUBufferUsage.INDIRECT | STORAGE,
-    });
     this.visibleBuffer = device.createBuffer({ label: 'visible-items', size: capacity * 2 * 4, usage: STORAGE });
     // Fresh and therefore all zero: after a grow, item indices have moved and
     // last frame's flags describe objects that are no longer at those slots.
     this.visibleFlagsBuffer = device.createBuffer({ label: 'visible-last-frame', size: capacity * 4, usage: STORAGE });
     this.batchOrderBuffer = device.createBuffer({ label: 'batch-order', size: capacity * 4, usage: STORAGE });
-    this.batchBuffer = device.createBuffer({
-      label: 'batch-info', size: this.batchStaging.byteLength,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
 
     this.capacity = capacity;
     this._needsFullUpload = true;
@@ -459,6 +449,61 @@ export class GpuDriven {
     // does the renderer's draw bind group -- which this object does not own.
     // bindHzb builds this if the pyramid has not been bound yet, so growing
     // before the first frame is not an ordering error.
+    if (this._hzbView) this._rebuildBindGroups();
+    this.buffersRevision++;
+  }
+
+  /**
+   * Widen everything indexed by BATCH.
+   *
+   * Separate from the renderable capacity, and it has to be. These arrays are
+   * addressed by batch id, and batchCount <= renderableCount is a bound so
+   * loose it is the whole point of batching -- Sponza's 17 renderables make 14
+   * batches, but 100,000 instances of one mesh make one. Sizing them per
+   * renderable cost 512 bytes of uniform buffer EACH for a per-batch value,
+   * and pushed the batch-info buffer past the default maxBufferSize somewhere
+   * above half a million renderables. createBuffer does not throw for that; it
+   * returns an invalid buffer and the frame goes black.
+   *
+   * Called after the batching loop, when batchCount is finally known. Nothing
+   * has been written to any of these yet -- the prefix sum and the uploads
+   * both come after -- so growing here loses nothing.
+   */
+  _growBatches(needed) {
+    const capacity = grownCapacity(this.batchCapacity, needed);
+    const device = this.rhi.device;
+    const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+
+    // These three are written as the batching loop discovers batches, so a
+    // grow in the middle of it has to carry them over. Everything below is
+    // filled after the loop and can start empty.
+    this.batchMaterial = growArray(this.batchMaterial, capacity);
+    this.batchMirrored = growArray(this.batchMirrored, capacity);
+    this.batchSize = growArray(this.batchSize, capacity);
+
+    this.batchFirst = new Uint32Array(capacity);
+    this.indirectData = new Uint32Array(capacity * 2 * (INDIRECT_BYTES / 4));
+    // capacity * 2 + 1: one slot per (phase, batch), plus a final slot holding
+    // a base of 0 for the blended draws.
+    this.batchStaging = new ArrayBuffer(this.alignment * (capacity * 2 + 1));
+
+    this.batchFirstBuffer.destroy();
+    this.indirectBuffer.destroy();
+    this.batchBuffer.destroy();
+
+    this.batchFirstBuffer = device.createBuffer({
+      label: 'batch-first', size: capacity * 4, usage: STORAGE,
+    });
+    this.indirectBuffer = device.createBuffer({
+      label: 'indirect-args', size: capacity * 2 * INDIRECT_BYTES,
+      usage: GPUBufferUsage.INDIRECT | STORAGE,
+    });
+    this.batchBuffer = device.createBuffer({
+      label: 'batch-info', size: this.batchStaging.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    this.batchCapacity = capacity;
     if (this._hzbView) this._rebuildBindGroups();
     this.buffersRevision++;
   }
@@ -524,6 +569,10 @@ export class GpuDriven {
       let batch = batchOf.get(key);
       if (batch === undefined) {
         batch = this.batchCount++;
+        // Checked here because a batch id is minted here. Nothing batch-indexed
+        // is read before the prefix sum below, so widening mid-loop is safe as
+        // long as the three arrays this loop writes are carried over.
+        if (batch >= this.batchCapacity) this._growBatches(batch + 1);
         batchOf.set(key, batch);
         this.batchPrimitive.push(primitive);
         this.batchMaterial[batch] = material;
@@ -559,14 +608,16 @@ export class GpuDriven {
     // late phase's half of the visible list starts a whole capacity along.
     for (let phase = 0; phase < 2; phase++) {
       for (let b = 0; b < this.batchCount; b++) {
-        const slot = phase * this.capacity + b;
+        const slot = phase * this.batchCapacity + b;
+        // The visible list is still renderable-sized -- only the slot table is
+        // per batch -- so the base it stores is a VISIBLE index.
         new Uint32Array(this.batchStaging, slot * this.alignment, 1)[0] =
           phase * this.capacity + this.batchFirst[b];
       }
     }
     // The transparent draws' base, always 0: they address the visible list
     // through firstInstance, which a direct draw may set freely.
-    this.transparentBatchSlot = this.capacity * 2;
+    this.transparentBatchSlot = this.batchCapacity * 2;
     new Uint32Array(this.batchStaging, this.transparentBatchSlot * this.alignment, 1)[0] = 0;
 
     const queue = this.rhi.queue;
@@ -632,7 +683,7 @@ export class GpuDriven {
     for (let phase = 0; phase < 2; phase++) {
       for (let b = 0; b < this.batchCount; b++) {
         const primitive = this.batchPrimitive[b];
-        const o = (phase * this.capacity + b) * 5;
+        const o = (phase * this.batchCapacity + b) * 5;
         this.indirectData[o] = primitive.indexCount;
         this.indirectData[o + 1] = 0;
         this.indirectData[o + 2] = 0;
@@ -670,7 +721,7 @@ export class GpuDriven {
     // prefix that a future field could quietly break.
     for (let phase = 0; phase < 2; phase++) {
       this.cullParamsU32[planeFloats + 20] = phase;
-      this.cullParamsU32[planeFloats + 21] = phase * this.capacity;
+      this.cullParamsU32[planeFloats + 21] = phase * this.batchCapacity;
       this.cullParamsU32[planeFloats + 22] = phase * this.capacity;
       queue.writeBuffer(this.cullParamsBuffer, phase * this.cullParamsStride, this.cullParams);
     }
@@ -721,11 +772,11 @@ export class GpuDriven {
 
   /** Byte offset of one batch's draw arguments, in the given phase's half. */
   indirectOffset(batch, phase = 0) {
-    return (phase * this.capacity + batch) * INDIRECT_BYTES;
+    return (phase * this.batchCapacity + batch) * INDIRECT_BYTES;
   }
 
   batchOffset(batch, phase = 0) {
-    return (phase * this.capacity + batch) * this.alignment;
+    return (phase * this.batchCapacity + batch) * this.alignment;
   }
 
   destroy() {

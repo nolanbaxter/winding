@@ -81,7 +81,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 302 checks, Node, no browser
+npm test          # 311 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 12 checks on a real device
 ```
 
@@ -153,9 +153,7 @@ render since the last move.
 and every per-renderable GPU buffer grow on demand, so the capacity arguments are starting sizes
 rather than budgets. Two limits remain hard, and both are derived rather than chosen: 2^24 entities
 (the index field of a handle) and 4096 materials (the material field of a sort key). Neither is a
-number more memory would fix. One more bites before either of those does — the per-batch uniform
-buffer is sized per renderable rather than per batch, which makes an invalid buffer somewhere above
-half a million renderables. That one is a bug, not a budget.
+number more memory would fix.
 
 **A job system.** Atomic-cursor parallel-for across workers with the main thread participating.
 Requires cross-origin isolation for `SharedArrayBuffer`; without it, it runs inline and produces

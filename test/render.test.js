@@ -524,6 +524,42 @@ function windingScene(scales) {
   return scene;
 }
 
+// _growBatches names WebGPU usage flags the way every module does, so Node
+// needs them to exist. Real values.
+globalThis.GPUBufferUsage ??= {
+  MAP_READ: 0x0001, COPY_SRC: 0x0004, COPY_DST: 0x0008,
+  INDEX: 0x0010, VERTEX: 0x0020, UNIFORM: 0x0040, STORAGE: 0x0080,
+  INDIRECT: 0x0100, QUERY_RESOLVE: 0x0200,
+};
+
+/** A GpuDriven whose batch tables can actually grow. */
+function growableGpu(materials) {
+  const gpu = Object.create(GpuDriven.prototype);
+  const device = { createBuffer: () => ({ destroy() {} }) };
+  gpu.rhi = { device, queue: { writeBuffer() {} } };
+  gpu.capacity = 1024;
+  gpu.batchCapacity = 256;
+  gpu.alignment = 256;
+  gpu.materials = materials;
+  gpu.itemBatch = new Uint32Array(1024);
+  gpu.itemMirrored = new Uint8Array(1024);
+  gpu.batchOrder = new Uint32Array(1024);
+  gpu.transparentItems = new Uint32Array(1024);
+  gpu._zeroFlags = new Uint32Array(1024);
+  gpu.batchFirst = new Uint32Array(gpu.batchCapacity);
+  gpu.batchMaterial = new Uint16Array(gpu.batchCapacity);
+  gpu.batchMirrored = new Uint8Array(gpu.batchCapacity);
+  gpu.batchSize = new Uint32Array(gpu.batchCapacity);
+  gpu.indirectData = new Uint32Array(gpu.batchCapacity * 2 * 5);
+  gpu.batchStaging = new ArrayBuffer(gpu.alignment * (gpu.batchCapacity * 2 + 1));
+  gpu.batchPrimitive = [];
+  gpu.buffersRevision = 0;
+  gpu.stats = {};
+  for (const k of ['itemBatchBuffer', 'batchFirstBuffer', 'batchOrderBuffer',
+    'batchBuffer', 'visibleFlagsBuffer', 'indirectBuffer']) gpu[k] = { destroy() {} };
+  return gpu;
+}
+
 /** GpuDriven.rebuildBatches without a GPU. */
 function batchesFor(scene) {
   const gpu = Object.create(GpuDriven.prototype);
@@ -599,6 +635,70 @@ test('a mirroring parent mirrors its children', () => {
   const gpu = batchesFor(scene);
   assert.equal(gpu.itemMirrored[0], 1, 'unmirrored child of a mirroring parent IS mirrored');
   assert.equal(gpu.itemMirrored[1], 0, 'and a mirrored child of it is not');
+});
+
+test('batch tables grow on batch count, and carry over what the loop wrote', () => {
+  // The batch arrays are written AS the loop discovers batches, so a grow in
+  // the middle of it has to preserve them. Sizing them per renderable is what
+  // this replaces: 512 bytes of uniform buffer each for a per-batch value,
+  // which put the batch-info buffer past maxBufferSize above half a million
+  // renderables -- where createBuffer returns an invalid buffer rather than
+  // throwing, and the frame goes black.
+  const scene = new Scene({ capacity: 1024 });
+  const materials = { isTransparent: () => false };
+
+  // 400 distinct primitives, so 400 distinct batches, past the 256 start.
+  const COUNT = 400;
+  for (let i = 0; i < COUNT; i++) {
+    const entity = scene.entities.alloc();
+    scene.transforms.add(entity, { position: [i, 0, 0] });
+    scene._addRenderable(entity, {
+      indexCount: 3, materialId: i % 7,
+      bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+    });
+  }
+  scene.update();
+
+  const gpu = growableGpu(materials);
+  gpu.rebuildBatches(scene);
+
+  assert.equal(gpu.batchCount, COUNT, 'every primitive is its own batch');
+  assert.ok(gpu.batchCapacity >= COUNT, `capacity ${gpu.batchCapacity} did not keep up`);
+  assert.ok(gpu.batchCapacity < scene.renderableCount * 4, 'and did not overshoot wildly');
+
+  // The three the loop writes must all have survived the grow.
+  for (let b = 0; b < COUNT; b++) {
+    assert.equal(gpu.batchSize[b], 1, `batch ${b} lost its size`);
+  }
+  const materialsSeen = new Set();
+  for (let b = 0; b < COUNT; b++) materialsSeen.add(gpu.batchMaterial[b]);
+  assert.equal(materialsSeen.size, 7, 'material ids survived the grow');
+
+  // And the prefix sum, which runs after it, still partitions the list.
+  let running = 0;
+  for (let b = 0; b < COUNT; b++) {
+    assert.equal(gpu.batchFirst[b], running, `batch ${b} base is wrong after growing`);
+    running += gpu.batchSize[b];
+  }
+  assert.equal(running, COUNT);
+});
+
+test('the batch tables do not grow with renderables that share a batch', () => {
+  // The negative control, and the whole reason these are sized separately:
+  // 500 instances of one mesh are one batch.
+  const scene = new Scene({ capacity: 1024 });
+  const primitive = { indexCount: 3, materialId: 0, bounds: { min: [-1, -1, -1], max: [1, 1, 1] } };
+  for (let i = 0; i < 500; i++) {
+    const entity = scene.entities.alloc();
+    scene.transforms.add(entity, { position: [i, 0, 0] });
+    scene._addRenderable(entity, primitive);
+  }
+  scene.update();
+
+  const gpu = growableGpu({ isTransparent: () => false });
+  gpu.rebuildBatches(scene);
+  assert.equal(gpu.batchCount, 1);
+  assert.equal(gpu.batchCapacity, 256, 'nothing grew');
 });
 
 console.log(`\n${passed} checks passed\n`);
