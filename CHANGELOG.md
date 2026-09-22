@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-22
+
+A patch: nothing was removed and no signature broke. But **two of these change
+what you see**, both by making something correct that was not:
+
+- Shadows and clustered lights now cover your scene rather than the first 60
+  world units of it. If your scene was roughly Sponza-sized nothing moves.
+- Rough metal stops speckling.
+
+### Fixed
+
+- **`shadowDistance` and `lightDistance` were a flat 60 world units.** True of
+  Sponza and of nothing an order of magnitude either side of it: a 5 km terrain
+  got shadows that stop 60 units from the camera with no boundary, and a 5 cm
+  part got all four cascades collapsed into the first metre of a space
+  thousands of times its size. The culler maintained world bounds every frame
+  that answer the question exactly, and nothing read them.
+
+  Both now default to the scene's far corner in view depth, which is how far
+  there is anything to shadow or light. Pass a number to pin either. The union
+  is recomputed only when something moved or the contents changed, so a settled
+  scene never pays for it, and the floor is the smallest LEGAL value rather
+  than a chosen one -- both consumers require strictly more than the near
+  plane, so with an empty scene twice near is the minimum that satisfies them.
+
+- **Four options reached `Winding.create` and stopped there.** `shadows`,
+  `post`, `powerPreference` and the two ranges above were accepted and never
+  forwarded, so the shadow map's size and cascade count, the bloom settings and
+  the GPU preference were unreachable without constructing a `Renderer`
+  yourself -- in a file whose header explains that dropping a tier is meant to
+  be additive.
+
+- **The IBL convolutions sampled the environment at LOD 0.** Karis' "solving
+  the bright dots": a fixed 64 samples over a full-resolution source
+  undersamples it, because each sample stands for a cone of directions and
+  reads a single texel. With the energy concentrated in a few texels -- the
+  procedural sky's own 60x sun, and any captured HDR far worse -- a sample
+  either hits it and blows the estimate up or misses and loses it, and
+  neighbouring output texels disagree frame to frame. That is the speckle that
+  swims across rough metal.
+
+  Each sample now reads the mip whose texels cover its own solid angle. The
+  pdf is `cos/pi` for the cosine-weighted irradiance and `D*NoH/(4*VoH)` for
+  GGX; roughness 0 is pinned to level 0, since a mirror has no cone.
+
+- **`generateMipmaps` only ever reduced array layer 0.** Correct for a 2D
+  texture and wrong for a cubemap, whose six faces are six layers -- five of
+  them were left undefined below the base level. Surfaced by the fix above,
+  which needed the source cube to have mips at all.
+
+### Added
+
+- `unionWorldBounds` and `farthestViewDepth` in `scene/bounds.js`, which are
+  what the derived ranges are built from.
+- `Renderer.create` takes `shadowDistance`. Both it and `lightDistance` accept
+  `null`, which is the new default and means "derive from the scene".
+
+319 checks under Node, 12 on a real device.
+
 ## [0.3.0] - 2026-09-22
 
 The three items the 0.2.0 audits left open, all of them cases where the engine
@@ -365,7 +424,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/nolanbaxter/winding/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nolanbaxter/winding/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nolanbaxter/winding/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/nolanbaxter/winding/compare/v0.1.0...v0.1.1
