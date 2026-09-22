@@ -37,22 +37,21 @@
 // nothing to the heap.
 
 import { DEBUG, assert } from '../core/assert.js';
-import { grownCapacity, growArray } from '../core/grow.js';
-
-const DEFAULT_MAX_PASSES = 32;
-const DEFAULT_MAX_RESOURCES = 64;
+import { growArray } from '../core/grow.js';
 
 export class RenderGraph {
-  constructor(rhi, { maxPasses = DEFAULT_MAX_PASSES, maxResources = DEFAULT_MAX_RESOURCES, profiler = null } = {}) {
+  constructor(rhi, { profiler = null } = {}) {
     this.rhi = rhi;
     /** Optional GpuProfiler. Every pass gets its timestamp writes from here. */
     this.profiler = profiler;
-    this.maxPasses = maxPasses;
-    this.maxResources = maxResources;
 
-    // Pooled records, reused across frames. Reset by begin(), never reallocated.
-    this._passes = Array.from({ length: maxPasses }, makePassRecord);
-    this._resources = Array.from({ length: maxResources }, makeResourceRecord);
+    // Pooled records, reused across frames. There is deliberately no capacity
+    // and no ceiling: a frame's pass count is not a budget anyone chooses, it
+    // is whatever the frame declared, and the graph is rebuilt from scratch
+    // every frame. The pools extend to the high-water mark on the first frame
+    // that needs them and are reused forever after. begin() resets the counts.
+    this._passes = [];
+    this._resources = [];
     this.passCount = 0;
     this.resourceCount = 0;
 
@@ -60,14 +59,16 @@ export class RenderGraph {
     // hands these out; without the cache every frame would recreate them.
     this._pool = new Map();
 
-    this._order = new Uint32Array(maxPasses);
+    // Scratch for the sort, sized from passCount at compile() rather than up
+    // front, for the same reason.
+    this._order = new Uint32Array(0);
     this._orderCount = 0;
-    this._live = new Uint8Array(maxPasses);
-    this._indegree = new Uint32Array(maxPasses);
-    this._queue = new Uint32Array(maxPasses);
+    this._live = new Uint8Array(0);
+    this._indegree = new Uint32Array(0);
+    this._queue = new Uint32Array(0);
     // Dependency edges, producer -> consumer. Grown on demand, reused forever.
-    this._edgeFrom = new Uint32Array(maxPasses * 8);
-    this._edgeTo = new Uint32Array(maxPasses * 8);
+    this._edgeFrom = new Uint32Array(64);
+    this._edgeTo = new Uint32Array(64);
     this._edgeCount = 0;
 
     this.stats = { passes: 0, executed: 0, culled: 0, edges: 0, transient: 0, aliased: 0 };
@@ -143,50 +144,28 @@ export class RenderGraph {
   }
 
   /**
-   * Widen the pass tables. Called when a frame declares more than fits.
+   * Make the sort scratch big enough for this frame.
    *
-   * These were a hard ceiling, and the engine's own frame had already reached
-   * it: the pass count is 10 plus one per depth-pyramid mip plus two per bloom
-   * level, so it is a function of RESOLUTION. 31 at 1080p, exactly 32 at 1440p
-   * and 4K, and 33 at 5K -- where the old limit threw, every frame, on hardware
-   * that could otherwise run it. Growing is what the rest of the engine does
-   * with a capacity, and it is what the README already claims happens here.
+   * Sized here rather than in the constructor because the pass count is a
+   * property of the frame, not a budget: it is 10 plus one per depth-pyramid
+   * mip plus two per bloom level, so it moves with resolution. Allocating for
+   * a guess meant a ceiling, and the engine's own frame had already reached it.
    *
-   * Contents are not preserved: begin() resets every counter, so a grow can
-   * only happen part-way through a declaration that is about to be rebuilt from
-   * scratch next frame anyway. The records themselves are pooled, so the ones
-   * already handed out stay valid -- only the flat index arrays are replaced,
-   * and nothing reads those until compile().
+   * Reused whenever it is already large enough, which after the first frame at
+   * a given resolution is always.
    */
-  _growPasses(needed) {
-    const capacity = grownCapacity(this.maxPasses, needed);
-    while (this._passes.length < capacity) this._passes.push(makePassRecord());
-
-    this._order = new Uint32Array(capacity);
-    this._live = new Uint8Array(capacity);
-    this._indegree = new Uint32Array(capacity);
-    this._queue = new Uint32Array(capacity);
-
-    const edges = growArray(this._edgeFrom, capacity * 8);
-    edges.set(this._edgeFrom);
-    this._edgeFrom = edges;
-    const edgesTo = growArray(this._edgeTo, capacity * 8);
-    edgesTo.set(this._edgeTo);
-    this._edgeTo = edgesTo;
-
-    this.maxPasses = capacity;
-  }
-
-  _growResources(needed) {
-    const capacity = grownCapacity(this.maxResources, needed);
-    while (this._resources.length < capacity) this._resources.push(makeResourceRecord());
-    this.maxResources = capacity;
+  _sizeScratch() {
+    if (this._order.length >= this.passCount) return;
+    const n = this.passCount;
+    this._order = new Uint32Array(n);
+    this._live = new Uint8Array(n);
+    this._indegree = new Uint32Array(n);
+    this._queue = new Uint32Array(n);
   }
 
   _allocResource(name) {
-    if (this.resourceCount >= this.maxResources) this._growResources(this.resourceCount + 1);
     const handle = this.resourceCount++;
-    const resource = this._resources[handle];
+    const resource = this._resources[handle] ??= makeResourceRecord();
     resource.name = name;
     resource.kind = 'texture';
     resource.buffer = null;
@@ -210,9 +189,8 @@ export class RenderGraph {
    * @param desc.execute (passEncoder, graph) => void
    */
   addPass(desc) {
-    if (this.passCount >= this.maxPasses) this._growPasses(this.passCount + 1);
     const index = this.passCount++;
-    const pass = this._passes[index];
+    const pass = this._passes[index] ??= makePassRecord();
 
     pass.name = desc.name ?? `pass${index}`;
     pass.execute = desc.execute;
@@ -268,6 +246,7 @@ export class RenderGraph {
 
   /** Order the passes, drop the dead ones, derive load/store, assign memory. */
   compile() {
+    this._sizeScratch();
     this._cullDeadPasses();
     this._topologicalSort();
     this._computeLifetimes();

@@ -337,20 +337,30 @@ test('textures are pooled across frames, not recreated', () => {
 
 test('rebuilding a frame allocates no new pass or resource records', () => {
   // begin() resets counters over pooled records rather than freeing them, so a
-  // steady-state frame adds nothing to the heap.
+  // steady-state frame adds nothing to the heap. The pools start empty and
+  // extend to the high-water mark, so the record to compare against is the one
+  // the FIRST frame created -- which also makes this a test of reuse across
+  // frames rather than of a preallocated slot's identity.
   const graph = new RenderGraph(fakeRhi());
-  const firstPass = graph._passes[0];
-  const firstResource = graph._resources[0];
 
-  for (let frame = 0; frame < 3; frame++) {
+  const buildFrame = (frame) => {
     graph.begin();
     const target = graph.importTexture('target', {});
     graph.addPass({ name: `f${frame}`, color: [{ resource: target, clear: 0 }], execute() {} });
     graph.compile();
-  }
+  };
+
+  buildFrame(0);
+  const firstPass = graph._passes[0];
+  const firstResource = graph._resources[0];
+  assert.ok(firstPass && firstResource, 'the first frame created the records');
+
+  buildFrame(1);
+  buildFrame(2);
 
   assert.equal(graph._passes[0], firstPass, 'pass record reused');
   assert.equal(graph._resources[0], firstResource, 'resource record reused');
+  assert.equal(graph._passes.length, 1, 'the pool did not grow past the high-water mark');
   assert.equal(graph.passCount, 1, 'counters reset each frame');
 });
 
@@ -467,7 +477,7 @@ test('the cycle message names the passes that could not be ordered', () => {
 test('the bloom chain shape compiles and orders correctly', () => {
   // Reading both inputs and writing a third texture has no hazard, which is
   // why the upsample adds in the shader instead of blending in place.
-  const graph = new RenderGraph(fakeRhi(), { maxResources: 64 });
+  const graph = new RenderGraph(fakeRhi());
   graph.begin();
 
   const surface = graph.importTexture('surface', {});
