@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-22
+
+One defect and one feature, both about transparency and shape.
+
+**Minor because `CLUSTER_X` and `CLUSTER_Y` are gone.** Nothing else was
+removed and no signature broke. At 16:9 the froxel grid is byte-for-byte what
+it was, so the default viewport renders identically.
+
+### Added
+
+- **Weighted-blended order-independent transparency**, behind `{ oit: true }`.
+  Blended geometry accumulates into two targets -- depth TESTED against the
+  opaque pass and never written -- and one full-screen resolve composites it
+  over the scene.
+
+  A second path, deliberately, not a replacement. The sorted path is EXACT for
+  separated convex objects and has no answer at all for interpenetrating ones,
+  because no single per-object order exists there; this needs no order and is
+  approximate everywhere. Neither is better. Architectural glass wants the
+  sorted one, smoke and foliage want this one, and most scenes this engine
+  draws are the case the default already gets right.
+
+  The weight function is where the approximation lives, and it is the part of
+  McGuire's paper that carries constants tuned against a normalised view depth.
+  Reverse-Z means the depth buffer value is already 1 at the near plane falling
+  toward 0, with no far plane to normalise against, so it is used directly and
+  the cubic is all that survives. The range is derived: `rgba16float` holds
+  65504, so the cap is that over `OIT_LAYER_BUDGET`. Past that depth complexity
+  the sum saturates and near layers stop dominating, which shows as
+  transparency flattening rather than as anything breaking.
+
+### Fixed
+
+- **The froxel grid was 16 by 9 whatever the viewport was.** Tile SIZE always
+  came from the real resolution, so coverage was never wrong -- the cells were
+  just stretched. A portrait phone canvas got them about 3x taller than wide,
+  an ultrawide the same on the other axis, and a stretched cell overlaps
+  proportionally more light spheres. So `MAX_LIGHTS_PER_CLUSTER` is reached at
+  a fraction of the light count a 16:9 monitor manages, and overflow past that
+  cap is dropped with nothing reported: lights wink out in busy regions on a
+  phone and look fine on a desktop.
+
+  The tile COUNT is a real budget -- it sizes the index buffer -- so it stays
+  fixed at 144, which is what 16 by 9 was. The arrangement is derived:
+  `x = round(sqrt(tiles * aspect))`, `y = floor(tiles / x)`. y floors rather
+  than rounds because `x * y <= 144` is what the buffer depends on, and
+  rounding both lands at 15 x 10 for 3:2. Portrait gets 9 x 16 and square
+  12 x 12, both with froxel aspect 1.00.
+
+### Changed
+
+- **`onDeviceLost` carries enough to act on**: `reason`, `message`,
+  `recoverable`, and `action`. The default console path now says the engine
+  does not rebuild GPU state and that reloading is the route back, rather than
+  printing a reason and stopping.
+
+  The README entry said "the callback fires; rebuilding the GPU state is on
+  you", which describes an unbuilt feature rather than a decision. Rebuilding
+  means holding a CPU copy of every GPU resource for the process lifetime, and
+  the expensive part is the textures' CONTENTS -- either every decoded image
+  stays resident, which is the gigabyte `load()` releases on purpose, or every
+  asset is fetched and decoded again, which is `load()`. A driver reset, a GPU
+  hang, an out-of-memory and a reclaimed background tab all want the same
+  response, and the callback now names it.
+
+- `CLUSTER_X` and `CLUSTER_Y` are replaced by `CLUSTER_TILES` and
+  `clusterGridFor(aspect)`. The live shape is `clusters.gridX` / `gridY`.
+  `CLUSTER_COUNT` is unchanged at 3456.
+
+323 checks under Node, 13 on a real device.
+
 ## [0.3.1] - 2026-09-22
 
 A patch: nothing was removed and no signature broke. But **two of these change
@@ -424,7 +495,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nolanbaxter/winding/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nolanbaxter/winding/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nolanbaxter/winding/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nolanbaxter/winding/compare/v0.1.1...v0.2.0
