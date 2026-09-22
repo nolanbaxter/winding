@@ -120,6 +120,12 @@ fragment only ever evaluates the handful of lights whose radius reaches its clus
 a fixed tile budget to match the viewport aspect, so the cells stay near cubic on a phone, a square
 editor pane or an ultrawide rather than only at 16:9.
 
+**Two transparency paths.** Blended geometry is culled and sorted back-to-front on the CPU, then
+drawn after every opaque batch. `{ oit: true }` swaps that for weighted-blended order-independent
+transparency: two targets and a resolve, no sorting at all. They are different tools rather than one
+being better -- sorting is exact for separated convex objects, OIT is approximate everywhere and
+does not care what order anything arrives in.
+
 **Cascaded shadow maps.** Sphere-fitted cascades (rotation invariant, so they don't shimmer when the
 camera turns), texel snapping, normal-offset bias, front-face culling.
 
@@ -181,20 +187,13 @@ These are real and currently unaddressed.
   deltas and per-instance weights -- and a `weights` animation channel is still dropped on import.
 - **One clip at a time per instance.** Cross-fading needs a weight per channel and somewhere to
   accumulate partial poses, which is a different data structure than the player has.
-- **Transparency sorts per object, not per fragment.** `BLEND` geometry is culled and sorted
-  back-to-front on the CPU and drawn after all opaque batches, which is exact for separated convex
-  objects and wrong for interpenetrating ones. `{ oit: true }` swaps in weighted-blended
-  order-independent transparency instead, which needs no order and is approximate everywhere — two
-  tools rather than a better one. Blended geometry casts no shadow on either path.
-- **Device loss ends the session; it is not rebuilt.** `onDeviceLost` fires with a reason, a message
-  and whether a fresh device is likely to work, and the frame loop stops itself. Rebuilding would
-  mean holding a CPU copy of every GPU resource for the process lifetime — and the expensive part is
-  the textures' contents, which means either keeping every decoded image resident or loading every
-  asset again. A driver reset, a GPU hang and a reclaimed background tab all want the same response,
-  and it is the one the callback names: reload.
-- **Resource aliasing is idle in the default frame.** Transients share memory when their lifetimes do
-  not overlap, but every same-size pair in the bloom chain overlaps by construction, so nothing is
-  shared until a post-process with a scratch chain is added.
+- **No transparency path is exact per fragment.** Sorting is exact for separated convex objects and
+  wrong for interpenetrating ones; OIT needs no order and is approximate everywhere. Being exact
+  means depth peeling, which is a pass per layer.
+- **Blended geometry casts no shadow**, on either path.
+- **Device loss ends the session.** `onDeviceLost` fires with enough to act on and the frame loop
+  stops itself, but nothing is rebuilt -- recovering would mean holding a CPU copy of every GPU
+  resource, textures' contents included, for the whole process lifetime. Reload is the route back.
 
 ## License
 

@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-22
+
+**Skinning.** The largest single item the engine was missing, done in four
+steps, each verified before the next depended on it.
+
+Minor because two binary layouts moved again: `DRAW_DATA_BYTES` is 128 where
+it was 112, and the transparent sort key is now 15 depth / 5 pipeline / 12
+material. The vertex format did not change -- influences ride in a second
+buffer that only skinned pipelines bind.
+
+### Added
+
+- **Skinned meshes deform.** `skins`, `JOINTS_0`, `WEIGHTS_0` and
+  `inverseBindMatrices` are read; a per-instance joint palette is built each
+  frame from matrices the transform hierarchy already composes; and a skinned
+  vertex path applies it. Two characters in different poses still share a
+  batch and a draw call, because the palette offset is per-instance draw data
+  rather than per batch.
+
+  The mesh node's own transform is deliberately absent from the skinned path.
+  glTF 3.7.3.3 says the joints place a skinned mesh entirely, and applying it
+  as well moves the character twice.
+
+- **Bounds that follow the pose.** A skinned mesh's vertices move without its
+  model matrix moving, so transforming a static local box gives the box the
+  character had when it was AUTHORED -- raise an arm and geometry sits outside
+  its own bounds, frustum-culled with the arm on screen. A skinned vertex is a
+  weighted average of its per-joint positions, so a union of spheres contains
+  every vertex the skin can produce: one per joint, at its current world
+  position, sized by how far its influence reached in bind pose. Derived
+  rather than inflated by a factor, and the cost is per joint rather than per
+  vertex.
+
+- **Skinned shadow casters**, so a character's shadow deforms with it.
+
+### Fixed
+
+- **The shadow pass read draw data at the wrong stride.** Introduced by this
+  release's own second step: the shadow shader declared `DrawData` without
+  `paletteOffset`, and WGSL sizes a struct from its members, so it read 112
+  bytes out of a buffer written at 128. Instance 0 landed correctly and every
+  one after it was misaligned. There is now a check that every shader reading
+  `DrawData` declares the same struct, and that the struct they agree on is
+  the stride the CPU writes.
+
+- **Triangle-exact picking missed on skinned meshes.** Posed box, bind-pose
+  triangles, reached through a matrix skinned vertices do not follow -- so a
+  posed character with `retainGeometry` became unpickable while its box said
+  otherwise. Skinned renderables are answered at their box, like any primitive
+  whose geometry was not retained.
+
+- A backtick inside a WGSL comment terminates the template literal and the
+  file fails to parse pointing at whatever word followed. It has happened
+  twice; there is now a check that no shader source contains one.
+
+### Changed
+
+- `variantKey` takes a fourth argument, `skinned`. Each material variant
+  expands into four pipelines -- two windings times two skinning -- all
+  compiled at load, because `render()` is never allowed to create one.
+- `TRANSPARENT_PIPELINE_BITS` is 5 and `TRANSPARENT_DEPTH_BITS` is 15, where
+  they were 4 and 16. Three alpha modes times two sidedness times two windings
+  times two skinning is 24 pipelines, past what 4 bits holds; the bit came
+  from depth, which had 65536 buckets for an ordering that cannot resolve
+  better than a pixel.
+- `ShadowMaps.addPasses` takes the joint palette.
+- The Limitations section drops "resource aliasing is idle", which was an
+  accurate note about the default frame and never a limitation.
+
+348 checks under Node, 14 on a real device.
+
 ## [0.4.0] - 2026-09-22
 
 One defect and one feature, both about transparency and shape.
@@ -495,7 +566,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/nolanbaxter/winding/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nolanbaxter/winding/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nolanbaxter/winding/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nolanbaxter/winding/compare/v0.2.0...v0.3.0
