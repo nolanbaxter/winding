@@ -1076,5 +1076,41 @@ test('picking sees the posed box, not the authored one', () => {
   const hit = rig.scene.raycast(vec3Create(0, 31, 10), vec3Create(0, 0, -1));
   assert.ok(hit, 'a ray through the raised geometry must hit it');
 });
+test('a skinned mesh is picked at its box, not at bind-pose triangles', () => {
+  // Combining two features made a gap: step 3 gave skinned renderables a POSED
+  // box, while the narrow phase still reaches its triangles by inverting the
+  // mesh node's matrix -- which skinned vertices do not follow. Left alone
+  // that is not approximate, it misses, so a posed character with retained
+  // geometry became unpickable while its box said it was right there.
+  const rig = riggedScene();
+  // Retain geometry, which is what turns the narrow phase on.
+  rig.scene.renderablePrimitive[0].positions = rig.positions;
+  rig.scene.renderablePrimitive[0].indices = Uint32Array.from([0, 1, 2, 2, 1, 3]);
+
+  const joint = rig.scene.skins[0].joints[1];
+  rig.scene.transforms.setPosition(joint, 0, 30, 0);
+
+  const hit = rig.scene.raycast(vec3Create(0, 31, 10), vec3Create(0, 0, -1));
+  assert.ok(hit, 'the posed geometry must still be pickable with retainGeometry on');
+});
+
+test('an unskinned mesh still gets the triangle test', () => {
+  // The negative control: the skip must key on skinning, not on having
+  // retained geometry at all, or it would silently disable the feature.
+  const scene = new Scene({ capacity: 8 });
+  const entity = scene.entities.alloc();
+  scene.transforms.add(entity, { position: [0, 0, -5] });
+  scene._addRenderable(entity, {
+    indexCount: 3, materialId: 0,
+    bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+    positions: new Float32Array([-0.2, -0.2, 0, 0.2, -0.2, 0, 0, 0.2, 0]),
+    indices: new Uint32Array([0, 1, 2]),
+  });
+
+  assert.ok(scene.raycast(vec3Create(0, 0, 0), vec3Create(0, 0, -1)), 'through the triangle');
+  assert.equal(scene.raycast(vec3Create(0.4, 0.4, 0), vec3Create(0, 0, -1)), null,
+    'the empty corner of the box still misses');
+});
+
 
 console.log(`\n${passed} checks passed\n`);

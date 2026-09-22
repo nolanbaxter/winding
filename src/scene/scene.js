@@ -460,7 +460,15 @@ export class Scene {
       if (candidate.distance >= bestDistance) break;
 
       const primitive = this.renderablePrimitive[candidate.renderable];
-      if (primitive.positions === undefined || primitive.indices === undefined) {
+      // A skinned renderable is answered at its box even when its geometry was
+      // retained. The triangles are the BIND POSE, and the narrow phase reaches
+      // them by inverting the mesh node's matrix -- which a skinned mesh's
+      // vertices do not follow at all. Testing them would not merely be
+      // approximate, it would miss, and a posed character with retainGeometry
+      // would become unpickable while its box said otherwise. Skinning the
+      // triangles here would cost a palette blend per vertex per click.
+      const skinned = this.renderableSkin[candidate.renderable] >= 0;
+      if (skinned || primitive.positions === undefined || primitive.indices === undefined) {
         best = candidate.renderable;
         bestDistance = candidate.distance;
         continue;
