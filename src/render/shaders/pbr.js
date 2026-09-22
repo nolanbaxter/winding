@@ -8,6 +8,17 @@
 import { BRDF_WGSL } from './brdf.js';
 import { MAX_LIGHTS_PER_CLUSTER } from '../clustered.js';
 
+/**
+ * Depth complexity the OIT weighting stays well-behaved at.
+ *
+ * The accumulation target is rgba16float, whose largest finite value is 65504.
+ * Dividing that by this budget is the largest weight a single fragment may
+ * carry, so this many fully-weighted layers can sum without saturating. Past
+ * it the sum clips and the nearest layers stop dominating, which shows as
+ * transparency that flattens rather than as anything breaking.
+ */
+export const OIT_LAYER_BUDGET = 64;
+
 export const PBR_SHADER = /* wgsl */ `
 ${BRDF_WGSL}
 
@@ -248,8 +259,7 @@ fn clusterFor(fragCoord : vec2<f32>, viewDepth : f32) -> u32 {
   return (slice * frame.clusterGrid.y + tileY) * frame.clusterGrid.x + tileX;
 }
 
-@fragment
-fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) vec4<f32> {
+fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // Which UV set each map samples, one bit apiece. A select rather than a
   // branch: both sets are interpolated already, so picking between them is
   // free and uniform across the quad, where a branch would not be.
@@ -420,6 +430,62 @@ fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) 
   // 60x white, not that it was clipped to 1; the post stack tonemaps once at
   // the end. Exposure lives there too, for the same reason.
   return vec4<f32>(direct + ambient + emissive, sampled.a);
+}
+
+@fragment
+fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) vec4<f32> {
+  return shade(v, frontFacing);
+}
+
+// Weighted-blended order-independent transparency (McGuire and Bavoil 2013).
+//
+// The opt-in second transparency path. The sorted one is EXACT for separated
+// convex objects and has no answer at all for interpenetrating ones, because
+// no single per-object order exists there. This is approximate everywhere and
+// needs no order, which makes the two different tools rather than one being
+// better: architectural glass wants the sorted path, smoke and foliage want
+// this one.
+//
+// Two targets, resolved in one pass afterwards:
+//   accum  sum of colour * alpha * w, and of alpha * w
+//   reveal product of (1 - alpha), which is how much background survives
+struct OitOut {
+  @location(0) accum  : vec4<f32>,
+  @location(1) reveal : f32,
+};
+
+/**
+ * How much a fragment counts, by depth.
+ *
+ * The whole approximation lives here: nearer fragments are weighted more, so
+ * the result resembles a correct back-to-front composite without anything
+ * being sorted. McGuire's paper picks its constants against a normalised view
+ * depth; this engine has reverse-Z, where the depth buffer value is already
+ * 1 at the near plane and falls to 0 with no far plane to normalise against,
+ * so it is used directly and the cubic is all that remains of the tuning.
+ *
+ * The range is derived rather than chosen. The accumulation target is
+ * rgba16float, whose largest finite value is 65504, so the budget is that
+ * divided by the depth complexity this stays well-behaved at. Past that the
+ * sum saturates and the nearest layers stop dominating.
+ */
+fn oitWeight(alpha : f32, depth : f32) -> f32 {
+  let maxWeight = 65504.0 / ${OIT_LAYER_BUDGET}.0;
+  return alpha * clamp(depth * depth * depth * maxWeight, 1.0, maxWeight);
+}
+
+@fragment
+fn fsOIT(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> OitOut {
+  let colour = shade(v, frontFacing);
+  // builtin(position).z in a fragment is already the value that would go to the
+  // depth buffer, so under reverse-Z it is 1 at the near plane and falls
+  // toward 0. No division and no unprojection.
+  let w = oitWeight(colour.a, clamp(v.clip.z, 0.0, 1.0));
+
+  var out : OitOut;
+  out.accum = vec4<f32>(colour.rgb * colour.a, colour.a) * w;
+  out.reveal = colour.a;
+  return out;
 }
 `;
 

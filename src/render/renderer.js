@@ -9,15 +9,22 @@ import { DrawList, opaqueSortKey, transparentSortKey, transparentDepthBucket } f
 import {
   createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW,
 } from '../rhi/bindgroups.js';
-import { DEPTH_CLEAR_VALUE } from '../rhi/device.js';
+import { DEPTH_CLEAR_VALUE, DEPTH_FORMAT, DEPTH_COMPARE } from '../rhi/device.js';
+
+/** OIT targets. accum sums weighted colour; reveal is the surviving background. */
+export const OIT_ACCUM_FORMAT = 'rgba16float';
+export const OIT_REVEAL_FORMAT = 'r16float';
 
 import { mat4NormalMatrix } from '../core/math/mat4.js';
 import { vec3Create, vec3Sub, vec3Normalize } from '../core/math/vec3.js';
 import { frustumCreate, frustumFromViewProjection, frustumTestAABB } from '../core/math/frustum.js';
 import { grownCapacity } from '../core/grow.js';
 
-import { MaterialRegistry, variantPipelineState, VARIANT_MIRRORED } from './material.js';
+import {
+  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, ALPHA_BLEND,
+} from './material.js';
 import { PBR_SHADER, FRAME_BYTES } from './shaders/pbr.js';
+import { OIT_RESOLVE_SHADER } from './shaders/oit.js';
 import { SkyboxPass } from './skybox.js';
 import { ShadowMaps } from './shadows.js';
 import { RenderGraph } from './graph.js';
@@ -39,10 +46,10 @@ const now = () => (globalThis.performance?.now?.() ?? Date.now());
 export class Renderer {
   static async create(rhi, {
     maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
-    shadowDistance = null, post, gpuTiming = true,
+    shadowDistance = null, post, gpuTiming = true, oit = false,
   } = {}) {
     const renderer = new Renderer(rhi, {
-      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming,
+      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit,
     });
     await renderer._init();
     return renderer;
@@ -50,6 +57,7 @@ export class Renderer {
 
   constructor(rhi, {
     maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = true,
+    oit = false,
   }) {
     this.shadowOptions = shadows ?? {};
     this.postOptions = post ?? {};
@@ -109,6 +117,16 @@ export class Renderer {
     this.frustum = frustumCreate();
 
     this._pipelineByVariant = new Map();
+    this._oitPipelineByVariant = new Map();
+    /**
+     * Weighted-blended order-independent transparency, off by default.
+     *
+     * The sorted path is EXACT for separated convex objects and has no answer
+     * for interpenetrating ones; this is approximate everywhere and needs no
+     * order. Different tools, so this is a choice rather than a replacement --
+     * architectural glass wants the sorted path, smoke and foliage want this.
+     */
+    this.oit = oit;
     this._frameBindGroups = new WeakMap();
     this._clusterRevision = 0;
 
@@ -164,6 +182,7 @@ export class Renderer {
     // Bound once: the graph holds a function per pass, and rebuilding these
     // every frame would allocate a closure per pass per frame.
     this._forwardEarly = (pass) => this._encodeForward(pass, 0);
+    this._oitExecute = (pass) => this._encodeOIT(pass);
     this._forwardLate = (pass) => this._encodeForward(pass, 1);
     this._frameScene = null;
     this._frameEnvironment = null;
@@ -184,6 +203,7 @@ export class Renderer {
     this._makeDrawBindGroup();
     this.clusters = await ClusteredLights.create(this.rhi);
     this.shader = await compileShader(this.rhi.device, PBR_SHADER, 'pbr.wgsl');
+    if (this.oit) await this._initOit();
     this.shadows = await ShadowMaps.create(
       this.rhi, this.pipelines, this.drawLayout, this.shadowOptions,
     );
@@ -244,6 +264,54 @@ export class Renderer {
         constants: state.constants,
       };
       this._pipelineByVariant.set(variant, descriptor);
+      pending.push(descriptor);
+    }
+    if (pending.length > 0) await this.pipelines.warm(pending);
+    if (this.oit) await this._ensureOitVariants(wanted);
+  }
+
+  /**
+   * The OIT copies of every BLEND variant.
+   *
+   * Only those: opaque and masked geometry never reaches the transparent path,
+   * so building them would compile pipelines nothing can bind. Two targets and
+   * two blend states rather than one, which is why these cannot just be the
+   * same descriptors with a different entry point.
+   */
+  async _ensureOitVariants(variants) {
+    const pending = [];
+    for (const variant of variants) {
+      if ((variant & 3) !== ALPHA_BLEND) continue;
+      if (this._oitPipelineByVariant.has(variant)) continue;
+
+      const state = variantPipelineState(variant);
+      const descriptor = {
+        label: `pbr-oit:v${variant}`,
+        layout: this.pipelineLayout,
+        shader: this.shader,
+        buffers: [VERTEX_LAYOUT],
+        fragmentEntry: 'fsOIT',
+        targets: [
+          // accum sums, so it adds; reveal multiplies what is left of the
+          // background, so it is a product. Both are the standard weighted
+          // blended pair and neither is a choice.
+          { format: OIT_ACCUM_FORMAT, blend: {
+            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+            alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          } },
+          { format: OIT_REVEAL_FORMAT, blend: {
+            color: { srcFactor: 'zero', dstFactor: 'one-minus-src', operation: 'add' },
+            alpha: { srcFactor: 'zero', dstFactor: 'one-minus-src', operation: 'add' },
+          } },
+        ],
+        primitive: state.primitive,
+        // Tested against the opaque depth so nothing behind a wall accumulates,
+        // and never written: a blended surface does not occlude what is behind
+        // it, and the whole point of this path is that order does not matter.
+        depth: { format: DEPTH_FORMAT, depthCompare: DEPTH_COMPARE, depthWriteEnabled: false },
+        constants: state.constants,
+      };
+      this._oitPipelineByVariant.set(variant, descriptor);
       pending.push(descriptor);
     }
     if (pending.length > 0) await this.pipelines.warm(pending);
@@ -504,6 +572,45 @@ export class Renderer {
       execute: this._forwardLate,
     });
 
+    // OIT, when it is on. Blended geometry skipped the pass above, so it is
+    // drawn here into its own two targets in whatever order it comes -- that
+    // is the point -- and composited over the scene by the resolve.
+    if (this.oit) {
+      const accum = graph.createTexture('oit-accum', {
+        width: rhi.width,
+        height: rhi.height,
+        format: OIT_ACCUM_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      const reveal = graph.createTexture('oit-reveal', {
+        width: rhi.width,
+        height: rhi.height,
+        format: OIT_REVEAL_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      });
+
+      graph.addPass({
+        name: 'oit',
+        reads: [shadowMap, lightBuffer, clusterIndices, clusterCounts],
+        color: [
+          // accum starts empty; reveal starts at 1, meaning all background.
+          { resource: accum, clear: { r: 0, g: 0, b: 0, a: 0 } },
+          { resource: reveal, clear: { r: 1, g: 1, b: 1, a: 1 } },
+        ],
+        // Read for the depth test, never written. Declaring the depth here is
+        // also what keeps the graph from discarding it after forward:late.
+        depth: { resource: depth },
+        execute: this._oitExecute,
+      });
+
+      graph.addPass({
+        name: 'oit-resolve',
+        reads: [accum, reveal],
+        color: [{ resource: sceneColor }],
+        execute: (pass) => this._encodeOitResolve(pass, graph.viewOf(accum), graph.viewOf(reveal)),
+      });
+    }
+
     this.post.addPasses(graph, {
       sceneColor,
       surface,
@@ -675,42 +782,132 @@ export class Renderer {
 
     if (phase === 0) return;
 
-    // Blended geometry, strictly after every opaque draw and in the order
-    // _orderTransparent worked out. One call each: two blended objects at
-    // different depths cannot share an instanced draw without losing the
-    // ordering that is the entire point of this pass.
-    //
-    // firstInstance carries the slot, which a DIRECT draw may set freely --
-    // the optional-feature restriction the vertex shader mentions applies to
-    // indirect draws only. So the shader is the same one the batches use, with
-    // a batch base of zero.
+    // Blended geometry, strictly after every opaque draw. With OIT on it is
+    // drawn into its own targets by a later pass instead, and needs no order
+    // at all -- which is the whole reason that path exists.
+    if (!this.oit) this._encodeTransparent(pass, this._pipelineByVariant, boundPipeline, boundMaterial);
+  }
+
+  /**
+   * Draw every blended object, one call each.
+   *
+   * Two blended objects at different depths cannot share an instanced draw
+   * without losing the ordering the sorted path exists to produce, and the OIT
+   * path has no ordering to lose but still needs per-object material binds.
+   *
+   * firstInstance carries the slot, which a DIRECT draw may set freely -- the
+   * optional-feature restriction the vertex shader mentions applies to
+   * indirect draws only. So the shader is the same one the batches use, with a
+   * batch base of zero.
+   */
+  _encodeTransparent(pass, pipelineByVariant, boundPipeline = null, boundMaterial = -1) {
+    const scene = this._frameScene;
+    const gpu = this.gpu;
     const transparentCount = this.transparentList.count;
-    if (transparentCount > 0) {
-      pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.transparentBatchOffset()]);
+    if (transparentCount === 0) return;
 
-      for (let k = 0; k < transparentCount; k++) {
-        const i = this.transparentList.payloads[k];
-        const materialId = scene.renderableMaterial[i];
-        const primitive = scene.renderablePrimitive[i];
+    pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.transparentBatchOffset()]);
 
-        const variant = this.materials.variants[materialId]
-          | (gpu.itemMirrored[i] ? VARIANT_MIRRORED : 0);
-        const pipeline = this.pipelines.get(this._pipelineByVariant.get(variant));
-        if (pipeline !== boundPipeline) {
-          pass.setPipeline(pipeline);
-          boundPipeline = pipeline;
-        }
-        if (materialId !== boundMaterial) {
-          pass.setBindGroup(GROUP_MATERIAL, this.materials.bindGroup(materialId));
-          boundMaterial = materialId;
-        }
+    for (let k = 0; k < transparentCount; k++) {
+      const i = this.transparentList.payloads[k];
+      const materialId = scene.renderableMaterial[i];
+      const primitive = scene.renderablePrimitive[i];
 
-        pass.setVertexBuffer(0, primitive.vertexBuffer);
-        pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
-        pass.drawIndexed(primitive.indexCount, 1, 0, 0, gpu.opaqueCount + k);
+      const variant = this.materials.variants[materialId]
+        | (gpu.itemMirrored[i] ? VARIANT_MIRRORED : 0);
+      const pipeline = this.pipelines.get(pipelineByVariant.get(variant));
+      if (pipeline !== boundPipeline) {
+        pass.setPipeline(pipeline);
+        boundPipeline = pipeline;
       }
+      if (materialId !== boundMaterial) {
+        pass.setBindGroup(GROUP_MATERIAL, this.materials.bindGroup(materialId));
+        boundMaterial = materialId;
+      }
+
+      pass.setVertexBuffer(0, primitive.vertexBuffer);
+      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
+      pass.drawIndexed(primitive.indexCount, 1, 0, 0, gpu.opaqueCount + k);
     }
   }
+
+  /**
+   * Build the full-screen pass that composites the OIT targets.
+   *
+   * Its own layout and pipeline, because it binds two textures and nothing
+   * else -- no material, no lights, no geometry. The blend is a plain
+   * source-over: the resolve returns coverage in alpha, so `1 - reveal` of the
+   * blended colour lands on top of whatever the forward passes left.
+   */
+  async _initOit() {
+    const device = this.rhi.device;
+    const shader = await compileShader(device, OIT_RESOLVE_SHADER, 'oit.wgsl');
+
+    this.oitLayout = device.createBindGroupLayout({
+      label: 'oit-resolve',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+      ],
+    });
+
+    this.oitResolveDescriptor = {
+      label: 'oit-resolve',
+      layout: createPipelineLayout(device, { 0: this.oitLayout }, 'oit-resolve'),
+      shader,
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depth: null,
+      targets: [{
+        format: HDR_FORMAT,
+        blend: {
+          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        },
+      }],
+    };
+    await this.pipelines.warm([this.oitResolveDescriptor]);
+    this._oitBindGroups = new Map();
+  }
+
+  /** Bind group per (accum, reveal) view pair, which the graph pool keeps stable. */
+  _oitBindGroupFor(accumView, revealView) {
+    const key = `${viewKey(accumView)}:${viewKey(revealView)}`;
+    let bindGroup = this._oitBindGroups.get(key);
+    if (!bindGroup) {
+      bindGroup = this.rhi.device.createBindGroup({
+        label: 'oit-resolve',
+        layout: this.oitLayout,
+        entries: [
+          { binding: 0, resource: accumView },
+          { binding: 1, resource: revealView },
+        ],
+      });
+      this._oitBindGroups.set(key, bindGroup);
+    }
+    return bindGroup;
+  }
+
+  _encodeOitResolve(pass, accumView, revealView) {
+    pass.setPipeline(this.pipelines.get(this.oitResolveDescriptor));
+    pass.setBindGroup(0, this._oitBindGroupFor(accumView, revealView));
+    pass.draw(3);
+  }
+
+  /** The OIT geometry pass: the same objects, unsorted, into accum and reveal. */
+  _encodeOIT(pass) {
+    pass.setBindGroup(GROUP_FRAME, this._frameBindGroup(this._frameEnvironment));
+    this.pipelineLayout.bindEmptyGroups(pass);
+    this._encodeTransparent(pass, this._oitPipelineByVariant);
+  }
+}
+
+// Views have no identity of their own, so one is stamped on first use. Stable
+// because the graph's texture pool hands back the same view objects for the
+// same descriptor, and its eviction drops the entries that stop coming back.
+let nextViewKey = 1;
+function viewKey(view) {
+  if (!view.__oitKey) view.__oitKey = nextViewKey++;
+  return view.__oitKey;
 }
 
 /** Model matrix plus its normal matrix, packed for the draw-data buffer. */

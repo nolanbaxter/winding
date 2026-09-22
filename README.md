@@ -82,7 +82,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 
 ```bash
 npm test          # 323 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 12 checks on a real device
+npm run test:gpu  # serves the page; open test/gpu.html for 13 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
@@ -183,8 +183,15 @@ These are real and currently unaddressed.
   accumulate partial poses, which is a different data structure than the player has.
 - **Transparency sorts per object, not per fragment.** `BLEND` geometry is culled and sorted
   back-to-front on the CPU and drawn after all opaque batches, which is exact for separated convex
-  objects and wrong for interpenetrating ones. Blended geometry also casts no shadow.
-- **Device loss is reported, not recovered.** The callback fires; rebuilding the GPU state is on you.
+  objects and wrong for interpenetrating ones. `{ oit: true }` swaps in weighted-blended
+  order-independent transparency instead, which needs no order and is approximate everywhere — two
+  tools rather than a better one. Blended geometry casts no shadow on either path.
+- **Device loss ends the session; it is not rebuilt.** `onDeviceLost` fires with a reason, a message
+  and whether a fresh device is likely to work, and the frame loop stops itself. Rebuilding would
+  mean holding a CPU copy of every GPU resource for the process lifetime — and the expensive part is
+  the textures' contents, which means either keeping every decoded image resident or loading every
+  asset again. A driver reset, a GPU hang and a reclaimed background tab all want the same response,
+  and it is the one the callback names: reload.
 - **Resource aliasing is idle in the default frame.** Transients share memory when their lifetimes do
   not overlap, but every same-size pair in the bloom chain overlaps by construction, so nothing is
   shared until a post-process with a scratch chain is added.

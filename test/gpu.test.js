@@ -246,6 +246,45 @@ export async function run(canvas, onDone) {
     return `${executed} of ${passes} passes, ${edges} edges`;
   });
 
+  await step('order-independent transparency resolves into the scene', async () => {
+    // A second engine, because oit is chosen at construction: the pipelines
+    // and the resolve are built then, so nothing compiles mid-frame.
+    const oitCanvas = document.createElement('canvas');
+    oitCanvas.width = 256;
+    oitCanvas.height = 256;
+    document.body.appendChild(oitCanvas);
+
+    const oitEngine = await Winding.create(oitCanvas, { oit: true });
+    try {
+      const oitScene = oitEngine.createScene();
+      oitScene.add(await oitEngine.load(await buildDemoGLB({ arms: 3 })));
+      const oitCamera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+      oitCamera.position.set([0, 2, 8]);
+
+      for (let i = 0; i < 5; i++) oitEngine.renderFrame(oitScene, oitCamera);
+      await oitEngine.rhi.device.queue.onSubmittedWorkDone();
+
+      const graph = oitEngine.renderer.graph;
+      const names = [];
+      for (let s = 0; s < graph._orderCount; s++) names.push(graph._passes[graph._order[s]].name);
+
+      const oitAt = names.indexOf('oit');
+      const resolveAt = names.indexOf('oit-resolve');
+      if (oitAt < 0 || resolveAt < 0) throw new Error(`no oit passes in: ${names.join(', ')}`);
+      if (resolveAt < oitAt) throw new Error('the resolve was ordered before the pass it reads');
+      if (names.indexOf('forward:late') > oitAt) {
+        throw new Error('blended geometry accumulated before the opaque depth existed');
+      }
+      if (names.indexOf('tonemap') < resolveAt) {
+        throw new Error('tonemap ran before the resolve composited into the scene');
+      }
+      return `${names.length} passes, oit at ${oitAt}, resolve at ${resolveAt}`;
+    } finally {
+      oitEngine.destroy();
+      oitCanvas.remove();
+    }
+  });
+
   check('no WGSL compilation errors', shaderErrors.length === 0, shaderErrors.join('\n'));
   check('no uncaptured device errors', deviceErrors.length === 0, deviceErrors.join('\n'));
 

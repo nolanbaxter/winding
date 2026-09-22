@@ -62,6 +62,7 @@ export class Winding {
       shadowDistance: options.shadowDistance,
       lightDistance: options.lightDistance,
       gpuTiming: options.gpuTiming,
+      oit: options.oit,
     });
 
     const sharedEnvironment = options.environment instanceof Environment;

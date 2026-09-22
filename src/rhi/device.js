@@ -83,15 +83,47 @@ export class Device {
       else console.error(message);
     });
 
-    // Every resource created from this device dies with it: driver reset, GPU
-    // hang, OOM, or the browser reclaiming a backgrounded tab. Recovery means
-    // rebuilding all of it, which is only possible because the RHI owns it all.
-    // Not awaited -- this is a notification, not a step.
+    // Every resource created from this device dies with it: a driver reset, a
+    // GPU hang, an out-of-memory, or the browser reclaiming a backgrounded
+    // tab. This engine deliberately does NOT rebuild them.
+    //
+    // Rebuilding would mean keeping a CPU-side description of every GPU object
+    // alive for the process lifetime, and the hard part is not the buffers or
+    // the pipelines -- those are cheap to re-derive. It is the textures, with
+    // their contents: either every decoded image stays resident forever, which
+    // is the gigabyte load() explicitly releases, or every asset is fetched
+    // and decoded again, which is load() itself. A permanent cost on every
+    // module that creates a resource, for a path that fires on a driver reset.
+    //
+    // So the honest answer is to say so clearly and let the app reload, which
+    // is what the user expects from all four causes anyway. What that needs is
+    // a callback with enough in it to act on, which is what this builds.
+    //
+    // Not awaited -- it is a notification, not a step.
     device.lost.then((info) => {
       if (this.destroyed && info.reason === 'destroyed') return;   // we did that
       this.destroyed = true;
-      if (this.onDeviceLost) this.onDeviceLost(info);
-      else console.error(`WebGPU device lost (${info.reason}): ${info.message}`);
+
+      // 'destroyed' here means someone else destroyed it, since our own case
+      // returned above. Everything else is the GPU going away underneath us,
+      // and reloading is the only route back.
+      const detail = {
+        reason: info.reason,
+        message: info.message,
+        /** True when creating a fresh device is likely to work. */
+        recoverable: info.reason !== 'destroyed',
+        /** What an application should do about it. There is one answer. */
+        action: 'reload',
+      };
+
+      if (this.onDeviceLost) this.onDeviceLost(detail);
+      else {
+        console.error(
+          `WebGPU device lost (${info.reason}): ${info.message || 'no message'}\n` +
+          'Winding does not rebuild GPU state. Reload the page, or pass ' +
+          'onDeviceLost to Winding.create to handle it yourself.',
+        );
+      }
     });
 
     this.context = canvas.getContext('webgpu');
