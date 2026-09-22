@@ -69,7 +69,7 @@ export class RenderGraph {
     this._edgeTo = new Uint32Array(maxPasses * 8);
     this._edgeCount = 0;
 
-    this.stats = { passes: 0, executed: 0, culled: 0, transient: 0, aliased: 0 };
+    this.stats = { passes: 0, executed: 0, culled: 0, edges: 0, transient: 0, aliased: 0 };
     this._compiled = false;
   }
 
@@ -239,6 +239,7 @@ export class RenderGraph {
     this.stats.passes = this.passCount;
     this.stats.executed = this._orderCount;
     this.stats.culled = this.passCount - this._orderCount;
+    this.stats.edges = this._edgeCount;
     this._compiled = true;
     return this;
   }

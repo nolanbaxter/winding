@@ -233,11 +233,11 @@ export async function run(canvas, onDone) {
   });
 
   await step('the graph ordered every live pass', async () => {
-    const { passes, executed, culled } = engine.renderer.graph.stats;
+    const { passes, executed, culled, edges } = engine.renderer.graph.stats;
     if (executed + culled !== passes) {
       throw new Error(`${passes} passes, ${executed} executed, ${culled} culled -- ${passes - executed - culled} unaccounted for`);
     }
-    return `${executed} of ${passes} passes`;
+    return `${executed} of ${passes} passes, ${edges} edges`;
   });
 
   check('no WGSL compilation errors', shaderErrors.length === 0, shaderErrors.join('\n'));

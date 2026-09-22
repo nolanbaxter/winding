@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Three of the README's limitations, worked through in order of what they cost
+to fix rather than what they cost to describe.
+
+### Added
+
+- **Triangle-exact picking**, behind `engine.load(src, { retainGeometry: true })`.
+  `scene.raycast` keeps the bounding-box test as a broad phase, sorts the
+  boxes the ray enters by entry distance, and walks them near to far, stopping
+  as soon as the next box begins further away than the best hit so far. The
+  narrow phase inverts the model matrix and pushes the RAY into local space
+  rather than the triangles into world space, and deliberately does not
+  renormalize the transformed direction, so the distance comes back on the
+  same scale as the box distances. Primitives loaded without the flag are
+  still answered at their box, so mixing the two degrades per object.
+- **Per-pass GPU timing** on any adapter with `timestamp-query`, which was
+  already requested and unused. The render graph owns it: it knows the pass
+  list and the order, so every pass gets its `timestampWrites` without a call
+  site being instrumented by hand. Readback is unsynchronised through a ring
+  of staging buffers, because mapping a buffer the GPU may still be writing
+  would stall the frame being measured. Read `renderer.gpuTiming.average`, not
+  a single frame: Chrome quantises these timestamps to 65536ns, so most passes
+  read as exactly 0 on any given frame and only the mean over hundreds of them
+  means anything.
+
+### Changed
+
+- **Occlusion culling runs in two phases and is no longer a frame stale.**
+  What was drawn last frame is drawn first, the depth pyramid is built from
+  that, and a second cull tests everything else against it before a second
+  pass draws whatever it newly admits. An object that becomes visible now
+  appears on the frame it does instead of popping in on the next, because the
+  pyramid and the matrix it is projected with both belong to this frame.
+  `lastViewProjection` is gone. The two phases share one indirect buffer, one
+  visible list and one batch-info buffer, each doubled, so this costs one
+  compute dispatch and one set of indirect draws rather than a second copy of
+  the machinery.
+- **The render graph versions resources that are written more than once.** A
+  read edged from every writer regardless of declaration order, which is right
+  for a single-writer resource and wrong for a sequence: the depth pyramid
+  reads depth between the two forward passes, and edging it from both put it
+  after a pass that depends on it. A resource written several times is a
+  sequence of values and a read means the one current where it was declared.
+  Single-writer resources behave exactly as before, which is the case the rule
+  was written for.
+
+### Fixed
+
+- The aliasing limitation was described as never triggering "because every
+  transient target is a distinct size". Measured, the reason is different: the
+  bloom chain does contain same-size pairs, but `bloom{i}` and `bloom-up{i}`
+  overlap in lifetime by construction, so there is nothing to share. Adding a
+  three-pass separable blur aliases immediately. The pass is idle here, not
+  speculative, and its own tests already covered it.
+
 ## [0.1.1] - 2026-09-21
 
 A correctness pass over the renderer's maths. Every entry below is a bug that
