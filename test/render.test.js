@@ -17,6 +17,7 @@ import {
   DrawList, opaqueSortKey, transparentSortKey,
   opaqueDepthBucket, transparentDepthBucket,
   OPAQUE_PIPELINE_BITS, OPAQUE_MATERIAL_BITS, OPAQUE_DEPTH_BITS,
+  TRANSPARENT_PIPELINE_BITS, TRANSPARENT_MATERIAL_BITS, TRANSPARENT_DEPTH_BITS,
 } from '../src/render/drawlist.js';
 import { updateWorldBounds } from '../src/scene/bounds.js';
 import {
@@ -255,9 +256,23 @@ test('opaque order is pipeline, then material, then near-to-far', () => {
 });
 
 test('transparent order is depth first, whatever the state costs', () => {
+  // Pipeline ids are a dense index over variantKey, which has at most six
+  // distinct values, so 5 is the worst real case rather than 200.
   const farCheapState = transparentSortKey(0, 0, 10);
-  const nearExpensiveState = transparentSortKey(200, 200, 900);
+  const nearExpensiveState = transparentSortKey(5, 4095, 900);
   assert.ok(farCheapState < nearExpensiveState, 'depth outranks state');
+});
+
+test('both sort keys address the same number of materials', () => {
+  // The transparent material field was 8 bits while the registry guarded 4096
+  // from the opaque one, so a blended material past 255 ORed a bit into the
+  // pipeline field and silently reordered the frame -- in release, where the
+  // DEBUG assert below does not exist.
+  assert.equal(TRANSPARENT_MATERIAL_BITS, OPAQUE_MATERIAL_BITS);
+  assert.equal(TRANSPARENT_DEPTH_BITS + TRANSPARENT_PIPELINE_BITS + TRANSPARENT_MATERIAL_BITS, 32);
+
+  const highMaterial = transparentSortKey(0, 4095, 0);
+  assert.equal(highMaterial, 4095, 'the top material id occupies the material field alone');
 });
 
 test('keys stay unsigned at the top of the pipeline field', () => {

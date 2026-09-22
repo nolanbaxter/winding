@@ -236,7 +236,7 @@ fn clusterFor(fragCoord : vec2<f32>, viewDepth : f32) -> u32 {
 }
 
 @fragment
-fn fs(v : VertexOut) -> @location(0) vec4<f32> {
+fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) vec4<f32> {
   let sampled = textureSample(baseColorMap, surfSampler, v.uv) * material.baseColor;
 
   if (USE_ALPHA_MASK) {
@@ -255,9 +255,25 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
   let occlusion = 1.0 + material.occlusionStrength * (occlusionSample - 1.0);
 
   // Tangent-space normal into world space.
+  //
+  // The geometric normal is flipped for a back face. A double-sided material
+  // draws both windings from one set of vertices, so a back face arrives with
+  // the normal of the front it was authored as -- pointing away from the eye.
+  // Left alone, NoL clamps to zero and every back face shades ambient-only,
+  // which is the whole leaf on a tree, the inside of a curtain, or the reverse
+  // of any thin panel. Single-sided geometry never reaches here with a back
+  // face, since the pipeline culls it, so this costs those nothing.
+  //
+  // The bitangent flips with the normal to keep the basis right-handed. The
+  // tangent does not: it follows the UV's u axis, which does not reverse.
+  let facing = select(-1.0, 1.0, frontFacing);
   let tangentNormal = (textureSample(normalMap, surfSampler, v.uv).xyz * 2.0 - 1.0)
                     * vec3<f32>(material.normalScale, material.normalScale, 1.0);
-  let tbn = mat3x3<f32>(normalize(v.tangent), normalize(v.bitangent), normalize(v.normal));
+  let tbn = mat3x3<f32>(
+    normalize(v.tangent),
+    normalize(v.bitangent) * facing,
+    normalize(v.normal) * facing,
+  );
   let n = normalize(tbn * tangentNormal);
 
   let view = normalize(frame.cameraPosition.xyz - v.world);

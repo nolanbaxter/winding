@@ -24,9 +24,32 @@ export const OPAQUE_PIPELINE_BITS = 10;    // 1024 distinct pipelines
 export const OPAQUE_MATERIAL_BITS = 12;    // 4096 distinct materials
 export const OPAQUE_DEPTH_BITS = 10;       // 1024 depth buckets
 
+// The transparent key carries the same three fields in a different order, and
+// its material field must be the same WIDTH as the opaque one. It was 8 bits.
+//
+// That made 256 a second, tighter material ceiling that no mint site enforced:
+// MaterialRegistry.register guards unconditionally against 4096 -- derived from
+// OPAQUE_MATERIAL_BITS -- and its comment claims that is the trust boundary
+// because "drawlist.js only DEBUG-checks". True of the opaque key and false of
+// this one. A blended material with id 300 ORed a bit into the pipeline field
+// and silently reordered the whole frame's blending, in release, with no
+// visual signature beyond the artifact itself.
+//
+// The width came back from the pipeline field, which never needed it. Pipeline
+// ids are a dense index over variantKey(alphaMode, doubleSided), and that has
+// at most SIX distinct values, so 8 bits were holding 3 bits of information
+// right next to a field that was 4 bits short.
 export const TRANSPARENT_DEPTH_BITS = 16;  // fine ordering: blending needs it
-export const TRANSPARENT_PIPELINE_BITS = 8;
-export const TRANSPARENT_MATERIAL_BITS = 8;
+export const TRANSPARENT_PIPELINE_BITS = 4;
+export const TRANSPARENT_MATERIAL_BITS = OPAQUE_MATERIAL_BITS;
+
+assert(OPAQUE_PIPELINE_BITS + OPAQUE_MATERIAL_BITS + OPAQUE_DEPTH_BITS === 32,
+  "opaque sort key does not fill exactly 32 bits");
+assert(TRANSPARENT_DEPTH_BITS + TRANSPARENT_PIPELINE_BITS + TRANSPARENT_MATERIAL_BITS === 32,
+  "transparent sort key does not fill exactly 32 bits");
+// Both keys address materials, so one registry ceiling has to cover both.
+assert(TRANSPARENT_MATERIAL_BITS === OPAQUE_MATERIAL_BITS,
+  "the two sort keys disagree on how many materials exist");
 
 const OPAQUE_DEPTH_MAX = (1 << OPAQUE_DEPTH_BITS) - 1;
 const TRANSPARENT_DEPTH_MAX = (1 << TRANSPARENT_DEPTH_BITS) - 1;
