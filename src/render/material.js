@@ -29,8 +29,35 @@ export const ALPHA_BLEND = 2;
 
 const ALPHA_MODES = { OPAQUE: ALPHA_OPAQUE, MASK: ALPHA_MASK, BLEND: ALPHA_BLEND };
 
-/** baseColor(16) + emissive/metallic(16) + roughness, normalScale, cutoff, pad(16) */
-export const MATERIAL_BYTES = 48;
+/**
+ * baseColor(16) + emissive/metallic(16) + roughness, normalScale, cutoff,
+ * occlusionStrength(16) + uvSets, pad(16)
+ */
+export const MATERIAL_BYTES = 64;
+
+/**
+ * Bit per texture slot: set means that map samples UV set 1.
+ *
+ * glTF puts `texCoord` on the texture REFERENCE rather than the material, so
+ * one material's maps can disagree about which set they use -- baked occlusion
+ * on set 1 beside a base colour on set 0 is the ordinary case out of Blender
+ * and Max. Five bits in one float beats five floats, and the shader picks per
+ * sample with a select rather than branching.
+ */
+export const UV_SET_BASE_COLOR = 1;
+export const UV_SET_METALLIC_ROUGHNESS = 2;
+export const UV_SET_NORMAL = 4;
+export const UV_SET_OCCLUSION = 8;
+export const UV_SET_EMISSIVE = 16;
+
+/** Pack a material's five `texCoord` values into that bitfield. */
+export function uvSetMask(uvSets = {}) {
+  return (uvSets.baseColor ? UV_SET_BASE_COLOR : 0)
+    | (uvSets.metallicRoughness ? UV_SET_METALLIC_ROUGHNESS : 0)
+    | (uvSets.normal ? UV_SET_NORMAL : 0)
+    | (uvSets.occlusion ? UV_SET_OCCLUSION : 0)
+    | (uvSets.emissive ? UV_SET_EMISSIVE : 0);
+}
 
 /**
  * Bits of a pipeline variant.
@@ -138,6 +165,7 @@ export class MaterialRegistry {
     f32[9] = material.normalScale ?? 1;
     f32[10] = material.alphaCutoff ?? 0.5;
     f32[11] = material.occlusionStrength ?? 1;
+    f32[12] = uvSetMask(material.uvSets);
 
     this.rhi.queue.writeBuffer(this.buffer, offset, this.staging, offset, MATERIAL_BYTES);
 

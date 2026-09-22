@@ -60,7 +60,10 @@ struct Material {
   normalScale       : f32,        // 36
   alphaCutoff       : f32,        // 40
   occlusionStrength : f32,        // 44
-};                                // 48
+  // Bit per texture slot: set means that map samples UV set 1. Carried as f32
+  // because the rest of the struct is, and a u32 here would move every offset.
+  uvSets            : f32,        // 48
+};                                // 64
 
 @group(0) @binding(0) var<uniform> frame        : Frame;
 @group(0) @binding(1) var          irradiance   : texture_cube<f32>;
@@ -95,6 +98,8 @@ struct VertexOut {
   @location(2)       tangent  : vec3<f32>,
   @location(3)       bitangent: vec3<f32>,
   @location(4)       uv       : vec2<f32>,
+  @location(5)       uv1      : vec2<f32>,
+  @location(6)       color    : vec4<f32>,
 };
 
 @vertex
@@ -104,6 +109,8 @@ fn vs(
   @location(1) normal   : vec3<f32>,
   @location(2) uv       : vec2<f32>,
   @location(3) tangent  : vec4<f32>,
+  @location(4) uv1      : vec2<f32>,
+  @location(5) color    : vec4<f32>,
 ) -> VertexOut {
   var out : VertexOut;
 
@@ -131,6 +138,8 @@ fn vs(
   // what keeps mirrored UV islands from lighting inside out.
   out.bitangent = cross(out.normal, out.tangent) * tangent.w;
   out.uv = uv;
+  out.uv1 = uv1;
+  out.color = color;
   return out;
 }
 
@@ -241,7 +250,20 @@ fn clusterFor(fragCoord : vec2<f32>, viewDepth : f32) -> u32 {
 
 @fragment
 fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) vec4<f32> {
-  let sampled = textureSample(baseColorMap, surfSampler, v.uv) * material.baseColor;
+  // Which UV set each map samples, one bit apiece. A select rather than a
+  // branch: both sets are interpolated already, so picking between them is
+  // free and uniform across the quad, where a branch would not be.
+  let uvSets = u32(material.uvSets);
+  let uvBaseColor = select(v.uv, v.uv1, (uvSets & 1u) != 0u);
+  let uvMetallicRoughness = select(v.uv, v.uv1, (uvSets & 2u) != 0u);
+  let uvNormal = select(v.uv, v.uv1, (uvSets & 4u) != 0u);
+  let uvOcclusion = select(v.uv, v.uv1, (uvSets & 8u) != 0u);
+  let uvEmissive = select(v.uv, v.uv1, (uvSets & 16u) != 0u);
+
+  // COLOR_0 multiplies base colour, per the spec. An asset without it carries
+  // opaque white, so this costs those nothing and needs no variant.
+  let sampled = textureSample(baseColorMap, surfSampler, uvBaseColor)
+    * material.baseColor * v.color;
 
   if (USE_ALPHA_MASK) {
     if (sampled.a < material.alphaCutoff) { discard; }
@@ -249,13 +271,13 @@ fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) 
 
   // glTF puts roughness in G and metallic in B. Occlusion is its own texture,
   // even though exporters usually pack it into R of this one.
-  let mr = textureSample(mrMap, surfSampler, v.uv);
+  let mr = textureSample(mrMap, surfSampler, uvMetallicRoughness);
   let roughness = clamp(mr.g * material.roughness, 0.045, 1.0);
   let metallic  = clamp(mr.b * material.emissive.w, 0.0, 1.0);
 
   // The spec's blend: strength 0 disables the map entirely rather than
   // multiplying ambient by zero.
-  let occlusionSample = textureSample(occlusionMap, surfSampler, v.uv).r;
+  let occlusionSample = textureSample(occlusionMap, surfSampler, uvOcclusion).r;
   let occlusion = 1.0 + material.occlusionStrength * (occlusionSample - 1.0);
 
   // Tangent-space normal into world space.
@@ -271,7 +293,7 @@ fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) 
   // The bitangent flips with the normal to keep the basis right-handed. The
   // tangent does not: it follows the UV's u axis, which does not reverse.
   let facing = select(-1.0, 1.0, frontFacing);
-  let tangentNormal = (textureSample(normalMap, surfSampler, v.uv).xyz * 2.0 - 1.0)
+  let tangentNormal = (textureSample(normalMap, surfSampler, uvNormal).xyz * 2.0 - 1.0)
                     * vec3<f32>(material.normalScale, material.normalScale, 1.0);
   let tbn = mat3x3<f32>(
     normalize(v.tangent),
@@ -392,7 +414,7 @@ fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) 
 
   let ambient = (ambientDiffuse + ambientSpecular) * occlusion;
 
-  let emissive = textureSample(emissiveMap, surfSampler, v.uv).rgb * material.emissive.rgb;
+  let emissive = textureSample(emissiveMap, surfSampler, uvEmissive).rgb * material.emissive.rgb;
 
   // Linear HDR, deliberately unclamped. Bloom needs to know a highlight was at
   // 60x white, not that it was clipped to 1; the post stack tonemaps once at

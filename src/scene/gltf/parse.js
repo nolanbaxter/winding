@@ -16,10 +16,12 @@
 
 import { DEBUG, assertFinite } from '../../core/assert.js';
 import { NULL_HANDLE } from '../../core/handle.js';
-import { VERTEX_STRIDE_FLOATS } from '../../render/vertex.js';
+import {
+  VERTEX_STRIDE_FLOATS, VERTEX_COLOR_INDEX, VERTEX_COLOR_WHITE, packVertexColor,
+} from '../../render/vertex.js';
 import { mat4Decompose } from '../../core/math/mat4.js';
 import { parseContainer, resolveBuffers } from './glb.js';
-import { readAccessorAsFloat32, readAccessorAsUint32 } from './accessor.js';
+import { readAccessorAsFloat32, readAccessorAsUint32, componentCountOf } from './accessor.js';
 import { generateTangents, unweldAndComputeFlatNormals } from './tangents.js';
 
 // The vertex format is the renderer's contract, defined in render/vertex.js.
@@ -29,6 +31,7 @@ import { readAnimations } from './animation.js';
 
 export {
   VERTEX_STRIDE_FLOATS, VERTEX_STRIDE_BYTES, VERTEX_BUFFER_LAYOUT,
+  VERTEX_COLOR_INDEX, VERTEX_COLOR_WHITE, packVertexColor,
 } from '../../render/vertex.js';
 
 const MODE_TRIANGLES = 4;
@@ -49,6 +52,7 @@ export const DEFAULT_MATERIAL = Object.freeze({
   normalScale: 1,
   occlusionStrength: 1,
   textures: Object.freeze({ baseColor: -1, metallicRoughness: -1, normal: -1, occlusion: -1, emissive: -1 }),
+  uvSets: Object.freeze({ baseColor: 0, metallicRoughness: 0, normal: 0, occlusion: 0, emissive: 0 }),
 });
 
 /**
@@ -130,9 +134,32 @@ function buildPrimitive(json, buffers, primitive) {
   let tangents = attributes.TANGENT !== undefined
     ? readAccessorAsFloat32(json, buffers, attributes.TANGENT) : null;
 
+  // A second UV set, which materials reference per texture through `texCoord`.
+  // Baked occlusion on UV1 is the standard layout out of Blender and Max, and
+  // sampling it with set 0 is wrong pixels rather than a missing texture.
+  let uv1s = attributes.TEXCOORD_1 !== undefined
+    ? readAccessorAsFloat32(json, buffers, attributes.TEXCOORD_1) : null;
+
+  // COLOR_0 is VEC3 or VEC4, and normalized ubyte/ushort as often as float --
+  // readAccessorAsFloat32 has already undone that. VEC3 means opaque.
+  let colors = null;
+  if (attributes.COLOR_0 !== undefined) {
+    const raw = readAccessorAsFloat32(json, buffers, attributes.COLOR_0);
+    const components = componentCountOf(json.accessors[attributes.COLOR_0].type);
+    colors = new Float32Array(vertexCount * 4);
+    for (let v = 0; v < vertexCount; v++) {
+      const s = v * components;
+      colors[v * 4] = raw[s];
+      colors[v * 4 + 1] = raw[s + 1];
+      colors[v * 4 + 2] = raw[s + 2];
+      colors[v * 4 + 3] = components === 4 ? raw[s + 3] : 1;
+    }
+  }
+
   checkLength(normals, vertexCount, 3, 'NORMAL');
   checkLength(uvs, vertexCount, 2, 'TEXCOORD_0');
   checkLength(tangents, vertexCount, 4, 'TANGENT');
+  checkLength(uv1s, vertexCount, 2, 'TEXCOORD_1');
 
   for (let i = 0; i < indices.length; i++) {
     if (indices[i] >= vertexCount) {
@@ -157,13 +184,23 @@ function buildPrimitive(json, buffers, primitive) {
   if (normals === null) {
     // The spec is explicit: a primitive with no NORMAL is flat-shaded, and any
     // supplied tangents are discarded. Flat shading needs per-face vertices, so
-    // the geometry has to be de-indexed first.
-    const extras = hadUVs ? [{ data: uvs, components: 2 }] : [];
+    // the geometry has to be de-indexed first -- and every other attribute has
+    // to come along, or it would end up indexed by the old vertex ids.
+    const extras = [];
+    if (hadUVs) extras.push({ data: uvs, components: 2 });
+    if (uv1s !== null) extras.push({ data: uv1s, components: 2 });
+    if (colors !== null) extras.push({ data: colors, components: 4 });
+
     const unwelded = unweldAndComputeFlatNormals(positions, indices, extras);
     positions = unwelded.positions;
     normals = unwelded.normals;
     indices = unwelded.indices;
-    if (hadUVs) uvs = unwelded.extras[0];
+
+    let next = 0;
+    if (hadUVs) uvs = unwelded.extras[next++];
+    if (uv1s !== null) uv1s = unwelded.extras[next++];
+    if (colors !== null) colors = unwelded.extras[next++];
+
     tangents = null;
     vertexCount = positions.length / 3;
   }
@@ -173,6 +210,11 @@ function buildPrimitive(json, buffers, primitive) {
   } else if (tangents === null) {
     tangents = generateTangents(positions, normals, uvs, indices);
   }
+
+  // A material may name texCoord 1 on an asset that only supplies set 0, which
+  // is malformed but common. Falling back to set 0 renders it the way the
+  // author almost certainly meant rather than with zeros.
+  if (uv1s === null) uv1s = uvs;
 
   if (tangents === null) {
     // No UVs means no tangent frame exists to compute. Fill with a valid unit
@@ -185,9 +227,9 @@ function buildPrimitive(json, buffers, primitive) {
   }
 
   return {
-    vertices: interleave(positions, normals, uvs, tangents, vertexCount),
+    vertices: interleave(positions, normals, uvs, tangents, uv1s, colors, vertexCount),
     // Kept alongside the interleaved copy so a caller that wants triangle-exact
-    // picking can retain a quarter of the memory rather than the whole vertex.
+    // picking can retain a fraction of the memory rather than the whole vertex.
     positions,
     indices,
     vertexCount,
@@ -197,8 +239,20 @@ function buildPrimitive(json, buffers, primitive) {
   };
 }
 
-function interleave(positions, normals, uvs, tangents, vertexCount) {
+/**
+ * Pack every attribute into one interleaved buffer in the renderer's layout.
+ *
+ * `uv1s` is never null by the time this runs -- it falls back to `uvs` -- but
+ * `colors` may be, and an asset without vertex colours gets opaque white,
+ * which multiplies to identity in the shader. That is what lets the format
+ * stay single rather than becoming a family.
+ */
+function interleave(positions, normals, uvs, tangents, uv1s, colors, vertexCount) {
   const out = new Float32Array(vertexCount * VERTEX_STRIDE_FLOATS);
+  // The colour is unorm8x4, so it is written through a second view of the same
+  // memory rather than as a float.
+  const packed = new Uint32Array(out.buffer);
+
   for (let v = 0; v < vertexCount; v++) {
     const o = v * VERTEX_STRIDE_FLOATS;
     const p = v * 3, t = v * 2, g = v * 4;
@@ -208,6 +262,10 @@ function interleave(positions, normals, uvs, tangents, vertexCount) {
     out[o + 6] = uvs[t]; out[o + 7] = uvs[t + 1];
     out[o + 8] = tangents[g]; out[o + 9] = tangents[g + 1];
     out[o + 10] = tangents[g + 2]; out[o + 11] = tangents[g + 3];
+    out[o + 12] = uv1s[t]; out[o + 13] = uv1s[t + 1];
+    packed[o + VERTEX_COLOR_INDEX] = colors === null
+      ? VERTEX_COLOR_WHITE
+      : packVertexColor(colors[g], colors[g + 1], colors[g + 2], colors[g + 3]);
   }
   return out;
 }
@@ -271,6 +329,17 @@ function readMaterials(json) {
         normal: material.normalTexture?.index ?? -1,
         occlusion: material.occlusionTexture?.index ?? -1,
         emissive: material.emissiveTexture?.index ?? -1,
+      },
+      // Which UV set each texture samples. glTF puts `texCoord` on the texture
+      // REFERENCE, so two maps on one material can disagree -- baked occlusion
+      // on set 1 beside a base colour on set 0 is the usual shape. Dropping it
+      // samples the wrong pixels with no error anywhere.
+      uvSets: {
+        baseColor: pbr.baseColorTexture?.texCoord ?? 0,
+        metallicRoughness: pbr.metallicRoughnessTexture?.texCoord ?? 0,
+        normal: material.normalTexture?.texCoord ?? 0,
+        occlusion: material.occlusionTexture?.texCoord ?? 0,
+        emissive: material.emissiveTexture?.texCoord ?? 0,
       },
     };
   });

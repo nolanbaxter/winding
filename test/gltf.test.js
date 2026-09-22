@@ -9,6 +9,7 @@ import { parseContainer } from '../src/scene/gltf/glb.js';
 import { readAccessorAsFloat32, readAccessorAsUint32 } from '../src/scene/gltf/accessor.js';
 import {
   loadGLTF, instantiate, VERTEX_STRIDE_FLOATS, VERTEX_STRIDE_BYTES, VERTEX_BUFFER_LAYOUT,
+  VERTEX_COLOR_INDEX,
 } from '../src/scene/gltf/parse.js';
 import { HandleAllocator, handleIndex } from '../src/core/handle.js';
 import {
@@ -99,10 +100,15 @@ const QUAD = {
   indices: Uint16Array.from([0, 1, 2, 0, 2, 3]),
 };
 
-function quadGLB({ includeNormals = true, includeUVs = true, nodes, scenes } = {}) {
+function quadGLB({
+  includeNormals = true, includeUVs = true, nodes, scenes,
+  uv1s = null, colors = null, colorType = 'VEC4', colorComponentType = 5126,
+} = {}) {
   const arrays = [QUAD.positions, QUAD.indices];
   if (includeNormals) arrays.push(QUAD.normals);
   if (includeUVs) arrays.push(QUAD.uvs);
+  if (uv1s) arrays.push(uv1s);
+  if (colors) arrays.push(colors);
 
   const { bytes, views } = packBuffer(arrays);
   const accessors = [
@@ -121,6 +127,17 @@ function quadGLB({ includeNormals = true, includeUVs = true, nodes, scenes } = {
   if (includeUVs) {
     accessors.push({ bufferView: next, componentType: 5126, count: 4, type: 'VEC2' });
     attributes.TEXCOORD_0 = next++;
+  }
+  if (uv1s) {
+    accessors.push({ bufferView: next, componentType: 5126, count: 4, type: 'VEC2' });
+    attributes.TEXCOORD_1 = next++;
+  }
+  if (colors) {
+    accessors.push({
+      bufferView: next, componentType: colorComponentType, count: 4, type: colorType,
+      normalized: colorComponentType !== 5126,
+    });
+    attributes.COLOR_0 = next++;
   }
 
   const json = {
@@ -311,7 +328,7 @@ await atest('interleaves into the shared vertex layout', async () => {
   assert.equal(primitive.vertexCount, 4);
   assert.equal(primitive.indexCount, 6);
   assert.equal(primitive.vertices.length, 4 * VERTEX_STRIDE_FLOATS);
-  assert.equal(VERTEX_STRIDE_BYTES, 48);
+  assert.equal(VERTEX_STRIDE_BYTES, 60, '12 floats plus a second UV set and a packed colour');
   assert.equal(VERTEX_BUFFER_LAYOUT.arrayStride, VERTEX_STRIDE_BYTES,
     'the layout the pipeline declares must be the layout the importer writes');
 
@@ -320,6 +337,80 @@ await atest('interleaves into the shared vertex layout', async () => {
   vecClose(v1.subarray(0, 3), [1, 0, 0], EPS, 'position');
   vecClose(v1.subarray(3, 6), [0, 0, 1], EPS, 'normal');
   vecClose(v1.subarray(6, 8), [1, 0], EPS, 'uv');
+
+  // No TEXCOORD_1 in this asset, so set 1 falls back to set 0 rather than to
+  // zeros: a material naming texCoord 1 then renders as its author meant.
+  vecClose(v1.subarray(12, 14), [1, 0], EPS, 'uv1 falls back to uv0');
+
+  // No COLOR_0 either, so every vertex is opaque white, which multiplies to
+  // identity in the shader and is why the format needs no variant.
+  const packed = new Uint32Array(primitive.vertices.buffer);
+  assert.equal(packed[VERTEX_STRIDE_FLOATS + VERTEX_COLOR_INDEX] >>> 0, 0xffffffff,
+    'absent COLOR_0 becomes opaque white');
+});
+
+await atest('a second UV set is read, not dropped', async () => {
+  // A material that puts baked occlusion on UV1 is the standard layout out of
+  // Blender and Max. Dropping texCoord sampled it with set 0, which is wrong
+  // pixels rather than a missing texture, so nothing reported it.
+  const uv1s = Float32Array.from([0.25, 0.75, 0.5, 0.75, 0.25, 0.5, 0.5, 0.5]);
+  const model = await loadGLTF(quadGLB({ uv1s }));
+  const { vertices } = model.meshes[0].primitives[0];
+
+  for (let v = 0; v < 4; v++) {
+    const o = v * VERTEX_STRIDE_FLOATS;
+    vecClose(vertices.subarray(o + 12, o + 14), [uv1s[v * 2], uv1s[v * 2 + 1]], EPS, `uv1 ${v}`);
+    assert.notDeepEqual(
+      [...vertices.subarray(o + 12, o + 14)], [...vertices.subarray(o + 6, o + 8)],
+      `uv1 ${v} must differ from uv0, or this proves nothing`,
+    );
+  }
+});
+
+await atest('COLOR_0 is read and packed to unorm8x4', async () => {
+  const colors = Float32Array.from([
+    1, 0, 0, 1,
+    0, 1, 0, 1,
+    0, 0, 1, 0.5,
+    1, 1, 1, 1,
+  ]);
+  const model = await loadGLTF(quadGLB({ colors }));
+  const packed = new Uint32Array(model.meshes[0].primitives[0].vertices.buffer);
+
+  const at = (v) => packed[v * VERTEX_STRIDE_FLOATS + VERTEX_COLOR_INDEX] >>> 0;
+  assert.equal(at(0), 0xff0000ff, 'opaque red');
+  assert.equal(at(1), 0xff00ff00, 'opaque green');
+  assert.equal(at(2), 0x80ff0000, 'half-alpha blue');
+  assert.equal(at(3), 0xffffffff, 'opaque white');
+});
+
+await atest('a VEC3 COLOR_0 is opaque, per the spec', async () => {
+  const colors = Float32Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0]);
+  const model = await loadGLTF(quadGLB({ colors, colorType: 'VEC3' }));
+  const packed = new Uint32Array(model.meshes[0].primitives[0].vertices.buffer);
+  for (let v = 0; v < 4; v++) {
+    const alpha = (packed[v * VERTEX_STRIDE_FLOATS + VERTEX_COLOR_INDEX] >>> 24) & 0xff;
+    assert.equal(alpha, 255, `vertex ${v} alpha`);
+  }
+});
+
+await atest('both survive the unweld a mesh without normals goes through', async () => {
+  // Flat shading de-indexes the geometry, and every other attribute has to
+  // come along or it ends up indexed by the old vertex ids -- which reads as
+  // scrambled UVs and colours rather than as an error.
+  const uv1s = Float32Array.from([0, 0, 1, 0, 0, 1, 1, 1]);
+  const colors = Float32Array.from([1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1]);
+  const model = await loadGLTF(quadGLB({ includeNormals: false, uv1s, colors }));
+  const { vertices, vertexCount } = model.meshes[0].primitives[0];
+
+  assert.equal(vertexCount, 6, 'two triangles, de-indexed');
+  const packed = new Uint32Array(vertices.buffer);
+  const seen = new Set();
+  for (let v = 0; v < vertexCount; v++) {
+    seen.add(packed[v * VERTEX_STRIDE_FLOATS + VERTEX_COLOR_INDEX] >>> 0);
+  }
+  assert.ok(seen.size > 1, 'colours survived; a dropped attribute would leave them uniform');
+  assert.ok(!seen.has(0xffffffff), 'and none fell back to the white default');
 });
 
 await atest('takes bounds from the accessor min/max the spec requires', async () => {
