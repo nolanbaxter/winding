@@ -16,7 +16,7 @@ import { vec3Create, vec3Sub, vec3Normalize } from '../core/math/vec3.js';
 import { frustumCreate, frustumFromViewProjection, frustumTestAABB } from '../core/math/frustum.js';
 import { grownCapacity } from '../core/grow.js';
 
-import { MaterialRegistry, variantPipelineState } from './material.js';
+import { MaterialRegistry, variantPipelineState, VARIANT_MIRRORED } from './material.js';
 import { PBR_SHADER, FRAME_BYTES } from './shaders/pbr.js';
 import { SkyboxPass } from './skybox.js';
 import { ShadowMaps } from './shadows.js';
@@ -199,7 +199,14 @@ export class Renderer {
    */
   async ensureVariants(variants) {
     const pending = [];
+    // Both windings of each, because whether an instance mirrors is a property
+    // of the scene and is not known here -- and the contract of this method is
+    // that nothing in render() ever has to create a pipeline.
+    const wanted = [];
     for (const variant of variants) {
+      wanted.push(variant & ~VARIANT_MIRRORED, variant | VARIANT_MIRRORED);
+    }
+    for (const variant of wanted) {
       if (this._pipelineByVariant.has(variant)) continue;
 
       const state = variantPipelineState(variant);
@@ -284,7 +291,11 @@ export class Renderer {
       this.batchList.clear();
       for (let b = 0; b < this.gpu.batchCount; b++) {
         const materialId = this.gpu.batchMaterial[b];
-        this.batchList.push(opaqueSortKey(this.materials.pipelineIdOf[materialId], materialId, 0), b);
+        // Winding is pipeline state, so it belongs in the pipeline field. Two
+        // ids per material variant, which keeps the worst case at 12 of the 16
+        // the narrower key can address.
+        const pipelineId = this.materials.pipelineIdOf[materialId] * 2 + this.gpu.batchMirrored[b];
+        this.batchList.push(opaqueSortKey(pipelineId, materialId, 0), b);
       }
       this.batchList.sort();
       this._batchRevision = this.gpu.sceneRevision;
@@ -591,9 +602,9 @@ export class Renderer {
       const materialId = gpu.batchMaterial[b];
       const primitive = gpu.batchPrimitive[b];
 
-      const pipeline = this.pipelines.get(
-        this._pipelineByVariant.get(this.materials.variants[materialId]),
-      );
+      const variant = this.materials.variants[materialId]
+        | (gpu.batchMirrored[b] ? VARIANT_MIRRORED : 0);
+      const pipeline = this.pipelines.get(this._pipelineByVariant.get(variant));
       if (pipeline !== boundPipeline) {
         pass.setPipeline(pipeline);
         boundPipeline = pipeline;
@@ -629,9 +640,9 @@ export class Renderer {
         const materialId = scene.renderableMaterial[i];
         const primitive = scene.renderablePrimitive[i];
 
-        const pipeline = this.pipelines.get(
-          this._pipelineByVariant.get(this.materials.variants[materialId]),
-        );
+        const variant = this.materials.variants[materialId]
+          | (gpu.itemMirrored[i] ? VARIANT_MIRRORED : 0);
+        const pipeline = this.pipelines.get(this._pipelineByVariant.get(variant));
         if (pipeline !== boundPipeline) {
           pass.setPipeline(pipeline);
           boundPipeline = pipeline;

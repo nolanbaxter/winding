@@ -73,7 +73,13 @@ export async function run(canvas, onDone) {
 
   await step('every material pipeline permutation builds', async () => {
     await engine.renderer.ensureVariants(ALL_VARIANTS);
-    return `${ALL_VARIANTS.length} variants`;
+    // Each material variant expands into two pipelines, one per winding, so a
+    // mirrored instance never has to compile anything mid-frame.
+    const built = engine.renderer._pipelineByVariant.size;
+    if (built !== ALL_VARIANTS.length * 2) {
+      throw new Error(`${ALL_VARIANTS.length} variants built ${built} pipelines, expected ${ALL_VARIANTS.length * 2}`);
+    }
+    return `${ALL_VARIANTS.length} variants, ${built} pipelines`;
   });
 
   const scene = engine.createScene();

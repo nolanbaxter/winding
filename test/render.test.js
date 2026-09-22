@@ -13,6 +13,8 @@ import {
 import { quatCreate, quatSetAxisAngle } from '../src/core/math/quat.js';
 import { vec3Create } from '../src/core/math/vec3.js';
 import { Camera } from '../src/scene/camera.js';
+import { Scene } from '../src/scene/scene.js';
+import { GpuDriven } from '../src/render/gpudriven.js';
 import {
   DrawList, opaqueSortKey, transparentSortKey,
   transparentDepthBucket,
@@ -483,6 +485,120 @@ test('variant ids fit the sort key pipeline field', () => {
   // Eight possible variants against a 10-bit field, so the pipeline id minted
   // from a variant can never overflow the key.
   assert.ok(8 <= (1 << OPAQUE_PIPELINE_BITS));
+});
+
+// ------------------------------------------------------------------ winding
+
+console.log('\nmirrored instances');
+
+test('a mirrored variant reverses the front face', () => {
+  const normal = variantPipelineState(variantKey(ALPHA_OPAQUE, false, false));
+  const mirrored = variantPipelineState(variantKey(ALPHA_OPAQUE, false, true));
+  assert.equal(normal.primitive.frontFace, 'ccw');
+  assert.equal(mirrored.primitive.frontFace, 'cw');
+  assert.equal(mirrored.primitive.cullMode, 'back', 'still culls, just the other side');
+});
+
+test('the mirrored bit does not disturb the others', () => {
+  const v = variantKey(ALPHA_MASK, true, true);
+  const state = variantPipelineState(v);
+  assert.equal(state.primitive.cullMode, 'none', 'double sided survives');
+  assert.equal(state.constants.USE_ALPHA_MASK, 1, 'alpha mode survives');
+  assert.equal(state.primitive.frontFace, 'cw');
+  assert.ok(v < 16, `variant ${v} must still fit the 4-bit pipeline field`);
+});
+
+/** A scene with two unit cubes, whose scales the caller picks. */
+function windingScene(scales) {
+  const scene = new Scene({ capacity: 16 });
+  const primitive = {
+    indexCount: 36, materialId: 0,
+    bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+  };
+  for (const scale of scales) {
+    const entity = scene.entities.alloc();
+    scene.transforms.add(entity, { position: [0, 0, 0], scale });
+    scene._addRenderable(entity, primitive);
+  }
+  scene.update();
+  return scene;
+}
+
+/** GpuDriven.rebuildBatches without a GPU. */
+function batchesFor(scene) {
+  const gpu = Object.create(GpuDriven.prototype);
+  gpu.capacity = 16;
+  gpu.materials = { isTransparent: () => false };
+  gpu.itemBatch = new Uint32Array(16);
+  gpu.itemMirrored = new Uint8Array(16);
+  gpu.batchFirst = new Uint32Array(16);
+  gpu.batchOrder = new Uint32Array(16);
+  gpu.batchMaterial = new Uint16Array(16);
+  gpu.batchMirrored = new Uint8Array(16);
+  gpu.batchSize = new Uint32Array(16);
+  gpu.batchPrimitive = [];
+  gpu.transparentItems = new Uint32Array(16);
+  gpu.alignment = 256;
+  gpu.batchStaging = new ArrayBuffer(256 * 33);
+  gpu._zeroFlags = new Uint32Array(16);
+  gpu.stats = {};
+  gpu.rhi = { queue: { writeBuffer() {} } };
+  for (const k of ['itemBatchBuffer', 'batchFirstBuffer', 'batchOrderBuffer', 'batchBuffer', 'visibleFlagsBuffer']) gpu[k] = {};
+  gpu.rebuildBatches(scene);
+  return gpu;
+}
+
+test('a mirrored instance is a batch of its own', () => {
+  // Same mesh, same material. One indirect draw has one front face, so these
+  // cannot share a batch however identical everything else is.
+  const gpu = batchesFor(windingScene([[1, 1, 1], [-1, 1, 1]]));
+  assert.equal(gpu.batchCount, 2, 'two windings, two batches');
+  assert.notEqual(gpu.batchMirrored[gpu.itemBatch[0]], gpu.batchMirrored[gpu.itemBatch[1]]);
+});
+
+test('identical windings still share a batch', () => {
+  // The negative control: splitting on winding must not split on nothing.
+  const gpu = batchesFor(windingScene([[1, 1, 1], [1, 2, 3]]));
+  assert.equal(gpu.batchCount, 1);
+});
+
+test('two mirrored instances share a batch with each other', () => {
+  const gpu = batchesFor(windingScene([[-1, 1, 1], [1, -1, 1]]));
+  assert.equal(gpu.batchCount, 1, 'both mirror, so both draw cw');
+  assert.equal(gpu.batchMirrored[0], 1);
+});
+
+test('mirroring is counted per axis, so two reflections cancel', () => {
+  // A determinant test, not a "has a negative number in it" test. Scaling two
+  // axes by -1 is a 180 degree rotation and the winding is unchanged.
+  const gpu = batchesFor(windingScene([[1, 1, 1], [-1, -1, 1], [-1, -1, -1]]));
+  assert.equal(gpu.itemMirrored[0], 0, 'identity');
+  assert.equal(gpu.itemMirrored[1], 0, 'two axes flipped cancel');
+  assert.equal(gpu.itemMirrored[2], 1, 'three axes flipped do not');
+});
+
+test('a mirroring parent mirrors its children', () => {
+  // The reason this reads the WORLD matrix and not the node's own.
+  const scene = new Scene({ capacity: 16 });
+  const primitive = {
+    indexCount: 36, materialId: 0,
+    bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+  };
+  const parent = scene.entities.alloc();
+  scene.transforms.add(parent, { scale: [-1, 1, 1] });
+
+  const child = scene.entities.alloc();
+  scene.transforms.add(child, { parent, scale: [1, 1, 1] });
+  scene._addRenderable(child, primitive);
+
+  const grandchild = scene.entities.alloc();
+  scene.transforms.add(grandchild, { parent: child, scale: [-1, 1, 1] });
+  scene._addRenderable(grandchild, primitive);
+
+  scene.update();
+  const gpu = batchesFor(scene);
+  assert.equal(gpu.itemMirrored[0], 1, 'unmirrored child of a mirroring parent IS mirrored');
+  assert.equal(gpu.itemMirrored[1], 0, 'and a mirrored child of it is not');
 });
 
 console.log(`\n${passed} checks passed\n`);

@@ -33,11 +33,25 @@ const ALPHA_MODES = { OPAQUE: ALPHA_OPAQUE, MASK: ALPHA_MASK, BLEND: ALPHA_BLEND
 export const MATERIAL_BYTES = 48;
 
 /**
- * A pipeline variant. Packed small on purpose: it is also the pipeline id that
- * goes into the sort key, and that field is 10 bits wide.
+ * Bits of a pipeline variant.
+ *
+ * MIRRORED is not a property of the material, unlike the other two. It comes
+ * from the INSTANCE -- whether its world transform has a negative determinant
+ * -- so the registry stores a variant without it and the renderer ORs it in
+ * per batch. Two instances of one material, one mirrored, need two pipelines.
  */
-export function variantKey(alphaMode, doubleSided) {
-  return alphaMode | (doubleSided ? 4 : 0);
+export const VARIANT_DOUBLE_SIDED = 4;
+export const VARIANT_MIRRORED = 8;
+
+/**
+ * A pipeline variant. Packed small on purpose: it is also the pipeline id that
+ * goes into the sort key, and the narrower of those fields is 4 bits wide.
+ * Three alpha modes times two sidedness times two windings is 12 of 16.
+ */
+export function variantKey(alphaMode, doubleSided, mirrored = false) {
+  return alphaMode
+    | (doubleSided ? VARIANT_DOUBLE_SIDED : 0)
+    | (mirrored ? VARIANT_MIRRORED : 0);
 }
 
 export class MaterialRegistry {
@@ -222,7 +236,8 @@ export class MaterialRegistry {
  */
 export function variantPipelineState(variant) {
   const alphaMode = variant & 3;
-  const doubleSided = (variant & 4) !== 0;
+  const doubleSided = (variant & VARIANT_DOUBLE_SIDED) !== 0;
+  const mirrored = (variant & VARIANT_MIRRORED) !== 0;
 
   const blend = alphaMode === ALPHA_BLEND
     ? {
@@ -235,7 +250,11 @@ export function variantPipelineState(variant) {
     primitive: {
       topology: 'triangle-list',
       cullMode: doubleSided ? 'none' : 'back',
-      frontFace: 'ccw',
+      // glTF 3.7.4: a node whose global transform has a negative determinant
+      // has its winding reversed. Mirroring one chair to make its pair is the
+      // everyday case, and with a fixed 'ccw' both of them culled the faces
+      // that should be visible and kept the ones that should not.
+      frontFace: mirrored ? 'cw' : 'ccw',
     },
     depth: {
       format: DEPTH_FORMAT,

@@ -259,6 +259,7 @@ export class GpuDriven {
     });
 
     this.itemBatch = new Uint32Array(capacity);
+    this.itemMirrored = new Uint8Array(capacity);
     this.itemBatchBuffer = device.createBuffer({
       label: 'item-batch',
       size: capacity * 4,
@@ -338,6 +339,7 @@ export class GpuDriven {
     /** primitive + materialId per batch, in CPU-side arrays. */
     this.batchPrimitive = [];
     this.batchMaterial = new Uint16Array(capacity);
+    this.batchMirrored = new Uint8Array(capacity);
     this.batchSize = new Uint32Array(capacity);
 
     // Blended renderables, which never enter a batch. See rebuildBatches.
@@ -417,9 +419,11 @@ export class GpuDriven {
     this.boundsData = new Float32Array(capacity * 8);
     this.indirectData = new Uint32Array(capacity * 2 * (INDIRECT_BYTES / 4));
     this.itemBatch = new Uint32Array(capacity);
+    this.itemMirrored = new Uint8Array(capacity);
     this.batchFirst = new Uint32Array(capacity);
     this.batchOrder = new Uint32Array(capacity);
     this.batchMaterial = new Uint16Array(capacity);
+    this.batchMirrored = new Uint8Array(capacity);
     this.batchSize = new Uint32Array(capacity);
     this.transparentItems = new Uint32Array(capacity);
     this.batchStaging = new ArrayBuffer(this.alignment * (capacity * 2 + 1));
@@ -495,6 +499,10 @@ export class GpuDriven {
 
     for (let i = 0; i < count; i++) {
       const material = scene.renderableMaterial[i];
+      // Recorded for every item, batched or not: the blended draws are issued
+      // one at a time and still need to know their winding.
+      const mirrored = isMirrored(scene.transforms.world, scene.renderableMatrixSlot[i] * 16);
+      this.itemMirrored[i] = mirrored ? 1 : 0;
 
       // Blended geometry takes the ordered path instead. Batching exists to
       // merge draws that can run in any order, which is exactly what blending
@@ -506,7 +514,12 @@ export class GpuDriven {
       }
 
       const primitive = scene.renderablePrimitive[i];
-      const key = `${primitiveId(primitive)}:${material}`;
+      // Winding is part of the batch, because it is part of the pipeline. An
+      // instance whose world transform mirrors has to be drawn front-face-cw,
+      // and one indirect draw has one front face -- so the mirrored copies of
+      // a mesh form their own batch even though they share its geometry and
+      // material.
+      const key = `${primitiveId(primitive)}:${material}:${mirrored ? 1 : 0}`;
 
       let batch = batchOf.get(key);
       if (batch === undefined) {
@@ -514,6 +527,7 @@ export class GpuDriven {
         batchOf.set(key, batch);
         this.batchPrimitive.push(primitive);
         this.batchMaterial[batch] = material;
+        this.batchMirrored[batch] = mirrored ? 1 : 0;
         this.batchSize[batch] = 0;
       }
       this.itemBatch[i] = batch;
@@ -725,6 +739,30 @@ export class GpuDriven {
 
 // Primitives have no identity of their own, so one is stamped on first use.
 let nextPrimitiveId = 1;
+/**
+ * Does this world matrix flip handedness?
+ *
+ * The determinant of the upper 3x3. Negative means an odd number of axes were
+ * reflected, which reverses triangle winding -- so glTF 3.7.4 requires the
+ * front face to reverse with it. Computed from the WORLD matrix rather than
+ * the node's own, because a mirroring parent mirrors everything under it, and
+ * two mirrors cancel.
+ *
+ * ponytail: read when a batch is built, which is when the scene's contents
+ * change. An instance that flips handedness later -- an animated scale passing
+ * through zero -- keeps its old winding until something else rebuilds the
+ * batches. Detecting that would cost a determinant per moved object per frame,
+ * forever, for a case that requires passing through a degenerate transform.
+ */
+function isMirrored(world, offset) {
+  const m00 = world[offset], m01 = world[offset + 1], m02 = world[offset + 2];
+  const m10 = world[offset + 4], m11 = world[offset + 5], m12 = world[offset + 6];
+  const m20 = world[offset + 8], m21 = world[offset + 9], m22 = world[offset + 10];
+  return m00 * (m11 * m22 - m12 * m21)
+    - m10 * (m01 * m22 - m02 * m21)
+    + m20 * (m01 * m12 - m02 * m11) < 0;
+}
+
 function primitiveId(primitive) {
   if (!primitive.__batchId) primitive.__batchId = nextPrimitiveId++;
   return primitive.__batchId;
