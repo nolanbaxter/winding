@@ -76,6 +76,15 @@ export class Winding {
     /** False when create() was handed an Environment to share. */
     this._ownsEnvironment = ownsEnvironment;
 
+    // Registered once, for the engine, not once per scene. The handler reads
+    // the CURRENT owner of the shared buffers rather than closing over a
+    // scene: a closure meant every createScene() overwrote the last one, so
+    // with two scenes the workers composed one scene's columns while the
+    // frame being drawn belonged to the other. Silently, and only on the
+    // parallel path.
+    this.jobs.register(JOB_COMPOSE_TRANSFORMS,
+      (start, end, base) => composeRange(this.jobs.sharedOwner, base, start, end));
+
     this.clock = new Clock(1 / 60);
     this.fps = 0;
     this._raf = 0;
@@ -87,14 +96,6 @@ export class Winding {
 
   createScene(options = {}) {
     const scene = new Scene(options);
-
-    // The workers need the transform columns, and the dispatching thread needs
-    // the same handler they run. Registered here because the columns belong to
-    // the scene, not to the engine.
-    this.jobs.register(JOB_COMPOSE_TRANSFORMS,
-      (start, end, base) => composeRange(scene.transforms, base, start, end));
-    this.jobs.setSharedData(scene.transforms.sharedBuffers());
-
     scene.environment = options.environment ?? this.environment;
     return scene;
   }

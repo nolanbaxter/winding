@@ -222,11 +222,18 @@ export class TransformStore {
   updateParallel(jobs) {
     if (this.orderDirty) this._rebuildOrder();
 
-    // Growing replaced the shared columns. Workers are still holding the old
-    // ones until this lands, and nothing else in the engine is positioned to
-    // notice -- so it is checked here, at the only point that hands them out.
-    if (this._publishedRevision !== this.buffersRevision) {
-      jobs.setSharedData(this.sharedBuffers());
+    // Two reasons to republish, and both are easy to miss.
+    //
+    // Growing replaced the shared columns, and the workers are still holding
+    // the old ones. Nothing else in the engine is positioned to notice, so it
+    // is checked here, at the only point that hands them out.
+    //
+    // And another store may have published since this one last did -- a second
+    // scene, which the engine is free to create. The workers hold one set of
+    // buffers at a time, so whichever store is composing has to take ownership
+    // back before it dispatches, or it would compose the other scene's columns.
+    if (jobs.sharedOwner !== this || this._publishedRevision !== this.buffersRevision) {
+      jobs.setSharedData(this.sharedBuffers(), this);
       this._publishedRevision = this.buffersRevision;
     }
 

@@ -114,9 +114,16 @@ export class JobSystem {
   /**
    * Hand every worker the shared arrays they operate on. Sent once; nothing is
    * copied, because these are views onto SharedArrayBuffers.
+   *
+   * `owner` is whatever those arrays belong to. It is published alongside them
+   * so a job handler can find the CURRENT owner instead of closing over one,
+   * which is what lets two scenes exist: the workers can only hold one set of
+   * buffers at a time, and the handler has to agree with them about whose.
    */
-  setSharedData(buffers) {
+  setSharedData(buffers, owner = null) {
     this._buffers = buffers;
+    /** Whatever last published its buffers here. See setSharedData. */
+    this.sharedOwner = owner;
     for (const worker of this.workers) {
       worker.postMessage({ type: 'init', control: this.control.buffer, buffers });
     }
