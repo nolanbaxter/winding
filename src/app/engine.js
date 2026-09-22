@@ -161,6 +161,9 @@ export class Winding {
 
     const meshes = model.meshes.map((mesh, m) => ({
       name: mesh.name,
+      // How many morph targets every primitive here carries. The scene reads
+      // it to decide whether a node instancing this mesh needs weights.
+      targetCount: mesh.targetCount,
       primitives: mesh.primitives.map((primitive, p) => ({
         vertexBuffer: createBuffer(this.rhi, {
           label: `${mesh.name}[${p}].vertices`,
@@ -187,6 +190,9 @@ export class Winding {
           : null,
         indexCount: primitive.indexCount,
         bounds: primitive.bounds,
+        // How far each target reaches, which is all a bound needs. The deltas
+        // themselves are a GPU buffer; this is the one number the CPU keeps.
+        morphExtent: primitive.morph?.extent ?? null,
         // Only when asked. Scene.raycast tests triangles for primitives that have
         // these and falls back to the bounding box for those that do not, so the
         // flag buys precision with memory and nothing else changes.

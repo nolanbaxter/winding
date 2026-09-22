@@ -14,8 +14,15 @@ import { quatSlerp, quatNormalize } from '../core/math/quat.js';
 const STEP = 'STEP';
 const CUBICSPLINE = 'CUBICSPLINE';
 
-/** Scratch for one keyframe's worth of output. Four floats covers TRS and quat. */
-const SAMPLE = new Float32Array(4);
+/**
+ * Scratch for one keyframe's worth of output.
+ *
+ * Four floats covers TRS and a quaternion. A `weights` channel is as wide as
+ * its mesh has morph targets, which has no upper bound worth picking, so this
+ * grows to fit and then stops growing -- one allocation per widest clip ever
+ * played, not one per sample.
+ */
+let SAMPLE = new Float32Array(4);
 const QUAT_A = new Float32Array(4);
 const QUAT_B = new Float32Array(4);
 
@@ -49,6 +56,13 @@ function sampleChannel(channel, time) {
   const count = times.length;
 
   if (count === 0) return 0;
+  if (SAMPLE.length < components) SAMPLE = new Float32Array(components);
+
+  // Whether the four floats are a ROTATION, asked of the path rather than of
+  // the width. They were the same question until morph targets: a mesh with
+  // four targets has a four-component weights channel, and treating that as a
+  // quaternion would slerp four independent sliders through a sphere.
+  const rotation = channel.path === 'rotation';
 
   const cubic = interpolation === CUBICSPLINE;
   // With CUBICSPLINE the value sits between its two tangents.
@@ -92,7 +106,7 @@ function sampleChannel(channel, time) {
       SAMPLE[c] = h00 * values[p0 + c] + h10 * span * values[m0 + c]
         + h01 * values[p1 + c] + h11 * span * values[m1 + c];
     }
-    if (components === 4) quatNormalize(SAMPLE, SAMPLE);
+    if (rotation) quatNormalize(SAMPLE, SAMPLE);
     return components;
   }
 
@@ -100,7 +114,7 @@ function sampleChannel(channel, time) {
   // rotation, and normalizing it afterwards still sweeps at the wrong rate.
   const a = valueAt(k);
   const b = valueAt(k + 1);
-  if (components === 4) {
+  if (rotation) {
     for (let c = 0; c < 4; c++) { QUAT_A[c] = values[a + c]; QUAT_B[c] = values[b + c]; }
     quatSlerp(SAMPLE, QUAT_A, QUAT_B, t);
   } else {
@@ -119,8 +133,13 @@ function sampleChannel(channel, time) {
  * different times without sharing a frame of state. `entities` is the scene's
  * allocator, and it is the only thing that can answer whether a handle is
  * still the one it was.
+ *
+ * `weightsOf` is the same shape for morph weights: node index -> the weight
+ * array of the instance driven by that node, or undefined. Indexed rather than
+ * looked up, because it is answering the same question `entityOf` is and a map
+ * per channel per frame would be the only allocation in this loop.
  */
-export function sampleClip(clip, time, transforms, entityOf, entities) {
+export function sampleClip(clip, time, transforms, entityOf, entities, weightsOf = null) {
   for (const channel of clip.channels) {
     // One question, asked of the one object that knows the answer. A channel
     // can point at nothing in three ways -- a node index this instance has no
@@ -149,6 +168,19 @@ export function sampleClip(clip, time, transforms, entityOf, entities) {
       case 'rotation':
         transforms.setRotation(entity, SAMPLE);
         break;
+      case 'weights': {
+        // Straight into the instance's array. No dirty flag to set: the
+        // weights ARE the state the renderer uploads, where a transform is an
+        // input to a hierarchy that has to recompose.
+        const weights = weightsOf === null ? undefined : weightsOf[channel.node];
+        if (weights === undefined) break;
+        // A clip authored against a different mesh than the one instanced here
+        // would write past the end. The shorter of the two is the part both
+        // agree on.
+        const n = Math.min(components, weights.length);
+        for (let c = 0; c < n; c++) weights[c] = SAMPLE[c];
+        break;
+      }
       default:
         break;
     }
@@ -163,10 +195,12 @@ export function sampleClip(clip, time, transforms, entityOf, entities) {
  * than this -- doing it badly here would be worse than not doing it.
  */
 export class AnimationPlayer {
-  constructor(clips, entityOf, entities) {
+  constructor(clips, entityOf, entities, weightsOf = null) {
     this.clips = clips;
     this.entityOf = entityOf;
     this.entities = entities;
+    /** Node index -> that instance's morph weights. Null when it has none. */
+    this.weightsOf = weightsOf;
     this.clip = null;
     this.time = 0;
     this.speed = 1;
@@ -226,7 +260,7 @@ export class AnimationPlayer {
       }
     }
 
-    sampleClip(clip, this.time, transforms, this.entityOf, this.entities);
+    sampleClip(clip, this.time, transforms, this.entityOf, this.entities, this.weightsOf);
     return true;
   }
 }

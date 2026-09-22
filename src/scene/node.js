@@ -106,6 +106,19 @@ export class Node {
     return out;
   }
 
+  /**
+   * This node's morph target weights, or null if its mesh has none.
+   *
+   * A LIVE view, which is the one exception to the rule at the top of this
+   * file: `node.weights[0] = 1` is meant to work. Nothing derived is cached
+   * from it -- the renderer uploads the array every frame and the bounds pass
+   * reads it every frame -- so there is no dirty flag for a direct write to
+   * miss. See Scene.morphWeights.
+   */
+  get weights() {
+    return this.scene.morphWeights(this.entity);
+  }
+
   /** Nodes created for this entity's children, in the order the asset declared them. */
   children() {
     return this.scene.childrenOf(this);

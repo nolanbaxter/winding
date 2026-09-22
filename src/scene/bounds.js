@@ -162,3 +162,100 @@ export function applySkinBounds(count, renderableSkin, skins, worldMin, worldMax
   }
   return applied;
 }
+
+/**
+ * How far a morphed instance's vertices travel from the undeformed mesh.
+ *
+ * `extent[t]` is the farthest any vertex moves under target t at weight 1, so
+ * the weighted sum is the farthest any vertex can move under all of them at
+ * once. Conservative: it assumes every target pulls the SAME vertex the same
+ * way, which no real target set does, and being loose is the only direction a
+ * cull bound may err.
+ *
+ * The absolute value is not decoration. glTF does not bound weights to [0,1] --
+ * a negative weight is the legitimate way to author "the opposite of this
+ * expression", and an overshoot past 1 is how exaggeration is animated. A sum
+ * without it would go NEGATIVE and shrink the box.
+ */
+export function morphPadding(weights, extent) {
+  let pad = 0;
+  for (let t = 0; t < extent.length; t++) pad += Math.abs(weights[t]) * extent[t];
+  return pad;
+}
+
+/**
+ * World bounds for every morphed renderable, at its current weights.
+ *
+ * The same problem skinning has and a different shape of answer: vertices move
+ * without the model matrix moving, so a box built from the authored one is the
+ * mesh's resting shape rather than its current one.
+ *
+ * Runs AFTER updateWorldBounds and after applySkinBounds. It is idempotent:
+ * every case below rebuilds its box from inputs rather than growing what is
+ * already there, which is what lets it run unconditionally each frame while
+ * updateWorldBounds runs only for things that moved.
+ *
+ * `lastPad` remembers each renderable's padding so the return value can be
+ * how many bounds actually CHANGED. Weights move vertices without moving a
+ * transform, so the scene's "did anything move" answer would otherwise miss
+ * them -- and the alternative, recomputing the scene union whenever a morph
+ * exists, pays a full pass every frame for a face that is holding still.
+ *
+ * The two cases differ:
+ *
+ *   Unskinned. The padded LOCAL box is transformed, rather than the world box
+ *   grown. Growing the world box would need the largest singular value of the
+ *   model matrix to stay conservative, and a hierarchy of non-uniform scales
+ *   composes to a matrix whose columns do not give it. Transforming a padded
+ *   local box needs no such argument -- it is exactly what a static mesh with
+ *   that box would produce.
+ *
+ *   Skinned. There is no local box to pad: applySkinBounds built a world box
+ *   from where the joints are. The delta is applied in mesh space and then by
+ *   a joint matrix, which is rigid, so it reaches at most `pad` in world space
+ *   too. Rigid is the same assumption the joint radii and the skinned normals
+ *   already make.
+ */
+export function applyMorphBounds(
+  count, renderableMorph, renderableSkin, morphs, extents,
+  localMin, localMax, worldMin, worldMax, matrices, matrixSlot, lastPad,
+) {
+  let changed = 0;
+  for (let i = 0; i < count; i++) {
+    const m = renderableMorph[i];
+    if (m < 0) continue;
+    const extent = extents[i];
+    if (extent === null || extent === undefined) continue;
+
+    const pad = morphPadding(morphs[m].weights, extent);
+    if (pad !== lastPad[i]) {
+      lastPad[i] = pad;
+      changed++;
+    }
+    // Every weight at zero is the undeformed mesh, which is what the pass
+    // before this one already computed. The resting state of every morphed
+    // mesh in the scene, so it is worth not touching.
+    if (pad === 0) continue;
+
+    const o = i * 3;
+    if (renderableSkin[i] >= 0) {
+      worldMin[o] -= pad; worldMin[o + 1] -= pad; worldMin[o + 2] -= pad;
+      worldMax[o] += pad; worldMax[o + 1] += pad; worldMax[o + 2] += pad;
+    } else {
+      PADDED_MIN[0] = localMin[o] - pad;
+      PADDED_MIN[1] = localMin[o + 1] - pad;
+      PADDED_MIN[2] = localMin[o + 2] - pad;
+      PADDED_MAX[0] = localMax[o] + pad;
+      PADDED_MAX[1] = localMax[o + 1] + pad;
+      PADDED_MAX[2] = localMax[o + 2] + pad;
+      aabbTransform(
+        worldMin, worldMax, PADDED_MIN, PADDED_MAX, matrices, matrixSlot[i] * 16, o, 0,
+      );
+    }
+  }
+  return changed;
+}
+
+/** Scratch for the padded local box. One per module, never nested. */
+const PADDED_MIN = new Float32Array(3);
+const PADDED_MAX = new Float32Array(3);

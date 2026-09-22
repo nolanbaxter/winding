@@ -384,12 +384,17 @@ export class Renderer {
       applySkinBounds(count, scene.renderableSkin, scene.skins, scene.worldMin, scene.worldMax);
     }
 
+    // And morphed ones get theirs grown, by how far their weights can carry a
+    // vertex. Counted into `moved`, because a weight changes without any
+    // transform changing and the union below is derived from both.
+    const morphed = scene.morphs.length > 0 ? scene.applyMorphBounds() : 0;
+
     // The scene's own extent, which is what the shadow and cluster ranges are
     // derived from. Recomputed only when something moved or the contents
     // changed -- a union cannot be updated in place, because a renderable that
     // moves can shrink it as easily as grow it, but on a settled scene that
     // means never paying for it at all.
-    if (moved > 0 || this._boundsRevision !== scene.revision) {
+    if (moved > 0 || morphed > 0 || this._boundsRevision !== scene.revision) {
       this._hasSceneBounds = unionWorldBounds(
         count, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax,
       );

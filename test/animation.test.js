@@ -339,4 +339,126 @@ test('animation marks transforms dirty, so composition picks it up', () => {
   assert.equal(scene.update(), 1, 'the animated node must recompose');
 });
 
+// ------------------------------------------------------------ morph weights
+
+console.log('\nmorph weight channels');
+
+/** A one-channel clip driving node 0's morph weights. */
+function weightClip(times, values, components, interpolation = 'LINEAR') {
+  return {
+    name: 'expression',
+    duration: times[times.length - 1],
+    channels: [{
+      node: 0,
+      path: 'weights',
+      times: Float32Array.from(times),
+      values: Float32Array.from(values),
+      interpolation,
+      components,
+    }],
+  };
+}
+
+test('a weights channel writes the instance array, not a transform', () => {
+  const weights = new Float32Array(2);
+  const t = recorder();
+  // Two targets, two keys: [0,1] at t=0 and [1,0] at t=1.
+  sampleClip(weightClip([0, 1], [0, 1, 1, 0], 2), 0.25, t, ENTITY_OF, ENTITIES, [weights]);
+
+  close(weights[0], 0.25, EPS, 'target 0');
+  close(weights[1], 0.75, EPS, 'target 1');
+  assert.equal(t.position, null, 'nothing was written to the transform');
+});
+
+test('four morph targets are not mistaken for a quaternion', () => {
+  // The trap this exists to catch. A four-target weights channel has exactly
+  // the shape of a rotation channel, and the sampler used to decide between
+  // lerp and SLERP by the component count. Slerping four independent sliders
+  // sweeps them through a sphere and normalizes them to unit length -- every
+  // number wrong, nothing thrown.
+  const weights = new Float32Array(4);
+  sampleClip(
+    weightClip([0, 1], [0, 0, 0, 0, 1, 1, 1, 1], 4),
+    0.5, recorder(), ENTITY_OF, ENTITIES, [weights],
+  );
+
+  for (let i = 0; i < 4; i++) close(weights[i], 0.5, EPS, `target ${i}`);
+  // A slerp would have produced a unit-length result. Halfway between two
+  // sliders is 0.5 each, whose length is 1.0 only by coincidence of four
+  // components -- so check the values, not the length.
+  close(weights[0] + weights[1] + weights[2] + weights[3], 2, EPS, 'sum');
+});
+
+test('a weights channel holds outside its range like any other', () => {
+  const weights = new Float32Array(2);
+  const clip = weightClip([1, 2], [0, 0, 1, 1], 2);
+  sampleClip(clip, 0, recorder(), ENTITY_OF, ENTITIES, [weights]);
+  close(weights[0], 0, EPS, 'before the first key');
+  sampleClip(clip, 100, recorder(), ENTITY_OF, ENTITIES, [weights]);
+  close(weights[0], 1, EPS, 'after the last key');
+});
+
+test('a STEP weights channel does not interpolate', () => {
+  const weights = new Float32Array(2);
+  sampleClip(
+    weightClip([0, 1], [0, 1, 1, 0], 2, 'STEP'),
+    0.9, recorder(), ENTITY_OF, ENTITIES, [weights],
+  );
+  close(weights[0], 0, EPS, 'held at the earlier key');
+});
+
+test('a weights channel with no instance array to write is skipped', () => {
+  // A clip that names a node this instance did not morph. Not an error: the
+  // same non-event as a channel naming a node the instance does not have.
+  sampleClip(weightClip([0, 1], [0, 1], 1), 0.5, recorder(), ENTITY_OF, ENTITIES, null);
+  sampleClip(weightClip([0, 1], [0, 1], 1), 0.5, recorder(), ENTITY_OF, ENTITIES, []);
+});
+
+test('a clip wider than the mesh writes only what both agree on', () => {
+  // Three targets in the clip, two on the instance. Writing the third would
+  // run off the end of the array.
+  const weights = new Float32Array(2);
+  sampleClip(
+    weightClip([0, 1], [0, 0, 0, 1, 1, 1], 3),
+    1, recorder(), ENTITY_OF, ENTITIES, [weights],
+  );
+  close(weights[0], 1, EPS, 'target 0');
+  close(weights[1], 1, EPS, 'target 1');
+});
+
+test('the player drives weights through a whole scene', () => {
+  // End to end: an asset with a weights channel, added to a scene, advanced.
+  // The wiring between add() and the player is where skinning broke twice.
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.add({
+    nodes: [{
+      name: 'head',
+      position: Float32Array.from([0, 0, 0]),
+      rotation: Float32Array.from([0, 0, 0, 1]),
+      scale: Float32Array.from([1, 1, 1]),
+      children: [],
+      mesh: 0,
+      skin: -1,
+      weights: Float32Array.from([0, 0]),
+    }],
+    meshes: [{
+      name: 'face',
+      targetCount: 2,
+      primitives: [{
+        indexCount: 6,
+        materialId: 0,
+        bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+        morphExtent: Float32Array.from([1, 1]),
+      }],
+    }],
+    roots: [0],
+    animations: [weightClip([0, 1], [0, 1, 1, 0], 2)],
+  });
+
+  assert.ok(node.play(0, { loop: false }), 'the clip is there');
+  scene.advanceAnimations(0.25);
+  close(node.weights[0], 0.25, EPS, 'target 0 after a quarter second');
+  close(node.weights[1], 0.75, EPS, 'target 1 after a quarter second');
+});
+
 console.log(`\n${passed} checks passed\n`);

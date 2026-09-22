@@ -13,7 +13,9 @@ import { DEBUG, assert, assertFinite } from '../core/assert.js';
 import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
 import { TransformStore } from './transform.js';
 import { Node } from './node.js';
-import { updateWorldBounds, updateSkinBounds, applySkinBounds } from './bounds.js';
+import {
+  updateWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds,
+} from './bounds.js';
 import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
 import { vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
@@ -46,6 +48,19 @@ export class Scene {
     /** Index into this.skins, or -1: which palette a renderable reads. */
     this.renderableSkin = new Int32Array(renderableCapacity).fill(-1);
 
+    /** Index into this.morphs, or -1: whose weights deform this renderable. */
+    this.renderableMorph = new Int32Array(renderableCapacity).fill(-1);
+    /**
+     * How far each of this renderable's morph targets reaches, or null.
+     *
+     * A column rather than a read of renderablePrimitive, because a primitive
+     * is the RENDERER's object -- GPU buffers and an index count -- and bounds
+     * work is defined by touching scene columns only.
+     */
+    this.renderableMorphExtent = new Array(renderableCapacity).fill(null);
+    /** Last frame's morph padding, so a weight change is detectable at all. */
+    this.renderableMorphPad = new Float32Array(renderableCapacity);
+
     this.localMin = new Float32Array(renderableCapacity * 3);
     this.localMax = new Float32Array(renderableCapacity * 3);
     this.worldMin = new Float32Array(renderableCapacity * 3);
@@ -72,6 +87,17 @@ export class Scene {
     /** Resolved skin instances: joint ENTITIES plus the bind pose. */
     this.skins = [];
     this._pendingSkins = [];
+    /**
+     * Morph weights, one array per instanced mesh that has targets.
+     *
+     * Per (node, mesh), not per primitive: glTF puts the weights on the node,
+     * so every primitive of one mesh is deformed by the same set. And not per
+     * mesh either -- two nodes instancing one head animate independently,
+     * which is the same reason the skin palette and the player are per
+     * instance.
+     */
+    this.morphs = [];
+    this._morphOf = new Map();   // entity -> index into this.morphs
     /** Root entity -> AnimationPlayer, for asset instances that have clips. */
     this._players = new Map();
   }
@@ -86,6 +112,10 @@ export class Scene {
   add(asset, { parent = null } = {}) {
     const created = new Array(asset.nodes.length).fill(NULL_HANDLE);
     const roots = [];
+    // Node index -> that node's morph weights, for the animation player. Same
+    // shape as `created` and built beside it, because a weights channel names
+    // a node exactly the way a translation channel does.
+    let weightsOf = null;
 
     const visit = (nodeIndex, parentEntity) => {
       const node = asset.nodes[nodeIndex];
@@ -111,6 +141,19 @@ export class Scene {
         const skinIndex = node.skin >= 0 && asset.skins?.[node.skin] !== undefined
           ? this.skins.length + this._pendingSkins.push({ skin: asset.skins[node.skin], created }) - 1
           : -1;
+
+        // Weights come from the ASSET's node, which the importer already
+        // resolved against the mesh's defaults. Copied, because this instance
+        // is about to animate them and the asset may be added again.
+        let morphIndex = -1;
+        if (asset.meshes[node.mesh].targetCount > 0 && node.weights) {
+          morphIndex = this.morphs.length;
+          this.morphs.push({ weights: Float32Array.from(node.weights) });
+          this._morphOf.set(entity, morphIndex);
+          if (weightsOf === null) weightsOf = new Array(asset.nodes.length);
+          weightsOf[nodeIndex] = this.morphs[morphIndex].weights;
+        }
+
         for (const primitive of asset.meshes[node.mesh].primitives) {
           // Only a mesh that HAS influences is skinned. A rigged mesh
           // instanced under a node with no skin renders static, which is what
@@ -119,7 +162,11 @@ export class Scene {
           // primitive reaches the scene it is the renderer's object, which
           // carries GPU buffers rather than the arrays they were built from.
           const skinned = skinIndex >= 0 && primitive.skinned ? skinIndex : -1;
-          this._addRenderable(entity, primitive, skinned);
+          // A primitive with no targets of its own is never morphed, even on a
+          // node that carries weights -- the importer refuses a mesh whose
+          // primitives disagree, so in practice this is all or none.
+          const morphed = primitive.morphExtent ? morphIndex : -1;
+          this._addRenderable(entity, primitive, skinned, morphed);
         }
       }
 
@@ -176,13 +223,15 @@ export class Scene {
     // which is the whole reason two copies of one asset can play the same clip
     // at different times. It is kept only when there is something to play.
     if (asset.animations?.length > 0) {
-      this._players.set(handle, new AnimationPlayer(asset.animations, created, this.entities));
+      this._players.set(
+        handle, new AnimationPlayer(asset.animations, created, this.entities, weightsOf),
+      );
     }
 
     return new Node(this, handle);
   }
 
-  _addRenderable(entity, primitive, skin = -1) {
+  _addRenderable(entity, primitive, skin = -1, morph = -1) {
     if (this.renderableCount >= this.renderableCapacity) {
       this._growRenderables(this.renderableCount + 1);
     }
@@ -194,6 +243,8 @@ export class Scene {
     this.renderableMaterial[i] = primitive.materialId;
     this.renderablePrimitive[i] = primitive;
     this.renderableSkin[i] = skin;
+    this.renderableMorph[i] = morph;
+    this.renderableMorphExtent[i] = morph >= 0 ? primitive.morphExtent : null;
 
     this.localMin.set(primitive.bounds.min, i * 3);
     this.localMax.set(primitive.bounds.max, i * 3);
@@ -209,6 +260,9 @@ export class Scene {
     this.renderablePrimitive.length = capacity;
 
     this.renderableSkin = growArray(this.renderableSkin, capacity);
+    this.renderableMorph = growArray(this.renderableMorph, capacity);
+    this.renderableMorphExtent.length = capacity;
+    this.renderableMorphPad = growArray(this.renderableMorphPad, capacity);
     this.localMin = growArray(this.localMin, capacity, 3);
     this.localMax = growArray(this.localMax, capacity, 3);
     // World bounds are recomputed from local every time they are read, so these
@@ -217,6 +271,38 @@ export class Scene {
     this.worldMax = growArray(this.worldMax, capacity, 3);
 
     this.renderableCapacity = capacity;
+  }
+
+  /**
+   * This entity's morph weights, or null.
+   *
+   * Handed out LIVE, where a position is not. The rule Node.js states -- no
+   * live views, because a write that skips the setter never marks anything
+   * dirty -- is about the transform hierarchy, where a stale dirty flag means
+   * a stale matrix. Weights have no hierarchy and no flag: they are uploaded
+   * whole every frame, so writing one is already the only thing writing one
+   * could mean.
+   */
+  morphWeights(entity) {
+    const index = this._morphOf.get(entity);
+    return index === undefined ? null : this.morphs[index].weights;
+  }
+
+  /**
+   * Grow every morphed renderable's world bounds to cover where its weights
+   * have put its vertices.
+   *
+   * Runs after updateWorldBounds and after applySkinBounds -- it reads the
+   * boxes both of those wrote. A method rather than a raw call so the renderer
+   * and the raycaster cannot pass the ten columns in different orders.
+   */
+  applyMorphBounds() {
+    return applyMorphBounds(
+      this.renderableCount, this.renderableMorph, this.renderableSkin,
+      this.morphs, this.renderableMorphExtent,
+      this.localMin, this.localMax, this.worldMin, this.worldMax,
+      this.transforms.world, this.renderableMatrixSlot, this.renderableMorphPad,
+    );
   }
 
   /** An empty node, for grouping things you position together. */
@@ -441,6 +527,7 @@ export class Scene {
         this.renderableCount, this.renderableSkin, this.skins, this.worldMin, this.worldMax,
       );
     }
+    if (this.morphs.length > 0) this.applyMorphBounds();
 
     const candidates = [];
 
@@ -467,8 +554,15 @@ export class Scene {
       // approximate, it would miss, and a posed character with retainGeometry
       // would become unpickable while its box said otherwise. Skinning the
       // triangles here would cost a palette blend per vertex per click.
-      const skinned = this.renderableSkin[candidate.renderable] >= 0;
-      if (skinned || primitive.positions === undefined || primitive.indices === undefined) {
+      // Morphed geometry is answered at its box for the same reason, one step
+      // removed: the retained triangles are the UNDEFORMED mesh, so a ray that
+      // hit them would report where the vertex was authored rather than where
+      // the weights have put it. Unconditional, not "when some weight is
+      // nonzero" -- precision that switches on and off as a clip plays is a
+      // worse contract than precision that is honestly coarse.
+      const deformed = this.renderableSkin[candidate.renderable] >= 0
+        || this.renderableMorph[candidate.renderable] >= 0;
+      if (deformed || primitive.positions === undefined || primitive.indices === undefined) {
         best = candidate.renderable;
         bestDistance = candidate.distance;
         continue;

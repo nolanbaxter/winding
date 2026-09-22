@@ -9,6 +9,7 @@ import { Camera } from '../src/scene/camera.js';
 import { quatCreate, quatSetAxisAngle } from '../src/core/math/quat.js';
 import { vec3Create } from '../src/core/math/vec3.js';
 import { Scene } from '../src/scene/scene.js';
+import { updateWorldBounds, applyMorphBounds } from '../src/scene/bounds.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -512,6 +513,191 @@ test('a further exact hit wins when the nearer box is a triangle miss', () => {
   const hit = scene.raycast(vec3Create(0.4, 0.4, 0), vec3Create(0, 0, -1));
   assert.ok(hit, 'the box behind is still there');
   assert.equal(hit.node.entity, behind);
+});
+
+// --------------------------------------------------------------------- morphs
+
+console.log('\nmorph instances and bounds');
+
+/**
+ * An asset stand-in: one node, one morphed mesh, one primitive whose box is
+ * the unit cube. Built the way engine.load() hands one over, so scene.add()
+ * does the wiring rather than the test reaching past it.
+ */
+function morphAsset({
+  extent = [1, 2], weights = [0, 0], position = [0, 0, -5], retain = false, animations,
+} = {}) {
+  const primitive = {
+    indexCount: 6,
+    materialId: 0,
+    bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+    morphExtent: Float32Array.from(extent),
+  };
+  if (retain) {
+    primitive.positions = new Float32Array([
+      -0.2, -0.2, 0, 0.2, -0.2, 0, 0.2, 0.2, 0, -0.2, 0.2, 0,
+    ]);
+    primitive.indices = new Uint32Array([0, 1, 2, 0, 2, 3]);
+  }
+  return {
+    nodes: [{
+      name: 'head',
+      position: Float32Array.from(position),
+      rotation: Float32Array.from([0, 0, 0, 1]),
+      scale: Float32Array.from([1, 1, 1]),
+      children: [],
+      mesh: 0,
+      skin: -1,
+      weights: Float32Array.from(weights),
+    }],
+    meshes: [{ name: 'face', targetCount: extent.length, primitives: [primitive] }],
+    roots: [0],
+    animations,
+  };
+}
+
+/** The renderable's world box after a bounds refresh, as [min, max]. */
+function worldBox(scene, i = 0) {
+  scene.update();
+  updateWorldBounds(
+    scene.renderableCount, scene.localMin, scene.localMax, scene.worldMin, scene.worldMax,
+    scene.transforms.world, scene.renderableMatrixSlot, null,
+  );
+  scene.applyMorphBounds();
+  const o = i * 3;
+  return [
+    [scene.worldMin[o], scene.worldMin[o + 1], scene.worldMin[o + 2]],
+    [scene.worldMax[o], scene.worldMax[o + 1], scene.worldMax[o + 2]],
+  ];
+}
+
+test('adding a morphed asset creates one weight array per instance', () => {
+  const scene = new Scene({ capacity: 16 });
+  const a = scene.add(morphAsset({ weights: [0.25, 0.5] }));
+  const b = scene.add(morphAsset({ weights: [0.25, 0.5] }));
+
+  assert.equal(scene.morphs.length, 2);
+  assert.equal(scene.renderableMorph[0], 0);
+  assert.equal(scene.renderableMorph[1], 1);
+
+  // Two instances of one asset deform independently -- the same reason the
+  // animation player is per instance.
+  a.weights[0] = 1;
+  close(a.weights[0], 1, EPS, 'a');
+  close(b.weights[0], 0.25, EPS, 'b is untouched');
+});
+
+test('node.weights is a live view, not a copy', () => {
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.add(morphAsset());
+  node.weights[1] = 0.75;
+  close(scene.morphs[0].weights[1], 0.75, EPS, 'the write reached the instance');
+});
+
+test('a node whose mesh has no targets has no weights', () => {
+  const scene = new Scene({ capacity: 16 });
+  const asset = morphAsset();
+  asset.meshes[0].targetCount = 0;
+  asset.meshes[0].primitives[0].morphExtent = null;
+  asset.nodes[0].weights = null;
+
+  const node = scene.add(asset);
+  assert.equal(node.weights, null);
+  assert.equal(scene.morphs.length, 0);
+  assert.equal(scene.renderableMorph[0], -1);
+});
+
+test('weights at zero leave the authored box alone', () => {
+  const scene = new Scene({ capacity: 16 });
+  scene.add(morphAsset());
+  const [min, max] = worldBox(scene);
+  for (let i = 0; i < 3; i++) close(min[i], [-0.5, -0.5, -5.5][i], EPS, `min ${i}`);
+  for (let i = 0; i < 3; i++) close(max[i], [0.5, 0.5, -4.5][i], EPS, `max ${i}`);
+});
+
+test('a weight grows the box by how far that target reaches', () => {
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.add(morphAsset({ extent: [1, 2] }));
+
+  node.weights[0] = 1;                      // reach 1
+  let [min, max] = worldBox(scene);
+  close(min[0], -1.5, EPS, 'min x');
+  close(max[0], 1.5, EPS, 'max x');
+  close(min[2], -6.5, EPS, 'min z');
+
+  node.weights[1] = 0.5;                    // + reach 1 => 2 in total
+  [min, max] = worldBox(scene);
+  close(min[0], -2.5, EPS, 'both targets');
+  close(max[0], 2.5, EPS, 'both targets');
+});
+
+test('a negative weight grows the box too', () => {
+  // glTF does not bound weights to [0,1]: a negative one is how "the opposite
+  // of this expression" is authored. Summing without the absolute value would
+  // SHRINK the box and cull geometry that is on screen.
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.add(morphAsset({ extent: [1, 2] }));
+  node.weights[0] = -1;
+
+  const [min, max] = worldBox(scene);
+  close(min[0], -1.5, EPS, 'min x');
+  close(max[0], 1.5, EPS, 'max x');
+});
+
+test('the pass is idempotent: it rebuilds rather than grows', () => {
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.add(morphAsset({ extent: [1, 0] }));
+  node.weights[0] = 1;
+
+  worldBox(scene);
+  scene.applyMorphBounds();
+  scene.applyMorphBounds();
+  const [min, max] = worldBox(scene);
+  close(min[0], -1.5, EPS, 'min x after four passes');
+  close(max[0], 1.5, EPS, 'max x after four passes');
+});
+
+test('the pass reports only the instances whose padding actually changed', () => {
+  // The renderer derives "does the scene extent need recomputing" from this.
+  // A transform that does not move and a weight that does not change is a
+  // frame with nothing to redo, and a morphed scene must not lose that.
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.add(morphAsset({ extent: [1, 0] }));
+
+  node.weights[0] = 1;
+  assert.equal(scene.applyMorphBounds(), 1, 'the weight changed');
+  assert.equal(scene.applyMorphBounds(), 0, 'nothing changed');
+  node.weights[0] = 0.5;
+  assert.equal(scene.applyMorphBounds(), 1, 'changed again');
+});
+
+test('a morphed renderable is picked at its box, not at its triangles', () => {
+  // The retained triangles are the UNDEFORMED mesh. Answering with them would
+  // report where a vertex was authored rather than where the weights put it.
+  const scene = new Scene({ capacity: 16 });
+  scene.add(morphAsset({ retain: true }));
+
+  // A ray through the empty corner of the box: a box hit, a triangle miss.
+  const hit = scene.raycast(vec3Create(0.4, 0.4, 0), vec3Create(0, 0, -1));
+  assert.ok(hit, 'the box answers');
+  close(hit.distance, 4.5, EPS, 'distance is to the box face');
+});
+
+test('a skinned and morphed renderable gets both corrections', () => {
+  // applySkinBounds builds a world box from where the joints are, so there is
+  // no local box left to pad -- the padding goes straight onto the world box,
+  // which holds because joint matrices are rigid.
+  const min = new Float32Array([-1, -1, -1]);
+  const max = new Float32Array([1, 1, 1]);
+  const changed = applyMorphBounds(
+    1, Int32Array.from([0]), Int32Array.from([0]),
+    [{ weights: Float32Array.from([0.5]) }], [Float32Array.from([4])],
+    new Float32Array(3), new Float32Array(3), min, max,
+    new Float32Array(16), Uint32Array.from([0]), new Float32Array(1),
+  );
+  assert.equal(changed, 1);
+  close(min[0], -3, EPS, 'grown by 0.5 * 4');
+  close(max[2], 3, EPS, 'grown by 0.5 * 4');
 });
 
 console.log(`\n${passed} checks passed\n`);
