@@ -146,13 +146,16 @@ function mipPipelineFor(rhi, format) {
   return pipeline;
 }
 
-const samplers = new WeakMap();
+// Per-device cache for anything created once and shared: samplers, and the 1x1
+// default textures. Named for what it mostly holds; defaultTextures() puts
+// GPUTextures in it too, so texture lifetime IS tied to this map.
+const perDevice = new WeakMap();
 
 function cached(rhi, key, make) {
-  let byKey = samplers.get(rhi.device);
+  let byKey = perDevice.get(rhi.device);
   if (!byKey) {
     byKey = new Map();
-    samplers.set(rhi.device, byKey);
+    perDevice.set(rhi.device, byKey);
   }
   let value = byKey.get(key);
   if (value === undefined) {

@@ -107,10 +107,14 @@ fn vs(
 ) -> VertexOut {
   var out : VertexOut;
 
-  // instance_index counts from 0 within this draw, so the batch base turns it
-  // into an index into the frame-wide visible list. WebGPU only allows a
-  // non-zero firstInstance behind an optional feature, which is why the base
-  // arrives in a uniform rather than in the draw arguments.
+  // For the batched draws: instance_index counts from 0 within the draw, and
+  // batch.firstVisible turns it into an index into the frame-wide visible list.
+  // WebGPU only allows a non-zero firstInstance behind an optional feature,
+  // which is why the base arrives in a uniform rather than in the arguments.
+  //
+  // The blended draws use this same shader and do the opposite: they are DIRECT
+  // draws, which may set firstInstance freely, so they pass the absolute slot
+  // there and bind a firstVisible of 0. Both end up indexing the same list.
   let draw = drawData[visibleItems[batch.firstVisible + instance]];
 
   let world = draw.model * vec4<f32>(position, 1.0);

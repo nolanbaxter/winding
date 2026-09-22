@@ -18,7 +18,7 @@ import { grownCapacity, growArray } from './grow.js';
 
 const GEN_BITS = 8;
 const GEN_MASK = 0xff;
-const MAX_INDEX = (1 << 24) - 1;   // 16,777,215 live slots
+const MAX_INDEX = (1 << 24) - 1;   // the largest index, so 16,777,216 slots
 
 /**
  * Generation 0 is never issued, which makes handle 0 permanently invalid and

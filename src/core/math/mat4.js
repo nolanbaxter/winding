@@ -128,8 +128,14 @@ export function mat4FromQuatPosScale(
 
 /**
  * General 4x4 inverse via cofactor expansion. Returns null and leaves `out`
- * untouched when the matrix is singular -- callers must check rather than
- * propagate NaN.
+ * untouched when the determinant is exactly zero -- callers must check rather
+ * than propagate NaN.
+ *
+ * Exactly zero is the whole contract. A NEARLY singular matrix passes the test
+ * and divides by something tiny, so `out` comes back non-null and full of very
+ * large values or Infinity. The assertFinite below catches that in a debug
+ * build and not in a release one, so a caller handed a matrix from outside --
+ * a glTF node, a user transform -- cannot rely on the null alone.
  *
  * ponytail: general inverse; a rigid-body fast path (transpose the 3x3, negate
  * the translation) is ~4x cheaper and valid for any unscaled transform. Add it

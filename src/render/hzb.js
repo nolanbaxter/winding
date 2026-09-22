@@ -16,17 +16,19 @@
 // region is the smallest of those, the weakest occluder. Take the max instead
 // and distant geometry starts vanishing behind things that do not cover it.
 //
-// THE ONE-FRAME LAG. The pyramid is built at the end of a frame from that
-// frame's depth, and used at the start of the next. Nothing is read back to the
-// CPU -- a readback would stall the pipeline, which is the cost this whole
-// approach exists to avoid -- so the data is always one frame stale. An object
-// that becomes visible this frame was occluded last frame and gets culled for
-// one frame, which shows as a brief pop when the camera swings past a corner.
+// WHY THE PYRAMID IS BUILT MID-FRAME. Culling runs in two phases: whatever was
+// visible last frame is drawn first, this pyramid is built from THAT depth,
+// and a second cull re-tests everything else against it before a second pass
+// draws the newcomers. So the pyramid is never read a frame after it was
+// written -- it is produced and consumed inside one command buffer, projected
+// with the same matrix that rendered it.
 //
-// The fix is two-phase culling (Assassin's Creed, and what Nanite does): draw
-// what was visible last frame, rebuild the pyramid from THAT, then re-test
-// everything it rejected and draw the newcomers. It removes the pop entirely at
-// the cost of a second cull and a second indirect draw set. Not done here.
+// The alternative, and what this was before, is to build it at the end of a
+// frame and test against it at the start of the next. Nothing is read back to
+// the CPU either way -- a readback would stall the pipeline, which is the cost
+// this whole approach exists to avoid -- but the stale version culls an object
+// that has just become visible for a frame, which shows as a pop when the
+// camera swings past a corner. See gpudriven.js for the phases themselves.
 
 import { DEBUG, assert } from '../core/assert.js';
 import { compileShader } from '../rhi/shader.js';

@@ -97,8 +97,11 @@ export class MaterialRegistry {
 
   /**
    * @param material a material record from the glTF importer
-   * @param textures optional {baseColor, normal, orm, emissive} GPUTextures;
-   *                 anything missing falls back to a 1x1 default
+   * @param textures optional GPUTextures keyed by slot: baseColor, normal,
+   *                 metallicRoughness, occlusion, emissive, plus an optional
+   *                 sampler. Anything missing falls back to a 1x1 default.
+   *                 The key names matter -- an unrecognised one is ignored in
+   *                 silence, and the material renders flat with no error.
    * @returns the material id, which is also what goes into the sort key
    */
   register(material, textures = {}) {

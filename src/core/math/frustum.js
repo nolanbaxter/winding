@@ -93,7 +93,8 @@ function setPlane(out, index, a, b, c, d) {
  *
  * False negatives are impossible; false POSITIVES are, for boxes straddling
  * two planes near a corner. That is the accepted trade -- the test is four
- * multiplies per plane, and a wrongly-kept object costs one wasted draw while
+ * multiplies and three adds per plane, and a wrongly-kept object costs one
+ * wasted draw while
  * a wrongly-culled one is a visible hole.
  */
 export function frustumTestAABB(frustum, min, max, boundsOff = 0) {
@@ -111,7 +112,7 @@ export function frustumTestAABB(frustum, min, max, boundsOff = 0) {
   return true;
 }
 
-/** Same test for a sphere. Six multiplies total, and the first thing to try. */
+/** Same test for a sphere: three multiplies per plane, 15 over the five. */
 export function frustumTestSphere(frustum, center, radius) {
   for (let p = 0; p < FRUSTUM_PLANE_COUNT; p++) {
     const o = p * 4;

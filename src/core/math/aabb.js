@@ -9,8 +9,8 @@
  * axis-aligned box that still contains the rotated one.
  *
  * The obvious implementation transforms all eight corners and takes their
- * bounds: 8 matrix-vector products, 24 multiplies each. Arvo's method gets the
- * same answer in 9 multiplies total, by noticing that each output axis is just
+ * bounds: 8 matrix-vector products, 24 multiplies each, so 72. Arvo's method
+ * gets the same answer in 18, by noticing that each output axis is just
  * the translation plus, for every input axis, whichever of (row * min) and
  * (row * max) is smaller (for the min) or larger (for the max).
  *
