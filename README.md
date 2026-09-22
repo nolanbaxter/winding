@@ -81,7 +81,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 263 checks, Node, no browser
+npm test          # 279 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 11 checks on a real device
 ```
 
@@ -139,9 +139,12 @@ through the same setters a user would, which is what makes an animated node dirt
 reach the GPU like any other move.
 
 **Picking.** `scene.pick(camera, x, y, width, height)` returns the nearest renderable under a
-point on the canvas. It tests the world bounding boxes the culler already maintains, so it costs no
-extra memory — and it composes transforms and refreshes those bounds itself, so the answer never
-depends on whether you happened to render since the last move.
+point on the canvas. By default it tests the world bounding boxes the culler already maintains, so
+it costs no extra memory. Load an asset with `{ retainGeometry: true }` and the same call answers
+with triangles instead: the boxes become a broad phase that sorts candidates by entry distance and
+stops as soon as the next one starts further away than the best hit. Either way it composes
+transforms and refreshes bounds itself, so the answer never depends on whether you happened to
+render since the last move.
 
 **Nothing is sized in advance.** Scenes, transforms, draw lists, materials, lights and every
 per-renderable GPU buffer grow on demand by doubling, so the capacity arguments are starting sizes
@@ -177,12 +180,10 @@ These are real and currently unaddressed.
   objects and wrong for interpenetrating ones. Blended geometry also casts no shadow.
 - **Occlusion culling is one frame stale.** The depth pyramid comes from the previous frame, so fast
   camera motion can briefly pop. Two-phase culling is the standard fix and is not done.
-- **Picking is bounding-box accurate, not triangle accurate.** Clicking the empty corner of an
-  object's box counts as a hit. Exact hits need the mesh kept on the CPU after upload, which it
-  deliberately is not.
 - **Device loss is reported, not recovered.** The callback fires; rebuilding the GPU state is on you.
-- **Resource aliasing exists but never triggers** in any current frame, because every transient target
-  is a distinct size.
+- **Resource aliasing is idle in the default frame.** Transients share memory when their lifetimes do
+  not overlap, but every same-size pair in the bloom chain overlaps by construction, so nothing is
+  shared until a post-process with a scratch chain is added.
 
 ## License
 
