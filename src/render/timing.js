@@ -38,16 +38,24 @@ const NS_PER_MS = 1e6;
 
 export class GpuProfiler {
   /**
-   * @param rhi        the Device; its `features` decides whether this does anything
-   * @param enabled    false makes every method a no-op, as an unsupported device does
-   * @param maxPasses  query slots to allocate, two per pass
-   * @param depth      staging buffers in flight before frames start being skipped
+   * @param rhi      the Device; its `features` decides whether this does anything
+   * @param enabled  false makes every method a no-op, as an unsupported device does
+   * @param depth    staging buffers in flight before frames start being skipped
    */
-  constructor(rhi, { enabled = true, maxPasses = 64, depth = 3 } = {}) {
+  constructor(rhi, { enabled = true, depth = 3 } = {}) {
     this.rhi = rhi;
     /** False on any device without `timestamp-query`. Every method is then a no-op. */
     this.supported = enabled && (rhi.features?.has('timestamp-query') ?? false);
-    this.maxPasses = maxPasses;
+    this.depth = depth;
+
+    /**
+     * Query slots currently allocated, in passes. Not an option and not a
+     * budget: a frame's pass count is whatever the graph declared, and the
+     * graph has no ceiling either. This follows it. Starts at zero, so the
+     * first frame is untimed and sizes the second.
+     */
+    this.capacity = 0;
+    this._wanted = 0;
 
     /** Most recent completed readback: `[{ name, ms }]`, in pass order. */
     this.results = [];
@@ -69,53 +77,81 @@ export class GpuProfiler {
     this.samples = 0;
     this._accumulator = new Map();
 
-    if (!this.supported) return;
+    this._ring = [];
+    this._names = [];
+    /** The slot resolve() claimed this frame, waiting for readback(). */
+    this._pending = null;
+  }
 
-    this.querySet = rhi.device.createQuerySet({
+  /**
+   * Allocate, or reallocate, for `passes` passes.
+   *
+   * Only ever called from begin(), with nothing in flight, because a query set
+   * or staging buffer destroyed while a command buffer still references it is
+   * a use-after-free the device reports several frames later.
+   */
+  _resize(passes) {
+    const device = this.rhi.device;
+    const bytes = passes * QUERIES_PER_PASS * 8;
+
+    this.querySet?.destroy();
+    this.resolveBuffer?.destroy();
+    for (const entry of this._ring) entry.buffer.destroy();
+
+    this.querySet = device.createQuerySet({
       label: 'pass-timing',
       type: 'timestamp',
-      count: maxPasses * QUERIES_PER_PASS,
+      count: passes * QUERIES_PER_PASS,
     });
 
     // Resolve target and the ring that gets read. Separate because a buffer
     // with QUERY_RESOLVE cannot also be MAP_READ.
-    this.resolveBuffer = rhi.device.createBuffer({
+    this.resolveBuffer = device.createBuffer({
       label: 'pass-timing-resolve',
-      size: maxPasses * QUERIES_PER_PASS * 8,
+      size: bytes,
       usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
     });
 
     this._ring = [];
-    for (let i = 0; i < depth; i++) {
+    for (let i = 0; i < this.depth; i++) {
       this._ring.push({
-        buffer: rhi.device.createBuffer({
+        buffer: device.createBuffer({
           label: `pass-timing-read${i}`,
-          size: maxPasses * QUERIES_PER_PASS * 8,
+          size: bytes,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         }),
         inFlight: false,
         names: [],
       });
     }
-
-    this._names = [];
-    /** The slot resolve() claimed this frame, waiting for readback(). */
-    this._pending = null;
+    this.capacity = passes;
   }
 
   /** Start a frame. Called by the graph before it records anything. */
   begin() {
-    if (this.supported) this._names.length = 0;
+    if (!this.supported) return;
+    // Last frame wanted more slots than exist. Now is the only safe moment to
+    // widen: no pass has been recorded yet, so nothing references the old set.
+    if (this._wanted > this.capacity && !this._ring.some((e) => e.inFlight)) {
+      this._resize(this._wanted);
+    }
+    this._names.length = 0;
   }
 
   /**
    * The `timestampWrites` for the pass at `step`, or undefined.
    *
-   * Undefined is the correct value to hand a pass descriptor when timing is off
-   * or the query set is full, so callers never need to branch.
+   * Undefined is the correct value to hand a pass descriptor when timing is
+   * off, so callers never need to branch. A step past what is currently
+   * allocated records the demand and goes untimed for this frame only; the
+   * next begin() widens to fit. Nothing is silently dropped for good.
    */
   writesFor(step, name) {
-    if (!this.supported || step >= this.maxPasses) return undefined;
+    if (!this.supported) return undefined;
+    if (step >= this.capacity) {
+      this._wanted = Math.max(this._wanted, step + 1);
+      return undefined;
+    }
     this._names.push(name);
     return {
       querySet: this.querySet,
@@ -216,9 +252,10 @@ export class GpuProfiler {
   }
 
   destroy() {
-    if (!this.supported) return;
-    this.querySet.destroy();
-    this.resolveBuffer.destroy();
+    this.querySet?.destroy();
+    this.resolveBuffer?.destroy();
     for (const entry of this._ring) entry.buffer.destroy();
+    this._ring = [];
+    this.capacity = 0;
   }
 }

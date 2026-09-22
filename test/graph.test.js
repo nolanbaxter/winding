@@ -535,6 +535,19 @@ globalThis.GPUBufferUsage ??= {
 };
 globalThis.GPUMapMode ??= { READ: 0x0001 };
 
+/**
+ * Run one frame of `passes` passes so the profiler sizes itself, then open the
+ * next frame. The first frame is always untimed by design: the pass count is
+ * whatever the graph declares, so the profiler learns it by being asked.
+ */
+function warmed(profiler, passes) {
+  profiler.begin();
+  for (let i = 0; i < passes; i++) profiler.writesFor(i, `warm${i}`);
+  profiler.begin();
+  return profiler;
+}
+
+
 
 /**
  * A device that records what the profiler asks of it. Timestamps are handed
@@ -593,8 +606,7 @@ test('enabled:false turns it off on a device that does support it', () => {
 });
 
 test('each pass gets its own pair of query indices', () => {
-  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 4 });
-  profiler.begin();
+  const profiler = warmed(new GpuProfiler(timingRhi()), 2);
   const first = profiler.writesFor(0, 'cull');
   const second = profiler.writesFor(1, 'forward');
   assert.equal(first.beginningOfPassWriteIndex, 0);
@@ -604,16 +616,21 @@ test('each pass gets its own pair of query indices', () => {
   assert.equal(first.querySet, second.querySet, 'one set for the whole frame');
 });
 
-test('passes past the query set are untimed rather than an error', () => {
-  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 1 });
+test('a pass past what is allocated is untimed for one frame, then fits', () => {
+  // Nothing is dropped for good: the demand is recorded and the next begin()
+  // widens to it, which is what lets the profiler follow a graph that has no
+  // pass ceiling of its own.
+  const profiler = warmed(new GpuProfiler(timingRhi()), 1);
+  assert.ok(profiler.writesFor(0, 'in'));
+  assert.equal(profiler.writesFor(1, 'out'), undefined, 'untimed this frame');
+
   profiler.begin();
   assert.ok(profiler.writesFor(0, 'in'));
-  assert.equal(profiler.writesFor(1, 'out'), undefined);
+  assert.ok(profiler.writesFor(1, 'out'), 'and timed the next');
 });
 
 test('begin() forgets the previous frame, so names cannot accumulate', () => {
-  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 8 });
-  profiler.begin();
+  const profiler = warmed(new GpuProfiler(timingRhi()), 8);
   profiler.writesFor(0, 'a');
   profiler.begin();
   const again = profiler.writesFor(0, 'a');
@@ -621,8 +638,7 @@ test('begin() forgets the previous frame, so names cannot accumulate', () => {
 });
 
 test('resolve only covers the passes that actually ran', () => {
-  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 64 });
-  profiler.begin();
+  const profiler = warmed(new GpuProfiler(timingRhi()), 64);
   profiler.writesFor(0, 'a');
   profiler.writesFor(1, 'b');
   const encoder = encoderStub();
@@ -640,7 +656,7 @@ test('a frame with no passes resolves nothing', () => {
 });
 
 test('the ring skips instead of stalling when every buffer is in flight', () => {
-  const profiler = new GpuProfiler(timingRhi(), { depth: 2 });
+  const profiler = warmed(new GpuProfiler(timingRhi(), { depth: 2 }), 1);
   const encoder = encoderStub();
   // Three frames back to back, nothing given a chance to unmap in between.
   for (let i = 0; i < 3; i++) {
@@ -653,7 +669,7 @@ test('the ring skips instead of stalling when every buffer is in flight', () => 
 });
 
 test('readback without a resolve does nothing, and does not repeat itself', () => {
-  const profiler = new GpuProfiler(timingRhi(), { depth: 1 });
+  const profiler = warmed(new GpuProfiler(timingRhi(), { depth: 1 }), 1);
   profiler.readback();
 
   profiler.begin();
@@ -666,7 +682,7 @@ test('readback without a resolve does nothing, and does not repeat itself', () =
 });
 
 test('the graph hands every pass its timestamp writes, render and compute', () => {
-  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 8 });
+  const profiler = warmed(new GpuProfiler(timingRhi()), 2);
   const graph = new RenderGraph(fakeRhi(), { profiler });
   graph.begin();
   // An imported target: a transient nothing reads is a dead pass, and a dead
@@ -711,8 +727,7 @@ test('no profiler means no timestampWrites key to confuse a driver', () => {
 
 // Readback is a promise, so this one sits outside the sync helper.
 {
-  const profiler = new GpuProfiler(timingRhi(), { maxPasses: 8 });
-  profiler.begin();
+  const profiler = warmed(new GpuProfiler(timingRhi()), 2);
   profiler.writesFor(0, 'cull');
   profiler.writesFor(1, 'forward');
   profiler.resolve(encoderStub());
