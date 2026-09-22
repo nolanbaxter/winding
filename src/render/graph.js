@@ -366,10 +366,25 @@ export class RenderGraph {
       if (!this._live[a]) continue;
       const pass = this._passes[a];
 
-      // Read-after-write, and deliberately NOT restricted to earlier passes.
-      // Declaration order carrying meaning is exactly what this file exists to
-      // remove: declaring the consumer first must still run the producer first.
-      for (let r = 0; r < pass.readCount; r++) this._edgesFromWriters(pass.reads[r], a, n);
+      // Read-after-write, and deliberately NOT restricted to earlier passes
+      // while a resource has ONE writer. Declaration order carrying meaning is
+      // what this file exists to remove: declaring the consumer first must
+      // still run the producer first.
+      //
+      // A resource written more than once is the exception, and it has to be.
+      // Its writes are a SEQUENCE -- the write-after-write rule below already
+      // says declaration order is what orders them -- so "the depth buffer" is
+      // really several values over the frame, and a read means the one current
+      // where the read was declared. Edging from every writer instead would put
+      // a reader between two writes after both, which is a cycle the moment
+      // the later write depends on that reader. Two-phase culling is exactly
+      // that shape: the depth pyramid reads the early depth, and the late pass
+      // writes depth again only because the pyramid told it what to draw.
+      for (let r = 0; r < pass.readCount; r++) {
+        const handle = pass.reads[r];
+        const versioned = this._resources[handle].writerCount > 1;
+        this._edgesFromWriters(handle, a, versioned ? a : n);
+      }
 
       // Write-after-write. Two passes writing the same target have no data
       // dependency either way, so declaration order is the tie-break -- it is

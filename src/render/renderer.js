@@ -140,7 +140,8 @@ export class Renderer {
     this.graph = new RenderGraph(rhi, { profiler: this.gpuTiming });
     // Bound once: the graph holds a function per pass, and rebuilding these
     // every frame would allocate a closure per pass per frame.
-    this._forwardExecute = (pass) => this._encodeForward(pass);
+    this._forwardEarly = (pass) => this._encodeForward(pass, 0);
+    this._forwardLate = (pass) => this._encodeForward(pass, 1);
     this._frameScene = null;
     this._frameEnvironment = null;
 
@@ -269,7 +270,7 @@ export class Renderer {
     // before the cull means the bind group always points at a live texture.
     this.hzb.resize(rhi.width, rhi.height, rhi.depthView());
     this.gpu.bindHzb(this.hzb.view);
-    this.gpu.update(scene, this.frustum, this.hzb, writeDrawData);
+    this.gpu.update(scene, this.frustum, this.hzb, camera.viewProjection, writeDrawData);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
 
     // Both consumers of `moved` have now read it, so the record is spent.
@@ -365,13 +366,22 @@ export class Renderer {
     const clusterCounts = graph.importBuffer('cluster-counts', this.clusters.countBuffer);
 
     const drawDataBuffer = graph.importBuffer('draw-data', this.gpu.drawDataBuffer);
-    const indirectBuffer = graph.importBuffer('indirect', this.gpu.indirectBuffer);
-    const visibleBuffer = graph.importBuffer('visible', this.gpu.visibleBuffer);
+    // The same two GPU buffers, imported twice each. The graph tracks buffers
+    // only to derive ordering, and the two cull phases write disjoint halves,
+    // so describing them as one resource would be a lie that costs a cycle:
+    // forward:early reads the indirect args, and a read edges from EVERY
+    // writer, so it would be forced after cull:late -- which must itself come
+    // after forward:early.
+    const indirectEarly = graph.importBuffer('indirect:early', this.gpu.indirectBuffer);
+    const visibleEarly = graph.importBuffer('visible:early', this.gpu.visibleBuffer);
+    const indirectLate = graph.importBuffer('indirect:late', this.gpu.indirectBuffer);
+    const visibleLate = graph.importBuffer('visible:late', this.gpu.visibleBuffer);
 
     this.gpu.addCullPass(graph, {
+      phase: 0,
       boundsResource: drawDataBuffer,
-      indirectResource: indirectBuffer,
-      visibleResource: visibleBuffer,
+      indirectResource: indirectEarly,
+      visibleResource: visibleEarly,
     });
 
     this.shadows.addPasses(graph, shadowMap, this.gpu, this.drawBindGroup);
@@ -392,22 +402,43 @@ export class Renderer {
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
 
+    // EARLY. Everything that was on screen last frame, which is both the
+    // picture so far and the set of occluders the pyramid is built from.
     graph.addPass({
-      name: 'forward',
-      reads: [shadowMap, lightBuffer, clusterIndices, clusterCounts, indirectBuffer, visibleBuffer],
+      name: 'forward:early',
+      reads: [shadowMap, lightBuffer, clusterIndices, clusterCounts, indirectEarly, visibleEarly],
       color: [{ resource: sceneColor, clear: { r: 0, g: 0, b: 0, a: 1 } }],
       depth: { resource: depth, clear: DEPTH_CLEAR_VALUE },
-      execute: this._forwardExecute,
+      execute: this._forwardEarly,
     });
 
-    // Built at the END of the frame from this frame's depth, and read at the
-    // START of the next. Declaring it here is also what flips the depth
-    // buffer's store op from discard to store -- derived, not written down.
+    // Built from the early depth and consumed later in the SAME frame, which
+    // is the whole difference: the occlusion test is no longer a frame behind.
     const hzbLevels = [];
     for (let level = 0; level < this.hzb.levelCount; level++) {
       hzbLevels.push(graph.importTexture(`hzb${level}`, this.hzb.levelViews[level]));
     }
     this.hzb.addPasses(graph, depth, hzbLevels);
+
+    this.gpu.addCullPass(graph, {
+      phase: 1,
+      boundsResource: drawDataBuffer,
+      indirectResource: indirectLate,
+      visibleResource: visibleLate,
+      hzbResources: hzbLevels,
+    });
+
+    // LATE. Whatever the fresh pyramid says is visible and was not drawn above,
+    // then the blended geometry, which has to follow every opaque draw. No
+    // clear on either attachment: the graph derives `load` from the early pass
+    // having written them.
+    graph.addPass({
+      name: 'forward:late',
+      reads: [shadowMap, lightBuffer, clusterIndices, clusterCounts, indirectLate, visibleLate],
+      color: [{ resource: sceneColor }],
+      depth: { resource: depth },
+      execute: this._forwardLate,
+    });
 
     this.post.addPasses(graph, {
       sceneColor,
@@ -422,10 +453,6 @@ export class Renderer {
 
     const encoder = rhi.device.createCommandEncoder({ label: 'frame' });
     graph.execute(encoder);
-
-    // Next frame's occlusion test projects into the space this frame's depth
-    // was rendered in.
-    this.gpu.lastViewProjection.set(camera.viewProjection);
 
     // After the last pass is recorded and before the encoder is closed: this
     // only copies queries the GPU will have written by the time it runs.
@@ -504,14 +531,27 @@ export class Renderer {
     this.stats.transparent = count;
   }
 
-  _encodeForward(pass) {
+  /**
+   * Draw one phase of the opaque geometry, plus the things that bracket it.
+   *
+   * Phase 0 opens the frame: the skybox, then everything that was on screen
+   * last frame. Phase 1 closes it: whatever the fresh depth pyramid newly
+   * admitted, then the blended geometry, which has to follow every opaque draw
+   * in either phase.
+   *
+   * The batch loop is identical in both; only which half of the indirect and
+   * visible lists it reads differs, and that is one offset.
+   */
+  _encodeForward(pass, phase) {
     const scene = this._frameScene;
     const environment = this._frameEnvironment;
 
-    // The skybox binds its own layout at group 0, so the frame group has to be
-    // set AFTER it -- a bind group set at an index is overwritten regardless of
-    // which pipeline layout put it there.
-    this.skybox.draw(pass, environment);
+    if (phase === 0) {
+      // The skybox binds its own layout at group 0, so the frame group has to
+      // be set AFTER it -- a bind group set at an index is overwritten
+      // regardless of which pipeline layout put it there.
+      this.skybox.draw(pass, environment);
+    }
     pass.setBindGroup(GROUP_FRAME, this._frameBindGroup(environment));
     this.pipelineLayout.bindEmptyGroups(pass);
 
@@ -521,7 +561,8 @@ export class Renderer {
 
     // One call per batch, not per object, and the instance count inside each
     // one was written by the compute shader. A fully culled batch still costs a
-    // call, but it draws nothing and the GPU discards it immediately.
+    // call, but it draws nothing and the GPU discards it immediately. The late
+    // phase is mostly such batches, which is what makes a second pass affordable.
     for (let d = 0; d < this.batchList.count; d++) {
       const b = this.batchList.payloads[d];
       const materialId = gpu.batchMaterial[b];
@@ -539,11 +580,13 @@ export class Renderer {
         boundMaterial = materialId;
       }
 
-      pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.batchOffset(b)]);
+      pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.batchOffset(b, phase)]);
       pass.setVertexBuffer(0, primitive.vertexBuffer);
       pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
-      pass.drawIndexedIndirect(gpu.indirectBuffer, b * INDIRECT_BYTES);
+      pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, phase));
     }
+
+    if (phase === 0) return;
 
     // Blended geometry, strictly after every opaque draw and in the order
     // _orderTransparent worked out. One call each: two blended objects at

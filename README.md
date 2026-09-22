@@ -81,14 +81,14 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 279 checks, Node, no browser
+npm test          # 293 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 11 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
 keys, the render graph, shadow fitting, clustering and the job system. They cannot touch WGSL, so the GPU suite boots the
 engine on a real device and checks that every shader compiles, every material pipeline permutation
-builds, and 30 frames submit without the device complaining.
+builds, 30 frames submit without the device complaining, and that per-pass GPU timings come back.
 
 ## What it does
 
@@ -104,8 +104,11 @@ nothing needs it. Blended geometry is the one exception, and for a reason: that 
 slots in thread-completion order, so anything whose result depends on draw order has to be ordered
 somewhere else.
 
-**Hierarchical-Z occlusion.** A depth pyramid built from the previous frame, min-reduced (which is
-*max* under reverse-Z) so a conservative test stays conservative.
+**Two-phase occlusion culling.** Everything that was on screen last frame is drawn first; a depth
+pyramid is built from that, min-reduced (which is *max* under reverse-Z); then a second cull tests
+everything else against it and a second pass draws whatever it newly admits. The pyramid is from
+this frame, so an object that becomes visible appears on the frame it does, with no pop. The only
+thing carried between frames is one bit per object.
 
 **A render graph.** Passes declare what they read and write. Execution order, load/store ops, texture
 lifetimes and dead-pass elimination are all derived from that — nothing says "clear here" or "run this
@@ -178,8 +181,6 @@ These are real and currently unaddressed.
 - **Transparency sorts per object, not per fragment.** `BLEND` geometry is culled and sorted
   back-to-front on the CPU and drawn after all opaque batches, which is exact for separated convex
   objects and wrong for interpenetrating ones. Blended geometry also casts no shadow.
-- **Occlusion culling is one frame stale.** The depth pyramid comes from the previous frame, so fast
-  camera motion can briefly pop. Two-phase culling is the standard fix and is not done.
 - **Device loss is reported, not recovered.** The callback fires; rebuilding the GPU state is on you.
 - **Resource aliasing is idle in the default frame.** Transients share memory when their lifetimes do
   not overlap, but every same-size pair in the bloom chain overlaps by construction, so nothing is

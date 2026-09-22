@@ -50,13 +50,21 @@ const WORKGROUP_SIZE = 64;
 const CULL_SHADER = /* wgsl */ `
 struct CullParams {
   planes        : array<vec4<f32>, ${FRUSTUM_PLANE_COUNT}>,
-  // LAST frame's viewProjection. The pyramid was built from last frame's depth,
-  // so the test has to project into the same space that produced it.
-  lastViewProj  : mat4x4<f32>,
+  // THIS frame's viewProjection. The late phase tests against a pyramid built
+  // from this frame's own early depth, so there is no lag to compensate for --
+  // which is the entire point of culling in two phases.
+  viewProj      : mat4x4<f32>,
   count         : u32,
   hzbLevels     : u32,
   hzbWidth      : f32,
   hzbHeight     : f32,
+  // 0 = early (redraw last frame's set), 1 = late (test against fresh depth).
+  phase         : u32,
+  // Where this phase's slice of the indirect and visible lists begins. The two
+  // phases share both buffers and never touch each other's half.
+  indirectBase  : u32,
+  visibleBase   : u32,
+  pad           : u32,
 };
 
 struct Bounds {
@@ -75,16 +83,21 @@ struct DrawArgs {
 /** itemBatch entry for a renderable that belongs to no batch. */
 const NOT_BATCHED : u32 = 0xffffffffu;
 
-@group(0) @binding(0) var<uniform>             params     : CullParams;
-@group(0) @binding(1) var<storage, read>       bounds     : array<Bounds>;
-@group(0) @binding(2) var<storage, read>       itemBatch  : array<u32>;
-@group(0) @binding(3) var<storage, read>       batchFirst : array<u32>;
-@group(0) @binding(4) var<storage, read_write> indirect   : array<DrawArgs>;
-@group(0) @binding(5) var<storage, read_write> visible    : array<u32>;
-@group(0) @binding(6) var                      hzb        : texture_2d<f32>;
+@group(0) @binding(0) var<uniform>             params      : CullParams;
+@group(0) @binding(1) var<storage, read>       bounds      : array<Bounds>;
+@group(0) @binding(2) var<storage, read>       itemBatch   : array<u32>;
+@group(0) @binding(3) var<storage, read>       batchFirst  : array<u32>;
+@group(0) @binding(4) var<storage, read_write> indirect    : array<DrawArgs>;
+@group(0) @binding(5) var<storage, read_write> visible     : array<u32>;
+@group(0) @binding(6) var                      hzb         : texture_2d<f32>;
+/**
+ * Was this object drawn last frame? Persistent across frames and owned by the
+ * late phase, which is the only one that can tell.
+ */
+@group(0) @binding(7) var<storage, read_write> visibleLast : array<u32>;
 
 /**
- * Is this box hidden behind something drawn last frame?
+ * Is this box hidden behind something already drawn this frame?
  *
  * Projects the eight corners, takes the screen rectangle and the NEAREST depth,
  * picks the pyramid level where that rectangle spans about two texels, and
@@ -105,7 +118,7 @@ fn occluded(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
       select(boxMin.y, boxMax.y, (c & 2u) != 0u),
       select(boxMin.z, boxMax.z, (c & 4u) != 0u),
     );
-    let clip = params.lastViewProj * vec4<f32>(corner, 1.0);
+    let clip = params.viewProj * vec4<f32>(corner, 1.0);
     // w <= 0 means the box reaches behind the eye; the projection is not
     // meaningful there and the safe answer is "visible".
     if (clip.w <= 0.0) { return false; }
@@ -146,17 +159,8 @@ fn occluded(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
   return nearest < farthest;
 }
 
-@compute @workgroup_size(${WORKGROUP_SIZE})
-fn cull(@builtin(global_invocation_id) id : vec3<u32>) {
-  let item = id.x;
-  if (item >= params.count) { return; }
-
-  let boxMin = bounds[item].minPoint.xyz;
-  let boxMax = bounds[item].maxPoint.xyz;
-
-  // The same positive-vertex test the CPU path uses, and the same FIVE planes:
-  // the sixth would be the far plane, which does not exist under an infinite
-  // reverse-Z projection.
+/** The same positive-vertex test the CPU path uses, over the same five planes. */
+fn inFrustum(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
   for (var p = 0u; p < ${FRUSTUM_PLANE_COUNT}u; p = p + 1u) {
     let plane = params.planes[p];
     let corner = vec3<f32>(
@@ -164,22 +168,54 @@ fn cull(@builtin(global_invocation_id) id : vec3<u32>) {
       select(boxMin.y, boxMax.y, plane.y >= 0.0),
       select(boxMin.z, boxMax.z, plane.z >= 0.0),
     );
-    if (dot(plane.xyz, corner) + plane.w < 0.0) { return; }
+    if (dot(plane.xyz, corner) + plane.w < 0.0) { return false; }
   }
+  return true;
+}
 
-  if (occluded(boxMin, boxMax)) { return; }
+/**
+ * Claim a slot and record the count in one operation. The returned value is
+ * this thread's index within the batch, so no second compaction pass and no
+ * prefix sum is needed -- the atomic IS the allocator.
+ */
+fn emit(batch : u32, item : u32) {
+  let slot = atomicAdd(&indirect[params.indirectBase + batch].instanceCount, 1u);
+  visible[params.visibleBase + batchFirst[batch] + slot] = item;
+}
 
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn cull(@builtin(global_invocation_id) id : vec3<u32>) {
+  let item = id.x;
+  if (item >= params.count) { return; }
+
+  let boxMin = bounds[item].minPoint.xyz;
+  let boxMax = bounds[item].maxPoint.xyz;
   let batch = itemBatch[item];
   // Blended geometry is not batched and not culled here: its draw order has to
-  // be back-to-front, and the atomic below hands out slots in whatever order
-  // threads finish. The CPU orders those items instead.
-  if (batch == NOT_BATCHED) { return; }
+  // be back-to-front, and the atomic hands out slots in thread-completion
+  // order. The CPU orders those items instead.
+  let batched = batch != NOT_BATCHED;
+  let visibleNow = inFrustum(boxMin, boxMax);
 
-  // Claim a slot and record the count in one operation. The returned value is
-  // this thread's index within the batch, so no second compaction pass and no
-  // prefix sum is needed -- the atomic IS the allocator.
-  let slot = atomicAdd(&indirect[batch].instanceCount, 1u);
-  visible[batchFirst[batch] + slot] = item;
+  if (params.phase == 0u) {
+    // EARLY. Draw whatever was on screen last frame, with no depth test at all:
+    // these are precisely the objects the pyramid is about to be built from, so
+    // testing them against last frame's pyramid would be the stale test this
+    // whole scheme exists to delete. An object that has since become hidden is
+    // drawn once too often; it is never missing.
+    if (visibleNow && batched && visibleLast[item] == 1u) { emit(batch, item); }
+    return;
+  }
+
+  // LATE. The pyramid now holds this frame's early depth, so this test is
+  // current rather than a frame behind.
+  let survives = visibleNow && !occluded(boxMin, boxMax);
+  let drawnEarly = visibleLast[item] == 1u;
+  // Read before write: the early phase of the NEXT frame reads what is stored
+  // here, and this thread still needs the old value to know what it drew.
+  visibleLast[item] = select(0u, 1u, survives);
+
+  if (survives && batched && !drawnEarly) { emit(batch, item); }
 }
 `;
 
@@ -236,18 +272,32 @@ export class GpuDriven {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
-    this.indirectData = new Uint32Array(capacity * (INDIRECT_BYTES / 4));
+    this.indirectData = new Uint32Array(capacity * 2 * (INDIRECT_BYTES / 4));
     this.indirectBuffer = device.createBuffer({
       label: 'indirect-args',
-      size: capacity * INDIRECT_BYTES,
+      size: capacity * 2 * INDIRECT_BYTES,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
+    // Doubled, because the two cull phases write disjoint halves of it. Phase
+    // p's batch b lives at `p * capacity + batchFirst[b]`, and the blended tail
+    // sits past opaqueCount inside the early half.
     this.visibleBuffer = device.createBuffer({
       label: 'visible-items',
+      size: capacity * 2 * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // One flag per object: was it drawn last frame? Written only by the late
+    // phase, which is the only one that has tested against current depth.
+    // Persistent -- this is the entire memory two-phase culling carries between
+    // frames, and it replaces trusting a frame-old pyramid.
+    this.visibleFlagsBuffer = device.createBuffer({
+      label: 'visible-last-frame',
       size: capacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
+    this._zeroFlags = new Uint32Array(capacity);
 
     // The shadow pass draws every caster, so it indexes a static list in batch
     // order rather than the GPU-compacted one.
@@ -261,26 +311,27 @@ export class GpuDriven {
     // Per-batch uniform: the base index into the visible list. Bound with a
     // dynamic offset, which is the one small thing still done per draw.
     this.alignment = rhi.limits.minUniformBufferOffsetAlignment;
-    // capacity + 1: the extra slot holds a firstVisible of 0, which is what the
-    // transparent draws bind. They index the visible list absolutely, by
-    // firstInstance, rather than relative to a batch base.
-    this.batchStaging = new ArrayBuffer(this.alignment * (capacity + 1));
+    // capacity * 2 + 1: one slot per (phase, batch), plus a final slot holding
+    // a base of 0, which is what the transparent draws bind. They index the
+    // visible list absolutely, by firstInstance, rather than relative to a
+    // batch base.
+    this.batchStaging = new ArrayBuffer(this.alignment * (capacity * 2 + 1));
     this.batchBuffer = device.createBuffer({
       label: 'batch-info',
       size: this.batchStaging.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // planes(5 * 16) + lastViewProj(64) + (count, hzbLevels, hzbWidth, hzbHeight)
-    this.cullParams = new ArrayBuffer(FRUSTUM_PLANE_COUNT * 16 + 64 + 16);
-    this.lastViewProjection = new Float32Array(16);
-    this.lastViewProjection[0] = 1; this.lastViewProjection[5] = 1;
-    this.lastViewProjection[10] = 1; this.lastViewProjection[15] = 1;
+    // planes(5 * 16) + viewProj(64) + 4 u32 + (phase, indirectBase, visibleBase, pad)
+    this.cullParams = new ArrayBuffer(FRUSTUM_PLANE_COUNT * 16 + 64 + 16 + 16);
     this.cullParamsF32 = new Float32Array(this.cullParams);
     this.cullParamsU32 = new Uint32Array(this.cullParams);
+    // One buffer, one slot per phase, so a single dispatch pair needs no
+    // rewrite between the two.
+    this.cullParamsStride = Math.max(this.alignment, this.cullParams.byteLength);
     this.cullParamsBuffer = device.createBuffer({
       label: 'cull-params',
-      size: this.cullParams.byteLength,
+      size: this.cullParamsStride * 2,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -295,7 +346,7 @@ export class GpuDriven {
     /** Slots [0, opaqueCount) of the visible list belong to the cull shader. */
     this.opaqueCount = 0;
 
-    this._cullExecute = (pass) => this._dispatch(pass);
+    this._cullExecute = [(pass) => this._dispatch(pass, 0), (pass) => this._dispatch(pass, 1)];
     this._needsFullUpload = true;
     /** Bumped by _grow. The renderer's draw bind group names batchBuffer. */
     this.buffersRevision = 0;
@@ -316,6 +367,7 @@ export class GpuDriven {
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
         { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       ],
     });
 
@@ -325,17 +377,25 @@ export class GpuDriven {
       compute: { module: shader.module, entryPoint: 'cull' },
     });
 
-    this._makeBindGroup = (hzbView) => device.createBindGroup({
-      label: 'gpu-cull',
+    this._makeBindGroup = (hzbView, phase) => device.createBindGroup({
+      label: `gpu-cull:${phase === 0 ? 'early' : 'late'}`,
       layout: this.layout,
       entries: [
-        { binding: 0, resource: { buffer: this.cullParamsBuffer } },
+        {
+          binding: 0,
+          resource: {
+            buffer: this.cullParamsBuffer,
+            offset: phase * this.cullParamsStride,
+            size: this.cullParams.byteLength,
+          },
+        },
         { binding: 1, resource: { buffer: this.boundsBuffer } },
         { binding: 2, resource: { buffer: this.itemBatchBuffer } },
         { binding: 3, resource: { buffer: this.batchFirstBuffer } },
         { binding: 4, resource: { buffer: this.indirectBuffer } },
         { binding: 5, resource: { buffer: this.visibleBuffer } },
         { binding: 6, resource: hzbView },
+        { binding: 7, resource: { buffer: this.visibleFlagsBuffer } },
       ],
     });
   }
@@ -355,18 +415,20 @@ export class GpuDriven {
 
     this.drawData = new Float32Array(capacity * (DRAW_DATA_BYTES / 4));
     this.boundsData = new Float32Array(capacity * 8);
-    this.indirectData = new Uint32Array(capacity * (INDIRECT_BYTES / 4));
+    this.indirectData = new Uint32Array(capacity * 2 * (INDIRECT_BYTES / 4));
     this.itemBatch = new Uint32Array(capacity);
     this.batchFirst = new Uint32Array(capacity);
     this.batchOrder = new Uint32Array(capacity);
     this.batchMaterial = new Uint16Array(capacity);
     this.batchSize = new Uint32Array(capacity);
     this.transparentItems = new Uint32Array(capacity);
-    this.batchStaging = new ArrayBuffer(this.alignment * (capacity + 1));
+    this.batchStaging = new ArrayBuffer(this.alignment * (capacity * 2 + 1));
+    this._zeroFlags = new Uint32Array(capacity);
 
     for (const buffer of [
       this.drawDataBuffer, this.boundsBuffer, this.itemBatchBuffer, this.batchFirstBuffer,
       this.indirectBuffer, this.visibleBuffer, this.batchOrderBuffer, this.batchBuffer,
+      this.visibleFlagsBuffer,
     ]) buffer.destroy();
 
     this.drawDataBuffer = device.createBuffer({ label: 'draw-data', size: capacity * DRAW_DATA_BYTES, usage: STORAGE });
@@ -374,10 +436,13 @@ export class GpuDriven {
     this.itemBatchBuffer = device.createBuffer({ label: 'item-batch', size: capacity * 4, usage: STORAGE });
     this.batchFirstBuffer = device.createBuffer({ label: 'batch-first', size: capacity * 4, usage: STORAGE });
     this.indirectBuffer = device.createBuffer({
-      label: 'indirect-args', size: capacity * INDIRECT_BYTES,
+      label: 'indirect-args', size: capacity * 2 * INDIRECT_BYTES,
       usage: GPUBufferUsage.INDIRECT | STORAGE,
     });
-    this.visibleBuffer = device.createBuffer({ label: 'visible-items', size: capacity * 4, usage: STORAGE });
+    this.visibleBuffer = device.createBuffer({ label: 'visible-items', size: capacity * 2 * 4, usage: STORAGE });
+    // Fresh and therefore all zero: after a grow, item indices have moved and
+    // last frame's flags describe objects that are no longer at those slots.
+    this.visibleFlagsBuffer = device.createBuffer({ label: 'visible-last-frame', size: capacity * 4, usage: STORAGE });
     this.batchOrderBuffer = device.createBuffer({ label: 'batch-order', size: capacity * 4, usage: STORAGE });
     this.batchBuffer = device.createBuffer({
       label: 'batch-info', size: this.batchStaging.byteLength,
@@ -390,15 +455,22 @@ export class GpuDriven {
     // does the renderer's draw bind group -- which this object does not own.
     // bindHzb builds this if the pyramid has not been bound yet, so growing
     // before the first frame is not an ordering error.
-    if (this._hzbView) this.bindGroup = this._makeBindGroup(this._hzbView);
+    if (this._hzbView) this._rebuildBindGroups();
     this.buffersRevision++;
   }
 
-  /** Rebuild the bind group when the pyramid is recreated on resize. */
+  /** Rebuild both bind groups when the pyramid is recreated on resize. */
   bindHzb(hzbView) {
     if (this._hzbView === hzbView) return;
     this._hzbView = hzbView;
-    this.bindGroup = this._makeBindGroup(hzbView);
+    this._rebuildBindGroups();
+  }
+
+  _rebuildBindGroups() {
+    this.bindGroups = [
+      this._makeBindGroup(this._hzbView, 0),
+      this._makeBindGroup(this._hzbView, 1),
+    ];
   }
 
   /**
@@ -469,20 +541,29 @@ export class GpuDriven {
       this.batchOrder[this.batchFirst[batch] + cursor[batch]++] = i;
     }
 
-    // Per-batch uniform holding that slice's base index.
-    for (let b = 0; b < this.batchCount; b++) {
-      new Uint32Array(this.batchStaging, b * this.alignment, 1)[0] = this.batchFirst[b];
+    // Per-batch uniform holding that slice's base index, once per phase. The
+    // late phase's half of the visible list starts a whole capacity along.
+    for (let phase = 0; phase < 2; phase++) {
+      for (let b = 0; b < this.batchCount; b++) {
+        const slot = phase * this.capacity + b;
+        new Uint32Array(this.batchStaging, slot * this.alignment, 1)[0] =
+          phase * this.capacity + this.batchFirst[b];
+      }
     }
     // The transparent draws' base, always 0: they address the visible list
     // through firstInstance, which a direct draw may set freely.
-    this.transparentBatchSlot = this.batchCount;
+    this.transparentBatchSlot = this.capacity * 2;
     new Uint32Array(this.batchStaging, this.transparentBatchSlot * this.alignment, 1)[0] = 0;
 
     const queue = this.rhi.queue;
     queue.writeBuffer(this.itemBatchBuffer, 0, this.itemBatch, 0, count);
     queue.writeBuffer(this.batchFirstBuffer, 0, this.batchFirst, 0, Math.max(this.batchCount, 1));
     queue.writeBuffer(this.batchOrderBuffer, 0, this.batchOrder, 0, Math.max(this.opaqueCount, 1));
-    queue.writeBuffer(this.batchBuffer, 0, this.batchStaging, 0, this.alignment * (this.batchCount + 1));
+    queue.writeBuffer(this.batchBuffer, 0, this.batchStaging);
+    // Item indices have just been reassigned, so last frame's flags describe
+    // whatever used to occupy those slots. Starting from zero costs one frame
+    // in which everything is found by the late phase, which is correct.
+    queue.writeBuffer(this.visibleFlagsBuffer, 0, this._zeroFlags, 0, Math.max(count, 1));
 
     this._needsFullUpload = true;
     this.sceneRevision = scene.revision;
@@ -492,7 +573,7 @@ export class GpuDriven {
   }
 
   /** Upload this frame's transforms, bounds and reset argument buffer. */
-  update(scene, frustum, hzb, writeDrawData) {
+  update(scene, frustum, hzb, viewProjection, writeDrawData) {
     if (scene.revision !== this.sceneRevision) this.rebuildBatches(scene);
 
     const count = scene.renderableCount;
@@ -530,22 +611,25 @@ export class GpuDriven {
     this._needsFullUpload = false;
     this.stats.uploaded = high >= low ? high - low + 1 : 0;
 
-    // Draw arguments, with instanceCount zeroed. The cull shader raises it with
-    // atomicAdd, so resetting here is what makes the frame idempotent -- forget
-    // it and counts accumulate until every batch draws the whole scene.
-    for (let b = 0; b < this.batchCount; b++) {
-      const primitive = this.batchPrimitive[b];
-      const o = b * 5;
-      this.indirectData[o] = primitive.indexCount;
-      this.indirectData[o + 1] = 0;
-      this.indirectData[o + 2] = 0;
-      this.indirectData[o + 3] = 0;
-      this.indirectData[o + 4] = 0;
+    // Draw arguments, with instanceCount zeroed, for BOTH phases. The cull
+    // shader raises the count with atomicAdd, so resetting here is what makes
+    // the frame idempotent -- forget it and counts accumulate until every batch
+    // draws the whole scene.
+    for (let phase = 0; phase < 2; phase++) {
+      for (let b = 0; b < this.batchCount; b++) {
+        const primitive = this.batchPrimitive[b];
+        const o = (phase * this.capacity + b) * 5;
+        this.indirectData[o] = primitive.indexCount;
+        this.indirectData[o + 1] = 0;
+        this.indirectData[o + 2] = 0;
+        this.indirectData[o + 3] = 0;
+        this.indirectData[o + 4] = 0;
+      }
     }
 
     const planeFloats = FRUSTUM_PLANE_COUNT * 4;
     this.cullParamsF32.set(frustum, 0);
-    this.cullParamsF32.set(this.lastViewProjection, planeFloats);
+    this.cullParamsF32.set(viewProjection, planeFloats);
     this.cullParamsU32[planeFloats + 16] = count;
     this.cullParamsU32[planeFloats + 17] = hzb.levelCount;
     this.cullParamsF32[planeFloats + 18] = hzb.width;
@@ -563,24 +647,43 @@ export class GpuDriven {
         this.boundsBuffer, low * 32, this.boundsData, low * 8, span * 8,
       );
     }
-    queue.writeBuffer(this.indirectBuffer, 0, this.indirectData, 0, Math.max(this.batchCount, 1) * 5);
-    queue.writeBuffer(this.cullParamsBuffer, 0, this.cullParams);
+    // Both halves: phase 1 writes at capacity, so a partial write would leave
+    // its counts at whatever the previous frame accumulated.
+    queue.writeBuffer(this.indirectBuffer, 0, this.indirectData);
+
+    // One params slot per phase. Only the last four words differ, but writing
+    // whole slots keeps the two descriptions independent rather than sharing a
+    // prefix that a future field could quietly break.
+    for (let phase = 0; phase < 2; phase++) {
+      this.cullParamsU32[planeFloats + 20] = phase;
+      this.cullParamsU32[planeFloats + 21] = phase * this.capacity;
+      this.cullParamsU32[planeFloats + 22] = phase * this.capacity;
+      queue.writeBuffer(this.cullParamsBuffer, phase * this.cullParamsStride, this.cullParams);
+    }
     this.itemCount = count;
   }
 
-  addCullPass(graph, { boundsResource, indirectResource, visibleResource }) {
+  /**
+   * One cull dispatch.
+   *
+   * The late phase declares a read of the pyramid, which is what orders it
+   * after the early draw that produced the depth the pyramid was built from.
+   * Without that edge the topological sort is free to run both culls first,
+   * and the late one would test against an empty pyramid.
+   */
+  addCullPass(graph, { phase, boundsResource, indirectResource, visibleResource, hzbResources = [] }) {
     graph.addPass({
-      name: 'gpu-cull',
+      name: phase === 0 ? 'cull:early' : 'cull:late',
       type: 'compute',
-      reads: [boundsResource],
+      reads: [boundsResource, ...hzbResources],
       writes: [indirectResource, visibleResource],
-      execute: this._cullExecute,
+      execute: this._cullExecute[phase],
     });
   }
 
-  _dispatch(pass) {
+  _dispatch(pass, phase) {
     pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
+    pass.setBindGroup(0, this.bindGroups[phase]);
     pass.dispatchWorkgroups(Math.ceil(this.itemCount / WORKGROUP_SIZE));
   }
 
@@ -602,8 +705,13 @@ export class GpuDriven {
     );
   }
 
-  batchOffset(batch) {
-    return batch * this.alignment;
+  /** Byte offset of one batch's draw arguments, in the given phase's half. */
+  indirectOffset(batch, phase = 0) {
+    return (phase * this.capacity + batch) * INDIRECT_BYTES;
+  }
+
+  batchOffset(batch, phase = 0) {
+    return (phase * this.capacity + batch) * this.alignment;
   }
 
   destroy() {

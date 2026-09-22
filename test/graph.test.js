@@ -380,19 +380,16 @@ test('describe() reports the plan, including what was culled', () => {
   assert.match(description, /dead.*culled/);
 });
 
-// ------------------------------------------------- write-after-read limits
+// ------------------------------------------------------ repeated writes
 
-console.log('\nwrite-after-read');
+console.log('\nrepeated writes');
 
-test('writing a texture a later pass reads is reported as a cycle', () => {
-  // A KNOWN LIMITATION, pinned here on purpose. Real frame graphs version
-  // resources -- every write produces a new version and each read binds to a
-  // specific one -- which lets a pass overwrite something an earlier-ordered
-  // pass read. This graph has no versions, so it cannot order that and says so
-  // rather than picking an order that is silently wrong.
-  //
-  // It is what stopped bloom from accumulating in place: the upsample wanted to
-  // blend into a texture the next downsample had already read.
+test('a pass may overwrite something an earlier pass read', () => {
+  // Resource versioning, positional: a resource written more than once is a
+  // SEQUENCE of values, and a read means the one current where the read was
+  // declared. Without that, 'present' would edge from 'overwrite' as well as
+  // 'produce' and there would be no order at all -- which is what this graph
+  // used to report as a cycle.
   const graph = new RenderGraph(fakeRhi());
   graph.begin();
   const surface = graph.importTexture('surface', {});
@@ -403,10 +400,53 @@ test('writing a texture a later pass reads is reported as a cycle', () => {
   graph.addPass({
     name: 'consume', reads: [shared], color: [{ resource: other, clear: 0 }], execute() {},
   });
-  // Wants to run after 'consume', but writes what 'consume' reads.
+  // Runs after 'consume', and writes what 'consume' read.
   graph.addPass({ name: 'overwrite', reads: [other], color: [{ resource: shared }], execute() {} });
   graph.addPass({
     name: 'present', reads: [shared], color: [{ resource: surface, clear: 0 }], execute() {},
+  });
+  graph.compile();
+
+  const { ran, encoder } = recorder();
+  graph.execute(encoder);
+  assert.deepEqual(ran.map((d) => d.label), ['produce', 'consume', 'overwrite', 'present']);
+  assert.equal(ran[2].colorAttachments[0].loadOp, 'load',
+    'overwrite adds to what produce wrote, so it must not clear');
+});
+
+test('a read still finds its producer when the producer is declared later', () => {
+  // The single-writer rule is unchanged, and it is the one that matters most:
+  // declaration order must not be load-bearing where there is nothing to
+  // sequence.
+  const graph = new RenderGraph(fakeRhi());
+  graph.begin();
+  const surface = graph.importTexture('surface', {});
+  const data = graph.createTexture('data', COLOR);
+
+  graph.addPass({
+    name: 'consumer', reads: [data], color: [{ resource: surface, clear: 0 }], execute() {},
+  });
+  graph.addPass({ name: 'producer', color: [{ resource: data, clear: 0 }], execute() {} });
+  graph.compile();
+
+  const { ran, encoder } = recorder();
+  graph.execute(encoder);
+  assert.deepEqual(ran.map((d) => d.label), ['producer', 'consumer']);
+});
+
+test('two passes each waiting on the other is still a cycle', () => {
+  // What versioning does not and cannot fix: a mutual dependency through two
+  // single-writer resources has no valid order in either direction.
+  const graph = new RenderGraph(fakeRhi());
+  graph.begin();
+  const surface = graph.importTexture('surface', {});
+  const x = graph.createTexture('x', COLOR);
+  const y = graph.createTexture('y', COLOR);
+
+  graph.addPass({ name: 'a', reads: [y], color: [{ resource: x, clear: 0 }], execute() {} });
+  graph.addPass({ name: 'b', reads: [x], color: [{ resource: y, clear: 0 }], execute() {} });
+  graph.addPass({
+    name: 'present', reads: [x], color: [{ resource: surface, clear: 0 }], execute() {},
   });
 
   assert.throws(() => graph.compile(), /cycle/);

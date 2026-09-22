@@ -14,7 +14,7 @@
 // one. Frames whose turn comes up while every buffer is still in flight are
 // skipped rather than waited on.
 //
-// Two caveats worth knowing before reading anything into a number here.
+// Three caveats worth knowing before reading anything into a number here.
 //
 // Browsers quantise these timestamps. Chrome rounds to 65536ns, so a pass
 // shorter than 0.066ms reads as either 0 or one whole quantum and never as its
@@ -24,6 +24,14 @@
 //
 // And a "pass duration" on a GPU that overlaps work is a span, not an exclusive
 // cost. Adjacent spans can sum to more than the frame took.
+//
+// And the one that matters most in practice: these numbers are not comparable
+// ACROSS runs. The same build measured twice a minute apart came back at
+// 0.588ms and 1.50ms for the same scene, because GPU clocks and whatever else
+// the machine is doing dominate. Within a frame the shares are far steadier --
+// the forward pass was 53% and 50% of those two totals -- so this is a tool for
+// finding which pass dominates, not for proving a change made the frame faster.
+// Doing that honestly needs both versions measured in one process, interleaved.
 
 const QUERIES_PER_PASS = 2;
 const NS_PER_MS = 1e6;
