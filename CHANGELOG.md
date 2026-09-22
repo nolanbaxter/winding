@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-22
+
+**Morph targets**, the last deformation glTF describes that this engine did
+not do. Four steps, each verified before the next depended on it.
+
+Minor rather than patch because the vertex path and the animation sampler
+both changed behaviour, but no binary layout moved: `DrawData` is still 128
+bytes -- the three morph words sit in padding `paletteOffset` already left --
+and the vertex format is untouched, because deltas are a storage buffer the
+shader indexes rather than an attribute per target.
+
+Two bugs came out of building it, and both predate it. One had been live
+since skinning shipped in 0.5.0.
+
 ### Added
 
 - **Morph targets.** Per-target vertex deltas and per-instance weights, read,
@@ -635,7 +649,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/nolanbaxter/winding/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nolanbaxter/winding/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nolanbaxter/winding/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nolanbaxter/winding/compare/v0.3.0...v0.3.1
