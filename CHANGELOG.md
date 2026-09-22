@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A worker could run one dispatch's chunks with another's arguments.** The
+  chunk cursor was a plain counter reset per dispatch and claimed with an
+  atomicAdd, which made a claim anonymous. A thread descheduled between
+  reading its dispatch's arguments and claiming could wake into the NEXT
+  dispatch, take its chunks, run them with the PREVIOUS dispatch's arguments,
+  and then credit the new dispatch's completion counter -- so the dispatch
+  returned believing work was done that its own handler never touched.
+
+  `TransformStore.updateParallel` dispatches once per depth level, back to
+  back, with a different base each time. That is exactly the shape that
+  triggers it: a range of the order array composed against the wrong level,
+  leaving world matrices at whatever was in the buffer. Silent.
+
+  The cursor now carries the epoch in its high 16 bits and is claimed by
+  compare-exchange, so a claim belongs to a dispatch and a stale thread takes
+  nothing rather than stealing live work. It also counts chunks rather than
+  items, which means it can no longer be advanced past the end at all.
+
+  Found only because the fix below made the suite run parallel for the first
+  time. Reproduced at 3 failures in 8 runs, confirmed by draining between
+  dispatches (8 in 8), and verified after the fix at 40 in 40 -- and 0 in 40
+  with the tag check removed.
+
+- **The parallel job suite had never run a worker.** It spawned them
+  correctly and then dispatched in the same synchronous run, so
+  `readyCount` -- which a worker raises by POSTING A MESSAGE, and a message
+  cannot reach a thread that has not returned to its event loop -- was still
+  zero every time. Fourteen dispatches, every one on the inline branch.
+
+  Nothing failed, and nothing could have: the serial fallback is
+  bit-identical to the parallel path by design, which is what makes results
+  useless as evidence about which one ran. The atomics, the cursor claiming
+  and the epoch wakeup were the largest unverified surface in the codebase,
+  and the suite reported them green while one of them was broken.
+
+### Added
+
+- **`JobSystem.ready()`**, resolving true once every worker has installed its
+  handlers and false if dispatch will run inline anyway. Bounded by the same
+  deadline a lost worker gets mid-dispatch, because it is the same question.
+  The engine deliberately does not await it -- a worker that has not checked
+  in just means the next few dispatches run on the calling thread -- but
+  anything that must know the parallel path was exercised has no other way to
+  ask.
+
+- **`JobSystem.stats`**, counting dispatches by branch. Whether a dispatch
+  went parallel was otherwise unobservable, which is precisely how this went
+  unnoticed for the life of the project.
+
+- **Proof of parallelism in the suite**, rather than an assumption of it. Each
+  thread signs the items it processed, and the check asserts more than one
+  signature appears, that no item is unsigned, and that the dispatching thread
+  is among them. The job it uses spends real time per chunk on purpose: with a
+  trivial handler the dispatching thread can legally claim every chunk before
+  a worker finishes waking, which would make the assertion flaky rather than
+  wrong.
+
+  Measured across the change: before, `{parallel: 0, inline: 1}` and one
+  thread; after, `{parallel: 1}` with four threads taking 2000 items each and
+  8ms of wall time against ~32ms of serial work.
+
+### Changed
+
+- The chunk cursor counts chunks rather than items, so its value is a chunk
+  index and no longer overshoots. A dispatch with more than 65535 chunks has
+  its chunk size raised to fit the index beside the epoch tag -- a chunk size
+  is a performance hint, and doing more work per claim cannot make a result
+  wrong, where refusing the caller's number would.
+
 ## [0.6.1] - 2026-09-22
 
 Four files that loaded wrong rather than failing. All four were in the

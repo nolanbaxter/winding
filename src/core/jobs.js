@@ -9,10 +9,19 @@
 //   a single atomic cursor, and every thread repeatedly claims the next chunk
 //
 // A thread that gets unlucky work simply claims fewer chunks. There is no
-// queue, no stealing, no per-worker state, and the only synchronisation is one
-// atomicAdd per chunk. Chunks are sized so that cost dominates the atomic --
-// too small and the cursor becomes the bottleneck, too large and the last
-// chunk decides when everyone finishes.
+// queue, no stealing, and no per-worker state. Chunks are sized so that their
+// cost dominates the atomic -- too small and the cursor becomes the
+// bottleneck, too large and the last chunk decides when everyone finishes.
+//
+// THE CURSOR CARRIES THE EPOCH, and that is not decoration. It was a plain
+// counter reset per dispatch, claimed with one atomicAdd, and that made a
+// claim anonymous: a worker descheduled between reading its dispatch's
+// parameters and claiming could wake into the NEXT dispatch, take its chunks,
+// run them with the PREVIOUS dispatch's arguments, and then credit the new
+// dispatch's completion counter -- which returned believing work was done that
+// its own handler never touched. Tagging the cursor makes a claim belong to a
+// dispatch, so a stale thread's compare-exchange simply fails and it claims
+// nothing. The cost is a CAS where there was an add.
 //
 // THE MAIN THREAD PARTICIPATES. It has to: a browser's main thread is not
 // allowed to block in Atomics.wait, so it cannot simply hand work off and
@@ -28,7 +37,12 @@ import { sharedInt32Array, sharedMemoryAvailable } from './shared.js';
 
 // Control block layout. Int32Array so Atomics can operate on it.
 const EPOCH = 0;       // bumped per dispatch; what workers wait on
-const CURSOR = 1;      // next unclaimed item
+// (epoch << 16) | next unclaimed CHUNK. Tagged so a claim cannot cross a
+// dispatch boundary; see the header. Chunks rather than items because the
+// index has to fit beside the tag, and because it can then never overshoot.
+const CURSOR = 1;
+const CURSOR_TAG = 0xffff0000 | 0;
+const CURSOR_INDEX = 0xffff;
 const COMPLETED = 2;   // items finished
 const ITEM_COUNT = 3;
 const CHUNK = 4;
@@ -97,12 +111,34 @@ export class JobSystem {
     // not listening would otherwise claim nothing, and the dispatcher would
     // wait forever for work nobody is doing.
     this.readyCount = 0;
+
+    /**
+     * Which path each dispatch took.
+     *
+     * Not instrumentation for its own sake: whether a dispatch went parallel
+     * is otherwise UNOBSERVABLE. The serial fallback is bit-identical by
+     * construction -- that is the whole point of it -- so no assertion about
+     * results can tell the two apart, and a suite that dispatched only
+     * inline would pass every check it had while testing nothing it claimed
+     * to. That is exactly what this one did.
+     */
+    this.stats = { parallel: 0, inline: 0 };
+
+    // Resolved once every worker has checked in. Created here rather than
+    // lazily because the messages can arrive before anyone asks.
+    this._onReady = null;
+    this._ready = this.parallel
+      ? new Promise((resolve) => { this._onReady = resolve; })
+      : Promise.resolve();
+
     if (this.parallel) {
       for (let i = 0; i < workerCount; i++) {
         const worker = createWorker();
         const onMessage = (event) => {
           const data = event?.data ?? event;
-          if (data?.type === 'ready') this.readyCount++;
+          if (data?.type !== 'ready') return;
+          this.readyCount++;
+          if (this.readyCount >= this.workerCount) this._onReady?.();
         };
         if (worker.addEventListener) worker.addEventListener('message', onMessage);
         else worker.on?.('message', onMessage);
@@ -127,6 +163,40 @@ export class JobSystem {
     for (const worker of this.workers) {
       worker.postMessage({ type: 'init', control: this.control.buffer, buffers });
     }
+  }
+
+  /**
+   * Resolve once every worker has loaded its module and installed its
+   * handlers -- true if they did, false if dispatch will run inline anyway.
+   *
+   * NOT for the frame loop. The engine deliberately does not await this: a
+   * worker that has not checked in yet simply means the next few dispatches
+   * run on the calling thread, which is correct and invisible. What needs it
+   * is anything that must know the parallel path was actually exercised,
+   * because readiness arrives as a MESSAGE and a message cannot be delivered
+   * to a thread that has not returned to its event loop. A caller that
+   * constructs a JobSystem and dispatches in the same synchronous run will
+   * never see a single worker, however many it spawned.
+   *
+   * Bounded by the same deadline a lost worker gets mid-dispatch, because it
+   * is the same question -- a worker that has not answered in that long is
+   * not coming -- and an unbounded wait here would hang a test runner rather
+   * than fail it.
+   */
+  ready() {
+    if (!this.parallel) return Promise.resolve(false);
+    if (this.readyCount >= this.workerCount) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), SPIN_DEADLINE_MS);
+      // Node keeps the process alive for a pending timer; a browser does not
+      // have this method at all.
+      timer?.unref?.();
+      this._ready.then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
   }
 
   /** Register a job body. Must be registered identically on every thread. */
@@ -154,16 +224,27 @@ export class JobSystem {
     if (!this.parallel
       || this.readyCount < this.workerCount
       || itemCount < this.parallelThreshold) {
+      this.stats.inline++;
       handler(0, itemCount, arg0, arg1);
       return itemCount;
     }
 
+    this.stats.parallel++;
     const control = this.control;
-    const chunk = chunkSize > 0
+    let chunk = chunkSize > 0
       ? chunkSize
       : Math.max(32, Math.ceil(itemCount / (this.workerCount + 1) / 4));
 
-    Atomics.store(control, CURSOR, 0);
+    // The chunk INDEX shares a word with the epoch tag, so there is a ceiling
+    // on how many chunks a dispatch can have. Raised rather than refused: a
+    // chunk size is a performance hint, and doing more work per claim cannot
+    // make a result wrong, where rejecting the caller's number would.
+    if (Math.ceil(itemCount / chunk) > CURSOR_INDEX) {
+      chunk = Math.ceil(itemCount / CURSOR_INDEX);
+    }
+
+    const epoch = Atomics.load(control, EPOCH) + 1;
+    Atomics.store(control, CURSOR, epochTag(epoch));
     Atomics.store(control, COMPLETED, 0);
     Atomics.store(control, ITEM_COUNT, itemCount);
     Atomics.store(control, CHUNK, chunk);
@@ -174,11 +255,11 @@ export class JobSystem {
     // Publishing the epoch last is what makes the rest of the block visible:
     // a worker only reads the parameters after observing a new epoch, and
     // Atomics give that pairing the ordering guarantee it needs.
-    Atomics.add(control, EPOCH, 1);
+    Atomics.store(control, EPOCH, epoch);
     Atomics.notify(control, EPOCH);
 
     // This thread is a worker too.
-    runChunks(control, handler, arg0, arg1);
+    runChunks(control, handler, arg0, arg1, epoch);
 
     // Spin rather than wait: blocking is forbidden on a browser's main thread,
     // and by this point the remaining work is at most one chunk per worker.
@@ -212,6 +293,11 @@ export class JobSystem {
   }
 }
 
+/** The high half of the cursor word, identifying which dispatch owns it. */
+export function epochTag(epoch) {
+  return (epoch & CURSOR_INDEX) << 16;
+}
+
 /**
  * The loop every thread runs, including the dispatching one.
  *
@@ -219,14 +305,36 @@ export class JobSystem {
  * cursor says what has been handed out; COMPLETED says what is actually done.
  * Waiting on the cursor instead would return while the last chunk was still
  * being written.
+ *
+ * `epoch` is which dispatch the caller believes it is serving. A claim is a
+ * compare-exchange against the cursor's tag, so a thread carrying a stale
+ * epoch takes nothing rather than stealing the current dispatch's work and
+ * running it with the wrong arguments. Defaults to 0 for direct callers that
+ * drive the control block themselves.
+ *
+ * The tag is the epoch's low 16 bits, so a thread would have to be stranded
+ * across exactly 65536 dispatches to alias a live one. At a handful of
+ * dispatches per frame that is minutes of being descheduled, by which point
+ * the spin deadline has already declared the workers lost.
  */
-export function runChunks(control, handler, arg0, arg1) {
+export function runChunks(control, handler, arg0, arg1, epoch = 0) {
   const itemCount = Atomics.load(control, ITEM_COUNT);
   const chunk = Atomics.load(control, CHUNK);
+  const tag = epochTag(epoch);
 
   for (;;) {
-    const start = Atomics.add(control, CURSOR, chunk);
+    const cursor = Atomics.load(control, CURSOR);
+    // A different dispatch owns the cursor now. Nothing here belongs to this
+    // thread, and the loop it returns to will observe the new epoch.
+    if ((cursor & CURSOR_TAG) !== tag) return;
+
+    const index = cursor & CURSOR_INDEX;
+    const start = index * chunk;
     if (start >= itemCount) return;
+
+    // Lost the race to another thread, or to a new dispatch. Re-read and
+    // decide again rather than assuming either.
+    if (Atomics.compareExchange(control, CURSOR, cursor, tag | (index + 1)) !== cursor) continue;
 
     const end = Math.min(start + chunk, itemCount);
     handler(start, end, arg0, arg1);
@@ -250,7 +358,14 @@ export function workerLoop(control, handlers) {
     const handler = handlers.get(kind);
     if (!handler) continue;
 
-    runChunks(control, handler, Atomics.load(control, ARG0), Atomics.load(control, ARG1));
+    // `seen` is the dispatch these arguments came from. If a new one starts
+    // before this thread claims anything, the tag check inside runChunks is
+    // what keeps it from taking work it would run with the wrong arguments.
+    runChunks(
+      control, handler,
+      Atomics.load(control, ARG0), Atomics.load(control, ARG1),
+      seen,
+    );
   }
 }
 
