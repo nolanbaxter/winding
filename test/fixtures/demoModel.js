@@ -314,7 +314,7 @@ export async function buildDemoGLB({ arms = 6, glass = 3 } = {}) {
  * order, the joint-to-entity map or the vertex buffer shows up as a deformed
  * or vanished mesh rather than as something subtly off.
  */
-export function buildRiggedGLB() {
+export function buildRiggedGLB({ morphed = false } = {}) {
   const positions = Float32Array.from([
     -1, 0, 0, 1, 0, 0, -1, 2, 0, 1, 2, 0,
   ]);
@@ -333,7 +333,14 @@ export function buildRiggedGLB() {
     1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
   ]);
 
-  const { bytes, views } = packBuffer([positions, indices, normals, uvs, joints, weights, inverseBind]);
+  // One morph target when asked for: the top edge forward by 3, on an axis
+  // neither the skeleton nor the other check touches, so the two corrections
+  // to the bounds stay distinguishable.
+  const target = Float32Array.from([0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 3]);
+
+  const arrays = [positions, indices, normals, uvs, joints, weights, inverseBind];
+  if (morphed) arrays.push(target);
+  const { bytes, views } = packBuffer(arrays);
 
   return encodeGLB({
     asset: { version: '2.0' },
@@ -347,14 +354,17 @@ export function buildRiggedGLB() {
       { bufferView: 4, componentType: 5123, count: 4, type: 'VEC4' },
       { bufferView: 5, componentType: 5126, count: 4, type: 'VEC4' },
       { bufferView: 6, componentType: 5126, count: 2, type: 'MAT4' },
+      ...(morphed ? [{ bufferView: 7, componentType: 5126, count: 4, type: 'VEC3' }] : []),
     ],
     materials: [{ pbrMetallicRoughness: { baseColorFactor: [0.8, 0.3, 0.3, 1] } }],
     meshes: [{
       name: 'rigged',
+      weights: morphed ? [0] : undefined,
       primitives: [{
         attributes: { POSITION: 0, NORMAL: 2, TEXCOORD_0: 3, JOINTS_0: 4, WEIGHTS_0: 5 },
         indices: 1,
         material: 0,
+        targets: morphed ? [{ POSITION: 7 }] : undefined,
       }],
     }],
     skins: [{ joints: [1, 2], inverseBindMatrices: 6 }],

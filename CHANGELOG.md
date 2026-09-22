@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Morph targets.** Per-target vertex deltas and per-instance weights, read,
+  stored, animated, deformed and bounded. `targets`, `mesh.weights`,
+  `node.weights` and `weights` animation channels all come through.
+
+  One vertex shader does both deformations, in the spec's order: morph first,
+  since a target is authored against the bind pose, then the joint palette.
+  Neither adds a pipeline permutation -- the target count is draw data and
+  zero means the loop does not run, so a static mesh runs the same shader and
+  pays a compare.
+
+  Weights are per instance and handed out live, so `node.weights[0] = 0.4`
+  works and two faces sharing a mesh are still one batch and one draw call.
+  That is the one live view `node.js` allows: the rule against them exists
+  because a write that skips a setter leaves a stale dirty flag, and weights
+  have no hierarchy and no flag.
+
+  Deltas are stored VERTEX-MAJOR in one engine-wide arena. Target-major is
+  the obvious transcription of the file and wrong twice: a vertex shader reads
+  one vertex and every target, and the flat-shading unweld reorders vertices.
+  The stride is decided once per primitive at the widest any of its targets
+  needs, so a positions-only rig stores three floats per target rather than
+  nine.
+
+  Bounds pad by `sum(|weight| * extent)`. The absolute value is load-bearing:
+  glTF does not bound weights to [0,1], a negative weight is how "the opposite
+  of this expression" is authored, and a signed sum would SHRINK the box and
+  cull geometry that is on screen.
+
+- **A GPU check that verifies a vertex position.** The morph check slices the
+  `Morphed` struct and `applyMorph` out of `PBR_SHADER` into a compute shader
+  bound to the same delta buffer, weight buffer and draw data the frame just
+  used, and reads four vertices back. Every other GPU check verifies the
+  absence of errors; this one verifies arithmetic, and it is what found the
+  fix below.
+
+### Fixed
+
+- **`GpuDriven._grow` left `drawDataU32` viewing the old buffer.** Half of
+  `DrawData` is u32, so every integer write after a grow went into a detached
+  array -- silently, because an index inside the old length writes where
+  nothing is uploaded from and an index past it writes nowhere at all. Every
+  u32 field read as zero on the GPU.
+
+  Live since skinning shipped in 0.5.0: any skinned instance added after the
+  draw buffer grew used palette offset 0, which is a second character wearing
+  the first one's pose. Both views are now allocated in one place.
+
+- **A four-target `weights` channel was slerped like a quaternion.** The
+  sampler chose between lerp and slerp by component count, which was the same
+  question as "is this a rotation" until morph targets existed. Four
+  independent sliders were swept through a sphere and normalized to unit
+  length -- every number wrong, nothing thrown. It asks the path now.
+
+- **The README claimed glTF import handled "Not skins or morph targets"** in
+  the same sentence that listed skins as supported. A fragment left from
+  before skinning landed.
+
+### Changed
+
+- Skinned and morphed renderables are picked at their bounding box, even with
+  `retainGeometry`. The retained triangles are the undeformed mesh, so a hit
+  on them reports where a vertex was authored rather than where it is.
+  Unconditional rather than "when a weight is nonzero": precision that
+  switches on and off as a clip plays is a worse contract than precision that
+  is honestly coarse.
+
+
 ## [0.5.0] - 2026-09-22
 
 **Skinning.** The largest single item the engine was missing, done in four

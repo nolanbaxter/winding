@@ -14,7 +14,7 @@
 
 import { Winding, Camera } from '../src/winding.js';
 import { shaderErrors } from '../src/rhi/shader.js';
-import { NOT_BATCHED } from '../src/render/gpudriven.js';
+import { NOT_BATCHED, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
 import { buildDemoGLB, buildRiggedGLB, buildMorphedGLB } from './fixtures/demoModel.js';
 import { PBR_SHADER } from '../src/render/shaders/pbr.js';
 
@@ -442,6 +442,61 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     morphNode.destroy();
     return `${store.deltaCount} delta floats, 2 weights, vertex 3 at `
       + `(${got[9].toFixed(1)}, ${got[10].toFixed(1)}), bounds top ${top.toFixed(1)}`;
+  });
+
+  await step('a mesh that is both skinned and morphed gets both', async () => {
+    // The two deformations meet in one vertex shader and one bounding box, and
+    // neither the shader variant nor the batch key says anything about morphs.
+    // So this is the check that they compose: a skinned pipeline reading morph
+    // words, and a box that grew for the joint AND for the weight.
+    const both = await engine.load(buildRiggedGLB({ morphed: true }));
+    const bothNode = scene.add(both);
+    const index = scene.renderableCount - 1;
+
+    if (scene.renderableSkin[index] < 0) throw new Error('not registered as skinned');
+    if (scene.renderableMorph[index] < 0) throw new Error('not registered as morphed');
+
+    // Pose a joint, leaving every weight at zero.
+    const skin = scene.skins[scene.renderableSkin[index]];
+    scene.transforms.setPosition(skin.joints[1], 0, 12, 0);
+    engine.renderFrame(scene, camera);
+    await engine.rhi.device.queue.onSubmittedWorkDone();
+
+    const posedTop = scene.worldMax[index * 3 + 1];
+    const restingFront = scene.worldMax[index * 3 + 2];
+    if (!(posedTop > 12)) {
+      throw new Error(`bounds did not follow the joint: top is ${posedTop.toFixed(2)}`);
+    }
+
+    // Now the weight, on an axis the skeleton did not touch.
+    bothNode.weights[0] = 1;
+    engine.renderFrame(scene, camera);
+    await engine.rhi.device.queue.onSubmittedWorkDone();
+
+    const morphedFront = scene.worldMax[index * 3 + 2];
+    if (Math.abs(morphedFront - restingFront - 3) > 0.01) {
+      throw new Error(
+        `the weight did not reach the posed box: front was ${restingFront.toFixed(2)}, `
+        + `now ${morphedFront.toFixed(2)}, expected +3`,
+      );
+    }
+    if (!(scene.worldMax[index * 3 + 1] > posedTop)) {
+      throw new Error('the joint correction was lost when the morph one was applied');
+    }
+
+    // And the draw data carries both, on a batch the renderer calls skinned.
+    const gpu = engine.renderer.gpu;
+    const word = index * (DRAW_DATA_BYTES / 4);
+    const targets = gpu.drawDataU32[word + 31] & 0xffff;
+    if (targets !== 1) throw new Error(`draw data says ${targets} targets, expected 1`);
+
+    let skinnedBatches = 0;
+    for (let b = 0; b < gpu.batchCount; b++) if (gpu.batchSkinned[b]) skinnedBatches++;
+    if (skinnedBatches === 0) throw new Error('nothing batched as skinned');
+
+    bothNode.destroy();
+    return `skinned batch with ${targets} target, box top ${posedTop.toFixed(1)}, `
+      + `front ${restingFront.toFixed(1)} -> ${morphedFront.toFixed(1)}`;
   });
 
   await step('order-independent transparency resolves into the scene', async () => {

@@ -133,9 +133,10 @@ camera turns), texel snapping, normal-offset bias, front-face culling.
 light is split-sum, baked at startup into irradiance and prefiltered cubemaps; the BRDF term is an
 analytic polynomial rather than a lookup texture, which removes a texture and a generation pass.
 
-**glTF 2.0 import.** Geometry, materials, images, skins and animations, including byte-strided and
-normalized accessors, sparse accessors, generated tangents, both UV sets with per-texture
-`texCoord`, and vertex colours. Not skins or morph targets.
+**glTF 2.0 import.** Geometry, materials, images, skins, morph targets and animations, including
+byte-strided and normalized accessors, sparse accessors, generated tangents, both UV sets with
+per-texture `texCoord`, and vertex colours. Not cameras or KHR extensions -- a document that
+*requires* an extension is refused rather than loaded into geometry that is quietly wrong.
 
 **Animation.** All three glTF interpolation modes — LINEAR, STEP and CUBICSPLINE — with rotations
 slerped rather than lerped. Playback state is per instance, so two copies of one asset play the same
@@ -149,6 +150,20 @@ model.play('Walk', { loop: true, speed: 1 });
 `engine.run` advances every clip before composition, so there is no tick to wire up. Sampling writes
 through the same setters a user would, which is what makes an animated node dirty its transform and
 reach the GPU like any other move.
+
+**Skinning and morph targets.** Both deformations, in one vertex shader, applied in the spec's
+order -- morph first, since a target is authored against the bind pose, then the joint palette.
+Neither adds a pipeline permutation: a mesh with no targets runs the same shader and skips the loop.
+Weights are per instance and live, so two faces sharing a mesh are still one draw call:
+
+```js
+head.weights[0] = 0.4;            // or let a clip's weights channel drive them
+```
+
+Bounds follow both. A deforming mesh moves its vertices without moving its model matrix, so a box
+built from the authored one would cull a character with its arm on screen: skinned bounds are a
+union of joint spheres, and morph padding is the weighted reach of every target, summed on the
+absolute value because glTF does not bound weights to [0,1].
 
 **Picking.** `scene.pick(camera, x, y, width, height)` returns the nearest renderable under a
 point on the canvas. By default it tests the world bounding boxes the culler already maintains, so
@@ -183,8 +198,9 @@ giving up the rest of the frame. There is never a wall, only a floor.
 
 These are real and currently unaddressed.
 
-- **No morph targets.** Skinning is in; morph targets are a separate mechanism -- per-target vertex
-  deltas and per-instance weights -- and a `weights` animation channel is still dropped on import.
+- **Deforming geometry is picked at its bounding box.** Skinned and morphed meshes answer at the
+  box even with `retainGeometry`, because the retained triangles are the undeformed mesh. Exact
+  picking would mean deforming them per click.
 - **One clip at a time per instance.** Cross-fading needs a weight per channel and somewhere to
   accumulate partial poses, which is a different data structure than the player has.
 - **No transparency path is exact per fragment.** Sorting is exact for separated convex objects and
