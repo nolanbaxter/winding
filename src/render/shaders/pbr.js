@@ -58,9 +58,19 @@ struct DrawData {
   model         : mat4x4<f32>,    //   0
   normalMatrix  : mat3x3<f32>,    //  64   occupies 48 bytes
   // Where this instance's joint matrices begin. Zero and unread for anything
-  // not skinned. The struct rounds to 128 either way: mat3x3 aligns to 16.
+  // not skinned.
   paletteOffset : u32,            // 112
-};                                // 128
+  // Where this PRIMITIVE's morph deltas begin, as a float index into one
+  // engine-wide arena.
+  morphBase     : u32,            // 116
+  // Where this INSTANCE's weights begin. Two faces sharing a mesh share
+  // morphBase and differ here, which is what lets them share a draw call.
+  morphWeights  : u32,            // 120
+  // Target count in the low 16 bits, floats per target per vertex in the high
+  // 16. Packed because splitting them would push this struct to 144 bytes for
+  // twelve bits; see packMorphCountStride in render/morph.js.
+  morphCount    : u32,            // 124
+};                                // 128, exactly: mat3x3 aligns the struct to 16
 
 /** The only thing still bound per draw: where this batch's slice begins. */
 struct Batch {
@@ -97,6 +107,10 @@ struct Material {
 // Every skinned instance's joint matrices, end to end. One buffer for the
 // frame, indexed by draw.paletteOffset + the vertex's joint.
 @group(0) @binding(11) var<storage, read> palette       : array<mat4x4<f32>>;
+// Every morphed primitive's target deltas, end to end. Static after load.
+@group(0) @binding(12) var<storage, read> morphDeltas   : array<f32>;
+// Every morphed instance's weights, rebuilt each frame.
+@group(0) @binding(13) var<storage, read> morphWeights  : array<f32>;
 
 @group(2) @binding(0) var<uniform> material     : Material;
 @group(2) @binding(1) var          baseColorMap : texture_2d<f32>;
@@ -119,9 +133,74 @@ struct VertexOut {
   @location(6)       color    : vec4<f32>,
 };
 
+
+/**
+ * The morphed vertex: the authored one plus every target's delta, weighted.
+ *
+ * Applied BEFORE skinning, which is the order glTF specifies and the only one
+ * that makes sense -- a target is authored against the bind pose, so it has to
+ * move the vertex while the vertex is still in it.
+ *
+ * Zero targets costs one comparison, which is what lets every static mesh in
+ * the engine share this vertex shader instead of a variant of it.
+ *
+ * Per PASS, not per frame: a morphed vertex is deformed again for the early
+ * draw, the late draw and each shadow cascade. The ceiling is a rig with many
+ * targets active at once, and the answer if it is ever reached is to compact
+ * the nonzero weights on the CPU -- a change to what the weight buffer holds,
+ * not to any of this.
+ */
+struct Morphed {
+  position : vec3<f32>,
+  normal   : vec3<f32>,
+  tangent  : vec3<f32>,
+};
+
+fn applyMorph(
+  draw : DrawData, vertex : u32,
+  position : vec3<f32>, normal : vec3<f32>, tangent : vec3<f32>,
+) -> Morphed {
+  var out : Morphed;
+  out.position = position;
+  out.normal = normal;
+  out.tangent = tangent;
+
+  let count = draw.morphCount & 0xffffu;
+  if (count == 0u) { return out; }
+
+  let stride = draw.morphCount >> 16u;
+  // Vertex-major: every target's delta for this vertex sits together, so the
+  // loop below walks forward through memory instead of across the array.
+  var o = draw.morphBase + vertex * count * stride;
+
+  for (var t = 0u; t < count; t = t + 1u) {
+    let w = morphWeights[draw.morphWeights + t];
+    // A weight of zero is the resting state of most targets of most rigs, and
+    // skipping it skips the reads, which are what the loop actually costs.
+    if (w != 0.0) {
+      out.position = out.position
+        + w * vec3<f32>(morphDeltas[o], morphDeltas[o + 1u], morphDeltas[o + 2u]);
+      // A stride wider than 3 means every target of this primitive carries
+      // normals; wider than 6, tangents. Decided once at import, so this is
+      // uniform across the draw rather than a branch that diverges.
+      if (stride > 3u) {
+        out.normal = out.normal
+          + w * vec3<f32>(morphDeltas[o + 3u], morphDeltas[o + 4u], morphDeltas[o + 5u]);
+      }
+      if (stride > 6u) {
+        out.tangent = out.tangent
+          + w * vec3<f32>(morphDeltas[o + 6u], morphDeltas[o + 7u], morphDeltas[o + 8u]);
+      }
+    }
+    o = o + stride;
+  }
+  return out;
+}
+
 @vertex
 fn vs(
   @builtin(instance_index) instance : u32,
+  @builtin(vertex_index)   vertex   : u32,
   @location(0) position : vec3<f32>,
   @location(1) normal   : vec3<f32>,
   @location(2) uv       : vec2<f32>,
@@ -140,16 +219,17 @@ fn vs(
   // draws, which may set firstInstance freely, so they pass the absolute slot
   // there and bind a firstVisible of 0. Both end up indexing the same list.
   let draw = drawData[visibleItems[batch.firstVisible + instance]];
+  let m = applyMorph(draw, vertex, position, normal, tangent.xyz);
 
-  let world = draw.model * vec4<f32>(position, 1.0);
+  let world = draw.model * vec4<f32>(m.position, 1.0);
   out.world = world.xyz;
   out.clip = frame.viewProjection * world;
 
   // Normals use the inverse-transpose; tangents do NOT. A tangent is a
   // direction along the surface, so it transforms like a position delta and
   // the model matrix is correct for it.
-  out.normal = normalize(draw.normalMatrix * normal);
-  out.tangent = normalize((draw.model * vec4<f32>(tangent.xyz, 0.0)).xyz);
+  out.normal = normalize(draw.normalMatrix * m.normal);
+  out.tangent = normalize((draw.model * vec4<f32>(m.tangent, 0.0)).xyz);
 
   // tangent.w is the handedness the importer computed per vertex, which is
   // what keeps mirrored UV islands from lighting inside out.
@@ -281,6 +361,7 @@ fn clusterFor(fragCoord : vec2<f32>, viewDepth : f32) -> u32 {
 @vertex
 fn vsSkinned(
   @builtin(instance_index) instance : u32,
+  @builtin(vertex_index)   vertex   : u32,
   @location(0) position : vec3<f32>,
   @location(1) normal   : vec3<f32>,
   @location(2) uv       : vec2<f32>,
@@ -294,6 +375,9 @@ fn vsSkinned(
 
   let draw = drawData[visibleItems[batch.firstVisible + instance]];
   let base = draw.paletteOffset;
+  // Morph, then skin. A target is authored against the bind pose, so it has to
+  // move the vertex before the joints take it out of that pose.
+  let m = applyMorph(draw, vertex, position, normal, tangent.xyz);
 
   // Linear blend skinning: the weighted sum of matrices, applied once. Summing
   // the MATRICES and transforming once is not the same as transforming four
@@ -304,7 +388,7 @@ fn vsSkinned(
            + palette[base + joints.z] * weights.z
            + palette[base + joints.w] * weights.w;
 
-  let world = skin * vec4<f32>(position, 1.0);
+  let world = skin * vec4<f32>(m.position, 1.0);
   out.world = world.xyz;
   out.clip = frame.viewProjection * world;
 
@@ -313,8 +397,8 @@ fn vsSkinned(
   // it skews normals under non-uniform joint scale, which almost nothing
   // authors and every real-time skinning path accepts.
   let skin3 = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
-  out.normal = normalize(skin3 * normal);
-  out.tangent = normalize(skin3 * tangent.xyz);
+  out.normal = normalize(skin3 * m.normal);
+  out.tangent = normalize(skin3 * m.tangent);
   out.bitangent = cross(out.normal, out.tangent) * tangent.w;
 
   out.uv = uv;

@@ -51,6 +51,12 @@ struct DrawData {
   // correctly and every one after it is misaligned, which is shadows in the
   // wrong places and no error anywhere.
   paletteOffset : u32,
+  // Likewise unread here and likewise mandatory: the forward pass's DrawData
+  // carries them, and a struct that disagreed would read the buffer at the
+  // wrong stride.
+  morphBase     : u32,
+  morphWeights  : u32,
+  morphCount    : u32,
 };
 
 struct Batch {
@@ -63,23 +69,48 @@ struct Batch {
 // rather than the compacted one the cull shader writes.
 @group(0) @binding(2) var<storage, read> order : array<u32>;
 @group(0) @binding(3) var<storage, read> palette : array<mat4x4<f32>>;
+@group(0) @binding(4) var<storage, read> morphDeltas : array<f32>;
+@group(0) @binding(5) var<storage, read> morphWeights : array<f32>;
 @group(3) @binding(0) var<uniform> batch : Batch;
+
+// Positions only. The shadow pass has no fragment stage, so the normal and
+// tangent deltas the forward pass reads would be fetched and discarded.
+fn morphPosition(draw : DrawData, vertex : u32, position : vec3<f32>) -> vec3<f32> {
+  let count = draw.morphCount & 0xffffu;
+  if (count == 0u) { return position; }
+
+  let stride = draw.morphCount >> 16u;
+  var o = draw.morphBase + vertex * count * stride;
+  var moved = position;
+
+  for (var t = 0u; t < count; t = t + 1u) {
+    let w = morphWeights[draw.morphWeights + t];
+    if (w != 0.0) {
+      moved = moved + w * vec3<f32>(morphDeltas[o], morphDeltas[o + 1u], morphDeltas[o + 2u]);
+    }
+    o = o + stride;
+  }
+  return moved;
+}
 
 @vertex
 fn vs(
   @builtin(instance_index) instance : u32,
+  @builtin(vertex_index)   vertex   : u32,
   @location(0) position : vec3<f32>,
 ) -> @builtin(position) vec4<f32> {
   let draw = drawData[order[batch.firstVisible + instance]];
-  return cascade.viewProjection * draw.model * vec4<f32>(position, 1.0);
+  let moved = morphPosition(draw, vertex, position);
+  return cascade.viewProjection * draw.model * vec4<f32>(moved, 1.0);
 }
 
-// The same skinning the forward pass does, for the same reason it has to: a
-// caster that deforms and a shadow that does not is a character walking beside
-// its own silhouette standing still.
+// The same skinning and morphing the forward pass does, for the same reason
+// it has to: a caster that deforms and a shadow that does not is a character
+// walking beside its own silhouette standing still.
 @vertex
 fn vsSkinned(
   @builtin(instance_index) instance : u32,
+  @builtin(vertex_index)   vertex   : u32,
   @location(0) position : vec3<f32>,
   @location(6) joints   : vec4<u32>,
   @location(7) weights  : vec4<f32>,
@@ -94,7 +125,7 @@ fn vsSkinned(
 
   // No draw.model, for the same reason the forward path omits it: the joints
   // place a skinned mesh entirely.
-  return cascade.viewProjection * skin * vec4<f32>(position, 1.0);
+  return cascade.viewProjection * skin * vec4<f32>(morphPosition(draw, vertex, position), 1.0);
 }
 `;
 
@@ -274,6 +305,8 @@ export class ShadowMaps {
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 5, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
 
@@ -284,7 +317,7 @@ export class ShadowMaps {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.cascadeStaging = new ArrayBuffer(this.alignment * MAX_CASCADES);
-    this._makeCascadeBindGroup = (gpu, palette) => rhi.device.createBindGroup({
+    this._makeCascadeBindGroup = (gpu, palette, morph) => rhi.device.createBindGroup({
       label: 'shadow-cascade',
       layout: this.cascadeLayout,
       entries: [
@@ -292,6 +325,8 @@ export class ShadowMaps {
         { binding: 1, resource: { buffer: gpu.drawDataBuffer } },
         { binding: 2, resource: { buffer: gpu.batchOrderBuffer } },
         { binding: 3, resource: { buffer: palette.buffer } },
+        { binding: 4, resource: { buffer: morph.deltaBuffer } },
+        { binding: 5, resource: { buffer: morph.weightBuffer } },
       ],
     });
 
@@ -455,7 +490,7 @@ export class ShadowMaps {
    * the matrix does not depend on which cascade is drawing, and writing it per
    * cascade would quadruple the ring for nothing.
    */
-  addPasses(graph, resource, gpu, batchBindGroup, palette) {
+  addPasses(graph, resource, gpu, batchBindGroup, palette, morph) {
     this._gpu = gpu;
     this._batchBindGroup = batchBindGroup;
     // Built on first use: the buffers it references belong to GpuDriven, which
@@ -466,10 +501,12 @@ export class ShadowMaps {
     // destroyed buffers.
     if (this.cascadeBindGroup === undefined
       || this._gpuRevision !== gpu.buffersRevision
-      || this._paletteRevision !== palette.revision) {
-      this.cascadeBindGroup = this._makeCascadeBindGroup(gpu, palette);
+      || this._paletteRevision !== palette.revision
+      || this._morphRevision !== morph.revision) {
+      this.cascadeBindGroup = this._makeCascadeBindGroup(gpu, palette, morph);
       this._gpuRevision = gpu.buffersRevision;
       this._paletteRevision = palette.revision;
+      this._morphRevision = morph.revision;
     }
 
     for (let cascade = 0; cascade < this.activeCascades; cascade++) {

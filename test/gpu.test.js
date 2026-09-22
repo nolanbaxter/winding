@@ -15,7 +15,8 @@
 import { Winding, Camera } from '../src/winding.js';
 import { shaderErrors } from '../src/rhi/shader.js';
 import { NOT_BATCHED } from '../src/render/gpudriven.js';
-import { buildDemoGLB, buildRiggedGLB } from './fixtures/demoModel.js';
+import { buildDemoGLB, buildRiggedGLB, buildMorphedGLB } from './fixtures/demoModel.js';
+import { PBR_SHADER } from '../src/render/shaders/pbr.js';
 
 const FRAMES = 30;
 
@@ -301,6 +302,146 @@ export async function run(canvas, onDone) {
     riggedNode.destroy();
     return `${skinnedBatches} skinned batch, ${palette.jointCount} joints, `
       + `bind pose identity, bounds ${beforeTop.toFixed(1)} -> ${afterTop.toFixed(1)}`;
+  });
+
+  await step('a morph target moves the vertex the shader reads', async () => {
+    // The strong check for step 3, and it runs the ENGINE'S OWN WGSL: the
+    // Morphed struct and applyMorph are sliced straight out of PBR_SHADER and
+    // dropped into a compute shader, bound to the same delta buffer, the same
+    // weight buffer and the same draw data the frame just used. What it cannot
+    // share with the vertex shader is the entry point; everything the vertex
+    // shader would read, it reads.
+    //
+    // A readback is the only way to see a vertex position at all -- the engine
+    // deliberately never reads one back, and the swap chain is not COPY_SRC --
+    // so this pays for one, once, on four vertices.
+    const morphed = await engine.load(buildMorphedGLB());
+    const morphNode = scene.add(morphed);
+    const morphIndex = scene.renderableCount - 1;
+
+    morphNode.weights[0] = 0.5;      // top edge up by 10 * 0.5
+    morphNode.weights[1] = 0.25;     // right edge out by 4 * 0.25
+    engine.renderFrame(scene, camera);
+    await engine.rhi.device.queue.onSubmittedWorkDone();
+
+    const device = engine.rhi.device;
+    const store = engine.renderer.morph;
+    const primitive = morphed.meshes[0].primitives[0];
+
+    // 4 vertices * 2 targets * 3 floats.
+    if (store.deltaCount < 24) {
+      throw new Error(`the arena holds ${store.deltaCount} floats, expected at least 24`);
+    }
+    if (store.weightCount !== 2) {
+      throw new Error(`gathered ${store.weightCount} weights, expected 2`);
+    }
+    if ((primitive.morphCountStride & 0xffff) !== 2 || (primitive.morphCountStride >>> 16) !== 3) {
+      throw new Error(`count/stride packed as ${primitive.morphCountStride.toString(16)}`);
+    }
+
+    // The real struct and the real function, lifted out of the real shader.
+    const slice = (source, from, until) => {
+      const start = source.indexOf(from);
+      const end = source.indexOf(until, start);
+      if (start < 0 || end < 0) throw new Error(`cannot find ${from} in the shader`);
+      return source.slice(start, end + until.length);
+    };
+    const drawStruct = slice(PBR_SHADER, 'struct DrawData {', '\n};');
+    const morphFn = slice(PBR_SHADER, 'struct Morphed {', '\n  return out;\n}');
+
+    const module = device.createShaderModule({
+      label: 'morph-check',
+      code: `
+${drawStruct}
+
+@group(0) @binding(0) var<storage, read> drawData     : array<DrawData>;
+@group(0) @binding(1) var<storage, read> morphDeltas  : array<f32>;
+@group(0) @binding(2) var<storage, read> morphWeights : array<f32>;
+@group(0) @binding(3) var<storage, read_write> out    : array<f32>;
+@group(0) @binding(4) var<uniform> which : vec4<u32>;
+
+${morphFn}
+
+@compute @workgroup_size(4)
+fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+  let draw = drawData[which.x];
+  let m = applyMorph(draw, id.x, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  out[id.x * 3u] = m.position.x;
+  out[id.x * 3u + 1u] = m.position.y;
+  out[id.x * 3u + 2u] = m.position.z;
+}
+`,
+    });
+
+    const outBuffer = device.createBuffer({
+      size: 4 * 3 * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const staging = device.createBuffer({
+      size: 4 * 3 * 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const which = device.createBuffer({
+      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(which, 0, Uint32Array.from([morphIndex, 0, 0, 0]));
+
+    const pipeline = device.createComputePipeline({
+      layout: 'auto', compute: { module, entryPoint: 'main' },
+    });
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: engine.renderer.gpu.drawDataBuffer } },
+        { binding: 1, resource: { buffer: store.deltaBuffer } },
+        { binding: 2, resource: { buffer: store.weightBuffer } },
+        { binding: 3, resource: { buffer: outBuffer } },
+        { binding: 4, resource: { buffer: which } },
+      ],
+    });
+
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    encoder.copyBufferToBuffer(outBuffer, 0, staging, 0, staging.size);
+    device.queue.submit([encoder.finish()]);
+
+    await staging.mapAsync(GPUMapMode.READ);
+    const got = new Float32Array(staging.getMappedRange()).slice();
+    staging.unmap();
+    outBuffer.destroy();
+    staging.destroy();
+    which.destroy();
+
+    // The deltas alone, since the check fed a zero base position: vertex 0
+    // moves under neither target, 1 only under the right-edge one, 2 only
+    // under the top-edge one, and 3 under both.
+    const expected = [
+      0, 0, 0,
+      1, 0, 0,        // 4 * 0.25
+      0, 5, 0,        // 10 * 0.5
+      1, 5, 0,
+    ];
+    for (let i = 0; i < expected.length; i++) {
+      if (Math.abs(got[i] - expected[i]) > 1e-4) {
+        throw new Error(
+          `vertex ${Math.floor(i / 3)} axis ${i % 3}: expected ${expected[i]}, got ${got[i]}`,
+        );
+      }
+    }
+
+    // And the box grew to cover it -- 0.5 * 10 + 0.25 * 4 = 6 on every side.
+    const top = scene.worldMax[morphIndex * 3 + 1];
+    if (!(top > 2 + 5.9)) {
+      throw new Error(`bounds did not follow the weights: top is ${top.toFixed(2)}`);
+    }
+
+    morphNode.destroy();
+    return `${store.deltaCount} delta floats, 2 weights, vertex 3 at `
+      + `(${got[9].toFixed(1)}, ${got[10].toFixed(1)}), bounds top ${top.toFixed(1)}`;
   });
 
   await step('order-independent transparency resolves into the scene', async () => {

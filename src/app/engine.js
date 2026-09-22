@@ -25,6 +25,7 @@ import { Environment } from '../render/ibl.js';
 import { Renderer } from '../render/renderer.js';
 import { GLTFTextures } from '../render/textures.js';
 import { packSkinVertices } from '../render/vertex.js';
+import { packMorphCountStride } from '../render/morph.js';
 import { Scene } from '../scene/scene.js';
 import { loadGLTF, DEFAULT_MATERIAL } from '../scene/gltf/parse.js';
 import { decodeImages } from '../scene/gltf/images.js';
@@ -193,6 +194,14 @@ export class Winding {
         // How far each target reaches, which is all a bound needs. The deltas
         // themselves are a GPU buffer; this is the one number the CPU keeps.
         morphExtent: primitive.morph?.extent ?? null,
+        // Where this primitive's deltas landed in the engine-wide arena, and
+        // its target count and stride packed as draw data carries them. Zero
+        // for an unmorphed primitive, which is what makes the vertex shader
+        // skip the loop entirely.
+        morphBase: primitive.morph ? this.renderer.morph.allocate(primitive.morph.deltas) : 0,
+        morphCountStride: primitive.morph
+          ? packMorphCountStride(primitive.morph.targetCount, primitive.morph.stride)
+          : 0,
         // Only when asked. Scene.raycast tests triangles for primitives that have
         // these and falls back to the bounding box for those that do not, so the
         // flag buys precision with memory and nothing else changes.

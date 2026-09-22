@@ -30,6 +30,7 @@ import { ShadowMaps } from './shadows.js';
 import { RenderGraph } from './graph.js';
 import { GpuProfiler } from './timing.js';
 import { SkinPalette } from './skin.js';
+import { MorphStore } from './morph.js';
 import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES } from './gpudriven.js';
@@ -97,6 +98,11 @@ export class Renderer {
         // skinned or not, because a bind group layout is one object -- an
         // unskinned vertex shader simply never reads it.
         { binding: 11, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        // Morph deltas, then morph weights. Same call as the palette: bound
+        // for every pipeline, read only by a draw whose target count is not
+        // zero, which is a number the shader already has in hand.
+        { binding: 12, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 13, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
     this.drawLayout = rhi.device.createBindGroupLayout({
@@ -186,6 +192,8 @@ export class Renderer {
      */
     /** Joint matrices for every skinned instance, rebuilt each frame. */
     this.skinPalette = new SkinPalette(rhi);
+    /** Morph deltas (static, per primitive) and weights (per frame, per instance). */
+    this.morph = new MorphStore(rhi);
     this._paletteRevision = 0;
 
     this.gpuTiming = new GpuProfiler(rhi, { enabled: gpuTiming });
@@ -351,6 +359,8 @@ export class Renderer {
           { binding: 9, resource: { buffer: this.gpu.drawDataBuffer } },
           { binding: 10, resource: { buffer: this.gpu.visibleBuffer } },
           { binding: 11, resource: { buffer: this.skinPalette.buffer } },
+          { binding: 12, resource: { buffer: this.morph.deltaBuffer } },
+          { binding: 13, resource: { buffer: this.morph.weightBuffer } },
         ],
       });
       this._frameBindGroups.set(environment, bindGroup);
@@ -408,14 +418,23 @@ export class Renderer {
     // before the cull means the bind group always points at a live texture.
     this.hzb.resize(rhi.width, rhi.height, rhi.depthView());
     this.gpu.bindHzb(this.hzb.view);
+    // Weights first: draw data records where each instance's slice begins,
+    // and the gather below is what decides those offsets.
+    this.morph.update(scene);
     this.gpu.update(scene, this.frustum, this.hzb, camera.viewProjection, writeDrawData,
-      this.skinPalette.offsets);
+      this.skinPalette.offsets, this.morph);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
 
     // Palettes are rebuilt from this frame's pose, before anything reads them.
     // A grow replaces the buffer the frame group names, so that invalidates
     // the cache the same way a gpu grow does.
     this.skinPalette.update(scene);
+    // A grown morph buffer invalidates the frame group for the same reason a
+    // grown palette does: the group names a buffer that no longer exists.
+    if (this._morphRevision !== this.morph.revision) {
+      this._frameBindGroups = new WeakMap();
+      this._morphRevision = this.morph.revision;
+    }
     if (this._paletteRevision !== this.skinPalette.revision) {
       this._frameBindGroups = new WeakMap();
       this._paletteRevision = this.skinPalette.revision;
@@ -557,7 +576,9 @@ export class Renderer {
       visibleResource: visibleEarly,
     });
 
-    this.shadows.addPasses(graph, shadowMap, this.gpu, this.drawBindGroup, this.skinPalette);
+    this.shadows.addPasses(
+      graph, shadowMap, this.gpu, this.drawBindGroup, this.skinPalette, this.morph,
+    );
     this.clusters.addPasses(graph, {
       boundsResource: clusterBounds,
       lightsResource: lightBuffer,

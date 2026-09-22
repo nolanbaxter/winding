@@ -31,7 +31,7 @@ import { grownCapacity, growArray } from '../core/grow.js';
 import { FRUSTUM_PLANE_COUNT } from '../core/math/frustum.js';
 
 /**
- * model mat4 (64) + normal mat3x3 (48) + paletteOffset u32 (4), rounded to the
+ * model mat4 (64) + normal mat3x3 (48) + four u32 (16), rounded to the
  * struct's 16-byte alignment. 128.
  */
 export const DRAW_DATA_BYTES = 128;
@@ -253,9 +253,7 @@ export class GpuDriven {
     const device = rhi.device;
 
     // Per-object data, indexed by the shader rather than bound per draw.
-    this.drawData = new Float32Array(capacity * (DRAW_DATA_BYTES / 4));
-    /** Same memory, integer view: paletteOffset is a u32 in the WGSL struct. */
-    this.drawDataU32 = new Uint32Array(this.drawData.buffer);
+    this._allocateDrawData(capacity);
     this.drawDataBuffer = device.createBuffer({
       label: 'draw-data',
       size: capacity * DRAW_DATA_BYTES,
@@ -422,12 +420,32 @@ export class GpuDriven {
    * tables by the rebuild this is called from, and the visible list by the cull
    * shader. Copying would be work whose result is immediately overwritten.
    */
+  /**
+   * The draw-data staging array and its integer view, allocated together.
+   *
+   * Together because they MUST be: half the struct is floats and half is
+   * u32s, so both views are written every frame, and a reallocation that
+   * replaced one and not the other would leave the integer writes going into
+   * a detached array. They would not throw -- an index inside the old length
+   * writes to memory nobody uploads, and an index past it writes nowhere at
+   * all -- so every u32 field would read as zero on the GPU.
+   *
+   * That is not hypothetical. This was two statements at two call sites and
+   * _grow updated one of them, which pinned paletteOffset at 0 for every
+   * skinned instance added after the draw buffer grew: a second character
+   * silently wearing the first one's pose.
+   */
+  _allocateDrawData(capacity) {
+    this.drawData = new Float32Array(capacity * (DRAW_DATA_BYTES / 4));
+    this.drawDataU32 = new Uint32Array(this.drawData.buffer);
+  }
+
   _grow(needed) {
     const capacity = grownCapacity(this.capacity, needed);
     const device = this.rhi.device;
     const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 
-    this.drawData = new Float32Array(capacity * (DRAW_DATA_BYTES / 4));
+    this._allocateDrawData(capacity);
     this.boundsData = new Float32Array(capacity * 8);
     this.itemBatch = new Uint32Array(capacity);
     this.itemMirrored = new Uint8Array(capacity);
@@ -649,7 +667,7 @@ export class GpuDriven {
   }
 
   /** Upload this frame's transforms, bounds and reset argument buffer. */
-  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets) {
+  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets, morph) {
     if (scene.revision !== this.sceneRevision) this.rebuildBatches(scene);
 
     const count = scene.renderableCount;
@@ -676,6 +694,17 @@ export class GpuDriven {
       // the unskinned vertex shader never reads anyway.
       const skin = scene.renderableSkin[i];
       this.drawDataU32[drawFloat + 28] = skin >= 0 ? paletteOffsets[skin] : 0;
+
+      // The three morph words. All static per renderable -- where a
+      // primitive's deltas live, where an instance's weights live, and how
+      // many of each -- which is why they can ride the same "only what moved"
+      // upload as the matrix. The WEIGHTS themselves are a separate buffer,
+      // rewritten whole every frame, precisely because they are not.
+      const m = scene.renderableMorph[i];
+      const primitive = scene.renderablePrimitive[i];
+      this.drawDataU32[drawFloat + 29] = m >= 0 ? primitive.morphBase : 0;
+      this.drawDataU32[drawFloat + 30] = m >= 0 ? morph.offsets[m] : 0;
+      this.drawDataU32[drawFloat + 31] = m >= 0 ? primitive.morphCountStride : 0;
 
       const b = i * 8;
       const o = i * 3;

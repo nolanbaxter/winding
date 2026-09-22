@@ -367,3 +367,56 @@ export function buildRiggedGLB() {
     scene: 0,
   }, bytes);
 }
+
+/**
+ * The same quad with two morph targets and no skin.
+ *
+ * Target 0 raises the top edge by 10, target 1 pushes the right edge out by 4.
+ * Deliberately asymmetric in both the axis and the vertices they touch, so a
+ * transposed index or a swapped target lands somewhere the check can see.
+ */
+export function buildMorphedGLB() {
+  const positions = Float32Array.from([
+    -1, 0, 0, 1, 0, 0, -1, 2, 0, 1, 2, 0,
+  ]);
+  const normals = Float32Array.from([
+    0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+  ]);
+  const uvs = Float32Array.from([0, 1, 1, 1, 0, 0, 1, 0]);
+  const indices = Uint16Array.from([0, 1, 2, 2, 1, 3]);
+
+  // Top edge up.
+  const target0 = Float32Array.from([0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 10, 0]);
+  // Right edge out.
+  const target1 = Float32Array.from([0, 0, 0, 4, 0, 0, 0, 0, 0, 4, 0, 0]);
+
+  const { bytes, views } = packBuffer([positions, indices, normals, uvs, target0, target1]);
+
+  return encodeGLB({
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [-1, 0, 0], max: [1, 2, 0] },
+      { bufferView: 1, componentType: 5123, count: 6, type: 'SCALAR' },
+      { bufferView: 2, componentType: 5126, count: 4, type: 'VEC3' },
+      { bufferView: 3, componentType: 5126, count: 4, type: 'VEC2' },
+      { bufferView: 4, componentType: 5126, count: 4, type: 'VEC3' },
+      { bufferView: 5, componentType: 5126, count: 4, type: 'VEC3' },
+    ],
+    materials: [{ pbrMetallicRoughness: { baseColorFactor: [0.3, 0.6, 0.8, 1] } }],
+    meshes: [{
+      name: 'morphed',
+      weights: [0, 0],
+      primitives: [{
+        attributes: { POSITION: 0, NORMAL: 2, TEXCOORD_0: 3 },
+        indices: 1,
+        material: 0,
+        targets: [{ POSITION: 4 }, { POSITION: 5 }],
+      }],
+    }],
+    nodes: [{ name: 'morphed-root', mesh: 0 }],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  }, bytes);
+}

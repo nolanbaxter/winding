@@ -570,9 +570,35 @@ function growableGpu(materials) {
   gpu.buffersRevision = 0;
   gpu.stats = {};
   for (const k of ['itemBatchBuffer', 'batchFirstBuffer', 'batchOrderBuffer',
-    'batchBuffer', 'visibleFlagsBuffer', 'indirectBuffer']) gpu[k] = { destroy() {} };
+    'batchBuffer', 'visibleFlagsBuffer', 'indirectBuffer',
+    'drawDataBuffer', 'boundsBuffer', 'visibleBuffer']) gpu[k] = { destroy() {} };
+  gpu._allocateDrawData(gpu.capacity);
+  gpu.boundsData = new Float32Array(gpu.capacity * 8);
   return gpu;
 }
+
+test('growing draw data replaces both views of it', () => {
+  // The bug: _grow allocated a new drawData and left drawDataU32 viewing the
+  // OLD buffer. Half the struct is u32 -- paletteOffset and the three morph
+  // words -- so those writes went into a detached array. Nothing throws: an
+  // index inside the old length writes where nothing is uploaded from, and an
+  // index past it writes nowhere at all. Every u32 field simply read as zero
+  // on the GPU, which is a second skinned character wearing the first one's
+  // pose and a morphed mesh that never moves.
+  const gpu = growableGpu([]);
+  const before = gpu.capacity;
+  gpu._grow(before + 1);
+  assert.ok(gpu.capacity > before, 'the test needs an actual grow');
+
+  assert.equal(gpu.drawDataU32.buffer, gpu.drawData.buffer,
+    'the integer view must address the array that gets uploaded');
+  assert.equal(gpu.drawDataU32.length, gpu.drawData.length);
+
+  // And behaviourally: a u32 write at the far end lands in the uploaded array.
+  const word = (gpu.capacity - 1) * (DRAW_DATA_BYTES / 4) + 28;
+  gpu.drawDataU32[word] = 0x3f800000;                  // 1.0f, seen as bits
+  close(gpu.drawData[word], 1, EPS, 'the write reached the float view');
+});
 
 /** GpuDriven.rebuildBatches without a GPU. */
 function batchesFor(scene) {
