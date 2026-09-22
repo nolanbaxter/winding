@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-22
+
+The three items the 0.2.0 audits left open, all of them cases where the engine
+silently did something other than what it said.
+
+**No API was removed, but two binary layouts moved.** `VERTEX_STRIDE_BYTES` is
+60 where it was 48 and `MATERIAL_BYTES` is 64 where it was 48, so anything that
+wrote a vertex or material buffer by hand needs rebuilding. Assets loaded
+through `engine.load` are unaffected.
+
+### Fixed
+
+- **Mirrored node transforms rendered inside-out.** glTF 3.7.4 requires the
+  triangle winding to reverse when a node's global transform has a negative
+  determinant. `frontFace` was fixed at `ccw`, so mirroring one chair to make
+  its pair -- the everyday case in furniture, architecture and product assets
+  -- drew both with the faces that should be visible culled and the ones that
+  should not kept. `mat4Decompose` had always DETECTED the mirror and parked it
+  in `scale.x`; nothing downstream consumed it.
+
+  Mirroring belongs to the instance and a pipeline belongs to the material, so
+  it could not simply join `variantKey`. It is a fourth variant bit the
+  registry never sets and the renderer ORs in per batch; winding joins the
+  batch key, because one indirect draw has one front face; the sort key's
+  pipeline id doubles so two pipelines do not claim to be one state bucket;
+  and `ensureVariants` compiles both windings at load, since render() is never
+  allowed to create a pipeline. Read from the WORLD matrix, because a mirroring
+  parent mirrors everything under it and two mirrors cancel.
+
+- **A second UV set was never read.** `texCoord` sits on the texture REFERENCE
+  rather than the material, so one material's maps can disagree about which set
+  they sample -- baked occlusion on set 1 beside a base colour on set 0 is the
+  ordinary export out of Blender and Max. Those materials sampled the wrong
+  pixels. Not a missing texture, which is noticeable; wrong pixels, which is
+  not.
+
+- **`COLOR_0` was dropped.** Core spec, no extension behind it, and not on the
+  importer's list of things deliberately unhandled. Assets carrying their tint
+  in vertex colours rendered uniformly white.
+
+- **The batch tables were sized per renderable and indexed per batch.**
+  `batchCount <= renderableCount` is a bound, but it is the loosest one in the
+  engine -- being loose is the point of batching. At a 256-byte alignment the
+  per-batch uniform buffer was 512 bytes per RENDERABLE, which passes the
+  default `maxBufferSize` somewhere above 524,288 renderables. `createBuffer`
+  does not throw for that; it returns an invalid buffer and the frame goes
+  black. So the real ceiling was 32x lower than the 2^24 entities the README
+  advertised as a derived hard limit. Sized by batch now, and growing
+  separately: 14 batches is 7 KB where 677 renderables was 347 KB.
+
+### Changed
+
+- **The vertex is 60 bytes, up from 48.** Every vertex carries a second UV set
+  and a colour whether its asset has them or not. The alternative is a vertex
+  format per attribute combination, which multiplies into the pipeline count,
+  the shader permutations and the importer at once -- on top of the winding
+  variants above. Carrying the fields is the cheaper mistake, and it pays
+  twice: an asset without them gets `uv1 = uv0` and colour = white, both
+  identities downstream, so nothing branches at runtime either.
+
+  The colour is `unorm8x4` rather than four floats. glTF allows float, but
+  vertex colours are authored at 8 bits per channel essentially always, and
+  four floats would have made the stride 72.
+
+- **`MATERIAL_BYTES` is 64**, carrying five bits that say which UV set each
+  map samples. The shader picks with a `select` rather than a branch: both
+  sets are interpolated anyway, so choosing between them is free and uniform
+  across the quad.
+
+- `variantKey` takes a third argument, `mirrored`, defaulting to false.
+
+### Added
+
+- `VARIANT_MIRRORED` and `VARIANT_DOUBLE_SIDED`, the named variant bits.
+- `packVertexColor`, `VERTEX_COLOR_INDEX` and `VERTEX_COLOR_WHITE`, for writing
+  the packed colour through a `Uint32` view of the vertex buffer.
+- `uvSetMask` and the five `UV_SET_*` bits.
+
+315 checks under Node, 12 on a real device.
+
 ## [0.2.0] - 2026-09-22
 
 Three of the README's limitations, then two audits and the fixes they found.
@@ -285,7 +365,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/nolanbaxter/winding/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nolanbaxter/winding/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/nolanbaxter/winding/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/nolanbaxter/winding/releases/tag/v0.1.0
