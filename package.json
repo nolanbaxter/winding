@@ -34,9 +34,7 @@
   "jsdelivr": "./src/winding.js",
   "sideEffects": false,
   "files": [
-    "src",
-    "examples",
-    "DESIGN.md"
+    "src"
   ],
   "engines": {
     "node": ">=20"

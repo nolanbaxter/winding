@@ -111,9 +111,12 @@ into existence. Both were found by drawing one cube with no textures on it.
   the lighting. Setting the sky to black would do both, because the same
   cubemap is the ambient term -- the sky IS the light.
 
-- **`examples/cdn.html`**: the smallest possible page, importing the engine
-  from jsDelivr and drawing one cube. It is the file that found both bugs
-  above.
+- **A CDN smoke page** -- the smallest thing that imports the engine from
+  jsDelivr and draws one cube. It is what found both bugs above. NOT SHIPPED:
+  it lives in `examples/`, which is deliberately untracked and unpublished,
+  so this entry describes how the bugs were found rather than something you
+  can open. (Corrected in 0.7.4; the original wording listed it as an addition
+  to the package.)
 
 ### Changed
 
