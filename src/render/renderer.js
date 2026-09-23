@@ -227,6 +227,17 @@ export class Renderer {
       this.rhi, this.pipelines, this.drawLayout, this.shadowOptions,
     );
     this.skybox = await SkyboxPass.create(this.rhi, this.pipelines);
+    /**
+     * Whether the environment is drawn as the background.
+     *
+     * A plain mutable field, like scene.sun: per-renderer state a caller reads
+     * and writes, not hidden configuration. Turning it off leaves the clear
+     * colour showing and changes NOTHING about lighting -- the same cubemap is
+     * still the ambient term, because the sky IS the light. Setting the sky
+     * colours to black would turn the background off too, and take the
+     * lighting with it.
+     */
+    this.drawSkybox = true;
     this.post = await PostStack.create(this.rhi, this.pipelines, this.postOptions);
     this.hzb = await HierarchicalDepth.create(this.rhi, this.pipelines);
     // The opaque, single-sided variant is what almost every asset uses; having
@@ -802,7 +813,7 @@ export class Renderer {
     const scene = this._frameScene;
     const environment = this._frameEnvironment;
 
-    if (phase === 0) {
+    if (phase === 0 && this.drawSkybox) {
       // The skybox binds its own layout at group 0, so the frame group has to
       // be set AFTER it -- a bind group set at an index is overwritten
       // regardless of which pipeline layout put it there.

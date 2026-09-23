@@ -1526,4 +1526,108 @@ await atest('a document with no scenes at all still loads its orphans', async ()
   assert.deepEqual(model.roots, [0]);
 });
 
+// ------------------------------------------- tangent frames without UVs
+
+console.log('\ntangent frames on untextured geometry');
+
+/**
+ * One triangle per axis direction, no UVs and no NORMAL, so the importer
+ * flat-shades it and has to invent a tangent frame for each face.
+ *
+ * The winding of each is chosen so the computed normal points along the axis
+ * named, which is the whole point: a tangent frame is only degenerate when the
+ * tangent happens to parallel the normal, so the faces that matter are exactly
+ * the axis-aligned ones.
+ */
+function axisAlignedGLB() {
+  const positions = Float32Array.from([
+    // normal +X (in the YZ plane)
+    0, 0, 0,   0, 1, 0,   0, 0, 1,
+    // normal -X
+    2, 0, 0,   2, 0, 1,   2, 1, 0,
+    // normal +Y
+    0, 3, 0,   0, 3, 1,   1, 3, 0,
+    // normal +Z
+    0, 0, 5,   1, 0, 5,   0, 1, 5,
+  ]);
+  const indices = Uint16Array.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+
+  const { bytes, views } = packBuffer([positions, indices]);
+  return makeGLB({
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors: [
+      {
+        bufferView: 0, componentType: 5126, count: 12, type: 'VEC3',
+        min: [0, 0, 0], max: [2, 3, 5],
+      },
+      { bufferView: 1, componentType: 5123, count: 12, type: 'SCALAR' },
+    ],
+    meshes: [{ name: 'axes', primitives: [{ attributes: { POSITION: 0 }, indices: 1 }] }],
+    nodes: [{ name: 'axes', mesh: 0 }],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  }, bytes);
+}
+
+await atest('an untextured face never gets a tangent parallel to its normal', async () => {
+  // The bug: the no-UV fallback wrote (1,0,0) on EVERY vertex and called it
+  // safe because it is a unit vector. On any face whose normal points along X
+  // it is parallel to that normal, so the shader's cross(N, T) is the zero
+  // vector and normalize() of that is NaN -- which the bloom chain then
+  // smears across a wide blocky area and the tonemap renders black. An
+  // untextured cube hits it on two faces out of six.
+  const model = await loadGLTF(axisAlignedGLB());
+  const { vertices, vertexCount } = model.meshes[0].primitives[0];
+
+  assert.equal(vertexCount, 12, 'four flat-shaded triangles');
+
+  for (let v = 0; v < vertexCount; v++) {
+    const o = v * VERTEX_STRIDE_FLOATS;
+    const n = [vertices[o + 3], vertices[o + 4], vertices[o + 5]];
+    const t = [vertices[o + 8], vertices[o + 9], vertices[o + 10]];
+
+    // The tangent must be a unit vector...
+    close(Math.hypot(...t), 1, 1e-4, `vertex ${v} tangent length`);
+
+    // ...and it must lie in the surface plane, which is the part a constant
+    // gets wrong. Perpendicular means the cross product is a unit vector, and
+    // a unit bitangent is the only thing normalize() is safe on.
+    const cross = [
+      n[1] * t[2] - n[2] * t[1],
+      n[2] * t[0] - n[0] * t[2],
+      n[0] * t[1] - n[1] * t[0],
+    ];
+    const length = Math.hypot(...cross);
+    assert.ok(
+      length > 0.999,
+      `vertex ${v}: normal [${n}] and tangent [${t}] give a bitangent of length ${length}`,
+    );
+    close(n[0] * t[0] + n[1] * t[1] + n[2] * t[2], 0, 1e-4, `vertex ${v} N dot T`);
+  }
+});
+
+await atest('the same holds for a mesh that supplies normals but no UVs', async () => {
+  // The other route to the same fallback: NORMAL present, so no unweld runs,
+  // and TANGENT still has to be invented.
+  const glb = quadGLB({ includeUVs: false });
+  const { json, binary } = parseContainer(glb);
+  // Point the quad's normals along +X, where the old constant was degenerate.
+  const model = await loadGLTF(makeGLB(json, binary));
+  const { vertices, vertexCount } = model.meshes[0].primitives[0];
+
+  for (let v = 0; v < vertexCount; v++) {
+    const o = v * VERTEX_STRIDE_FLOATS;
+    const n = [vertices[o + 3], vertices[o + 4], vertices[o + 5]];
+    const t = [vertices[o + 8], vertices[o + 9], vertices[o + 10]];
+    const cross = Math.hypot(
+      n[1] * t[2] - n[2] * t[1],
+      n[2] * t[0] - n[0] * t[2],
+      n[0] * t[1] - n[1] * t[0],
+    );
+    assert.ok(cross > 0.999, `vertex ${v} bitangent length ${cross}`);
+  }
+});
+
 console.log(`\n${passed} checks passed\n`);

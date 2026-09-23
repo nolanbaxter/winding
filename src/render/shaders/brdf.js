@@ -104,23 +104,8 @@ fn cubeDirection(face : u32, uv : vec2<f32>) -> vec3<f32> {
   }
 }
 
-// Procedural sky. Linear HDR values -- the sun is far brighter than 1.0, which
-// is the point of storing the environment in a float format.
-fn skyRadiance(dir : vec3<f32>) -> vec3<f32> {
-  let sunDirection = normalize(vec3<f32>(0.35, 0.55, 0.45));
-  let height = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-
-  let ground  = vec3<f32>(0.10, 0.09, 0.08);
-  let horizon = vec3<f32>(0.62, 0.66, 0.74);
-  let zenith  = vec3<f32>(0.16, 0.30, 0.60);
-
-  var color = mix(horizon, zenith, smoothstep(0.5, 1.0, height));
-  color = mix(ground, color, smoothstep(0.47, 0.53, height));
-
-  let toSun = max(dot(dir, sunDirection), 0.0);
-  let disc  = pow(toSun, 900.0) * 60.0;
-  let glow  = pow(toSun, 8.0) * 0.5;
-  return color + vec3<f32>(1.0, 0.93, 0.80) * (disc + glow);
-}
+// The procedural sky used to live here. It moved to ibl.js, where its one
+// caller is: it is not a BRDF, and every shader that includes this file was
+// compiling it as dead code.
 `;
 

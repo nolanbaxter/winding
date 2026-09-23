@@ -34,8 +34,9 @@ import {
 import { jointInfluenceRadii } from '../src/scene/gltf/skin.js';
 import { handleIndex } from '../src/core/handle.js';
 import {
-  variantKey, variantPipelineState, ALPHA_OPAQUE, ALPHA_MASK, ALPHA_BLEND,
+  variantKey, variantPipelineState, ALPHA_OPAQUE, ALPHA_MASK, ALPHA_BLEND, MaterialRegistry,
 } from '../src/render/material.js';
+import { DEFAULT_MATERIAL } from '../src/scene/gltf/parse.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -539,6 +540,11 @@ function windingScene(scales) {
 
 // _growBatches names WebGPU usage flags the way every module does, so Node
 // needs them to exist. Real values.
+globalThis.GPUShaderStage ??= { VERTEX: 0x1, FRAGMENT: 0x2, COMPUTE: 0x4 };
+globalThis.GPUTextureUsage ??= {
+  COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04,
+  STORAGE_BINDING: 0x08, RENDER_ATTACHMENT: 0x10,
+};
 globalThis.GPUBufferUsage ??= {
   MAP_READ: 0x0001, COPY_SRC: 0x0004, COPY_DST: 0x0008,
   INDEX: 0x0010, VERTEX: 0x0020, UNIFORM: 0x0040, STORAGE: 0x0080,
@@ -1176,5 +1182,59 @@ test('an unskinned mesh still gets the triangle test', () => {
     'the empty corner of the box still misses');
 });
 
+
+// ---------------------------------------- material defaults for absent maps
+
+console.log('\ndefault textures for materials with no maps');
+
+/**
+ * A device stub that labels every view with the texture it came from, so which
+ * default a binding chose is observable without a GPU.
+ */
+function labellingRhi() {
+  const bindGroups = [];
+  const device = {
+    createTexture: ({ label }) => ({ label, createView: () => ({ label }), destroy() {} }),
+    createSampler: () => ({ sampler: true }),
+    createBuffer: () => ({ destroy() {} }),
+    createBindGroupLayout: () => ({}),
+    createBindGroup: (descriptor) => { bindGroups.push(descriptor); return descriptor; },
+  };
+  return {
+    rhi: { device, queue: { writeTexture() {}, writeBuffer() {} }, limits: { minUniformBufferOffsetAlignment: 256 } },
+    bindGroups,
+  };
+}
+
+test('a material with no maps binds white everywhere a factor scales it', () => {
+  // The bug: emissive fell back to a BLACK 1x1, and the shader multiplies that
+  // by emissiveFactor. So a material that asked to glow rendered dark, with
+  // nothing reported anywhere. glTF is explicit that an absent texture reads
+  // as 1.0 on every channel -- which is the whole premise of this design,
+  // since it is what lets the factors in the uniform do the scaling instead of
+  // a shader variant per combination of present maps.
+  //
+  // Emissive WITHOUT a texture is how a simple glowing object is authored, so
+  // this was the common case. Nothing caught it because every asset in the
+  // repository ships an emissive map.
+  const { rhi, bindGroups } = labellingRhi();
+  const materials = new MaterialRegistry(rhi, { capacity: 4 });
+
+  const id = materials.register({
+    ...DEFAULT_MATERIAL,
+    name: 'glowing',
+    emissive: Float32Array.from([4, 2, 0]),
+  });
+  materials.bindGroup(id);
+
+  const entries = bindGroups.at(-1).entries;
+  const slot = (binding) => entries.find((e) => e.binding === binding).resource.label;
+
+  assert.equal(slot(1), 'default-white', 'base colour');
+  assert.equal(slot(3), 'default-orm', 'occlusion/roughness/metallic packs to 1,1,1');
+  assert.equal(slot(4), 'default-white', 'occlusion');
+  assert.equal(slot(5), 'default-white', 'emissive must not multiply its own factor away');
+  assert.equal(slot(2), 'default-normal', 'and the normal map stays flat, not white');
+});
 
 console.log(`\n${passed} checks passed\n`);

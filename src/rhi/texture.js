@@ -220,8 +220,11 @@ export function clampSampler(rhi) {
  */
 export function defaultTextures(rhi) {
   return cached(rhi, 'defaults', () => ({
+    // Every colour slot that can be absent defaults to white, because glTF
+    // says an absent texture reads as 1.0 and the material factors do the
+    // scaling. There is deliberately no black default: the one binding that
+    // used it -- emissive -- was multiplying its own factor away.
     white: solidTexture(rhi, [255, 255, 255, 255], true, 'default-white'),
-    black: solidTexture(rhi, [0, 0, 0, 255], true, 'default-black'),
     // (0.5, 0.5, 1.0) decodes to a normal of (0, 0, 1): no perturbation.
     flatNormal: solidTexture(rhi, [128, 128, 255, 255], false, 'default-normal'),
     // Occlusion 1, roughness 1, metallic 1 -- glTF's channel packing is

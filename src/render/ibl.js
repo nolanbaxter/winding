@@ -28,8 +28,58 @@ const PARAMS_BYTES = 16;   // face:u32, roughness:f32, sampleCount:u32, envSize:
 const PREFILTER_SAMPLES = 64;
 const IRRADIANCE_SAMPLES = 64;
 
-const SKY_SHADER = /* wgsl */ `
+/**
+ * The sky the environment is baked from, and therefore also the background.
+ *
+ * Linear HDR. The sun is far brighter than 1.0, which is the point of keeping
+ * the cubemap in a float format -- clamp it to 1 and every reflection in the
+ * scene flattens.
+ *
+ * `sun` points TOWARD the sun, which is the opposite of `scene.sun.direction`
+ * (the direction light travels). They are separate on purpose: this one is
+ * baked once into a cubemap and the other is a per-frame analytic light. If
+ * you move one and want the disc to stay under the highlight, move both.
+ */
+export const DEFAULT_SKY = Object.freeze({
+  ground: Object.freeze([0.10, 0.09, 0.08]),
+  horizon: Object.freeze([0.62, 0.66, 0.74]),
+  zenith: Object.freeze([0.16, 0.30, 0.60]),
+  sun: Object.freeze([0.35, 0.55, 0.45]),
+  sunColor: Object.freeze([1.0, 0.93, 0.80]),
+  /** Radiance of the disc itself. Zero removes the sun from the sky. */
+  sunIntensity: 60,
+  /** How far the halo around it reaches. Zero removes it. */
+  glow: 0.5,
+});
+
+const vec3 = (v) => `vec3<f32>(${v[0]}, ${v[1]}, ${v[2]})`;
+
+/**
+ * Substituted into the source rather than uploaded as a uniform, because these
+ * are BAKE-TIME constants: the cubemap is generated once when an Environment
+ * is constructed and read every frame thereafter. A uniform would add a buffer
+ * and a binding to describe values that never change after the bake.
+ */
+function skyShader(sky) {
+  return /* wgsl */ `
 ${BRDF_WGSL}
+
+fn skyRadiance(dir : vec3<f32>) -> vec3<f32> {
+  let sunDirection = normalize(${vec3(sky.sun)});
+  let height = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+
+  let ground  = ${vec3(sky.ground)};
+  let horizon = ${vec3(sky.horizon)};
+  let zenith  = ${vec3(sky.zenith)};
+
+  var color = mix(horizon, zenith, smoothstep(0.5, 1.0, height));
+  color = mix(ground, color, smoothstep(0.47, 0.53, height));
+
+  let toSun = max(dot(dir, sunDirection), 0.0);
+  let disc  = pow(toSun, 900.0) * ${sky.sunIntensity};
+  let glow  = pow(toSun, 8.0) * ${sky.glow};
+  return color + ${vec3(sky.sunColor)} * (disc + glow);
+}
 
 struct Params {
   face        : u32,
@@ -59,6 +109,7 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
   return vec4<f32>(skyRadiance(cubeDirection(params.face, v.uv)), 1.0);
 }
 `;
+}
 
 const CONVOLVE_SHADER = /* wgsl */ `
 ${BRDF_WGSL}
@@ -196,9 +247,13 @@ fn fsPrefilter(v : VertexOut) -> @location(0) vec4<f32> {
  * and prefilter passes below do not change.
  */
 export class Environment {
-  constructor(rhi, { size = 128, irradianceSize = 32, prefilterMips = 6, label = 'env' } = {}) {
+  constructor(rhi, {
+    size = 128, irradianceSize = 32, prefilterMips = 6, label = 'env', sky = null,
+  } = {}) {
     this.rhi = rhi;
     this.prefilterMips = prefilterMips;
+    /** What this environment was baked from. See DEFAULT_SKY. */
+    this.sky = { ...DEFAULT_SKY, ...(sky ?? {}) };
 
     // rgba16float, not rgba8unorm: the sun is 60x brighter than white and
     // clamping it to 1.0 would flatten every reflection in the scene.
@@ -297,7 +352,7 @@ export class Environment {
       ],
     });
 
-    const skyModule = compileShaderSync(device, SKY_SHADER, 'ibl-sky.wgsl').module;
+    const skyModule = compileShaderSync(device, skyShader(this.sky), 'ibl-sky.wgsl').module;
     const convolveModule = compileShaderSync(device, CONVOLVE_SHADER, 'ibl-convolve.wgsl').module;
     const target = [{ format: 'rgba16float' }];
 

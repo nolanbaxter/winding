@@ -208,7 +208,13 @@ export class MaterialRegistry {
         { binding: 2, resource: (textures.normal ?? this._defaults.flatNormal).createView() },
         { binding: 3, resource: (textures.metallicRoughness ?? this._defaults.orm).createView() },
         { binding: 4, resource: (textures.occlusion ?? this._defaults.white).createView() },
-        { binding: 5, resource: (textures.emissive ?? this._defaults.black).createView() },
+        // White, not black. glTF says an absent texture means 1.0 on every
+        // channel, and the shader multiplies this by emissiveFactor -- so a
+        // black default silently throws the factor away, and a material that
+        // asked to glow renders dark with nothing reported. Emissive WITHOUT a
+        // texture is how a simple glowing object is authored, so this was the
+        // common case rather than the corner one.
+        { binding: 5, resource: (textures.emissive ?? this._defaults.white).createView() },
         { binding: 6, resource: textures.sampler ?? this._sampler },
       ],
     });

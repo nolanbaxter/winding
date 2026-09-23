@@ -120,7 +120,7 @@ export function generateTangents(positions, normals, uvs, indices) {
 }
 
 /** Any unit vector perpendicular to n. Picks the axis n leans on least. */
-function perpendicularTo(nx, ny, nz) {
+export function perpendicularTo(nx, ny, nz) {
   const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
   // Crossing with the least-aligned axis keeps the result well-conditioned.
   const [ux, uy, uz] = ax < ay && ax < az ? [1, 0, 0] : ay < az ? [0, 1, 0] : [0, 0, 1];

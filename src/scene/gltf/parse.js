@@ -31,7 +31,9 @@ import {
   readSkins, normalizeWeights, checkJointIndices, jointInfluenceRadii,
 } from './skin.js';
 import { readMorphTargets, morphWeightsFor } from './morph.js';
-import { generateTangents, unweldAndComputeFlatNormals } from './tangents.js';
+import {
+  generateTangents, unweldAndComputeFlatNormals, perpendicularTo,
+} from './tangents.js';
 
 // The vertex format is the renderer's contract, defined in render/vertex.js.
 // Re-exported here so importer callers do not have to know that, but there is
@@ -346,11 +348,32 @@ function buildPrimitive(json, buffers, primitive, label) {
   if (uv1s === null) uv1s = uvs;
 
   if (tangents === null) {
-    // No UVs means no tangent frame exists to compute. Fill with a valid unit
-    // vector rather than zeros so a shader that samples it cannot produce NaN.
+    // No UVs means no tangent frame exists to compute. Any direction will do,
+    // because without UVs nothing samples a normal map -- but it has to lie IN
+    // THE SURFACE PLANE, and that is the part a constant gets wrong.
+    //
+    // This filled every vertex with (1,0,0) and called it "a valid unit vector
+    // rather than zeros so a shader that samples it cannot produce NaN". It is
+    // a unit vector, and it produces NaN anyway: on any face whose normal
+    // points along X it is PARALLEL to the normal, so the shader's
+    // cross(N, T) is the zero vector and normalize() of that is NaN. A NaN
+    // fragment is then spread across a wide blocky area by the bloom chain and
+    // tonemapped to black, so the symptom is nothing like the cause.
+    //
+    // An untextured cube hits it on two faces out of six, which makes it about
+    // the most reachable shape there is. Nothing here caught it because every
+    // asset in the repository has UVs.
+    //
+    // perpendicularTo is the same helper generateTangents already uses when
+    // its own accumulation degenerates -- it crosses with the least-aligned
+    // axis, which is well conditioned for every normal rather than for most.
     tangents = new Float32Array(vertexCount * 4);
     for (let v = 0; v < vertexCount; v++) {
-      tangents[v * 4] = 1;
+      const n = v * 3;
+      const [tx, ty, tz] = perpendicularTo(normals[n], normals[n + 1], normals[n + 2]);
+      tangents[v * 4] = tx;
+      tangents[v * 4 + 1] = ty;
+      tangents[v * 4 + 2] = tz;
       tangents[v * 4 + 3] = 1;
     }
   }
