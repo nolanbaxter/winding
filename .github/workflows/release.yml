@@ -67,18 +67,41 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Releasing $version"
 
-      # package.json is touched by plenty of commits that are not releases.
-      # An existing tag is the honest way to ask "has this already shipped",
-      # and makes the whole job idempotent.
-      - name: Skip if this version is already tagged
+      # TWO QUESTIONS, NOT ONE. "Is it tagged" and "is it published" are
+      # different facts with different sources of truth -- git and the registry
+      # -- and they come apart the moment a publish fails after a release is
+      # created, or a release is cut by hand. Treating the tag as proof of both
+      # is what would have left 0.7.3 released on GitHub and unpublishable by
+      # this workflow forever.
+      #
+      # So each step is idempotent against the thing that actually knows.
+      - name: Is this version already tagged
         id: tagged
         run: |
           if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
             echo "already=true" >> "$GITHUB_OUTPUT"
-            echo "v${{ steps.version.outputs.version }} exists; nothing to do."
+            echo "tag v${{ steps.version.outputs.version }} exists"
           else
             echo "already=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Is this version already on npm
+        id: published
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="${{ steps.version.outputs.version }}"
+          # `npm view` exits non-zero for a version that does not exist, which
+          # is the answer rather than a failure.
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is already published"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Nothing to do
+        if: steps.tagged.outputs.already == 'true' && steps.published.outputs.already == 'true'
+        run: echo "v${{ steps.version.outputs.version }} is tagged and published. Done."
 
       # Before the tag exists, so a missing changelog costs nothing to fix.
       - name: The changelog must describe this version
@@ -86,7 +109,7 @@ jobs:
         run: node tools/release-notes.js "${{ steps.version.outputs.version }}" > /tmp/notes.md
 
       - name: The Node suites
-        if: steps.tagged.outputs.already == 'false'
+        if: steps.tagged.outputs.already == 'false' || steps.published.outputs.already == 'false'
         run: npm test
 
       - name: Tag and release
@@ -104,5 +127,5 @@ jobs:
       # Provenance comes free with trusted publishing: npm records the
       # workflow, commit and repository that produced the tarball.
       - name: Publish
-        if: steps.tagged.outputs.already == 'false'
+        if: steps.published.outputs.already == 'false'
         run: npm publish
