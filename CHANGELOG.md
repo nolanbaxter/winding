@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-09-23
+
+**Two bugs that only untextured geometry could reach.** Every asset in this
+repository has UVs and a full set of maps, so neither had ever been rendered
+into existence. Both were found by drawing one cube with no textures on it.
+
+### Fixed
+
+- **An untextured face whose normal points along X shaded to NaN, and the
+  bloom chain spread it across the screen as black.** A mesh with no UVs got
+  the SAME tangent on every vertex -- `(1,0,0)` -- which the code called "a
+  valid unit vector rather than zeros so a shader that samples it cannot
+  produce NaN". It is a unit vector, and it produces NaN anyway: on any face
+  whose normal points along X it is PARALLEL to that normal, so `cross(N, T)`
+  is the zero vector and `normalize()` of that is NaN.
+
+  The symptom looked nothing like the cause -- a black slab several times the
+  size of the object, because bloom had smeared two faces' worth of NaN through
+  its mip chain. An untextured cube hits it on two faces out of six.
+
+  Fixed with `perpendicularTo`, which was already in `tangents.js` doing this
+  exact job for `generateTangents`, and whose least-aligned-axis trick
+  `brdf.js` already used for IBL sampling. The pattern was in the codebase
+  twice and missing from the third place that needed it.
+
+- **Emissive without a texture did not glow.** The absent-emissive default was
+  a black 1x1 and the shader multiplies it by `emissiveFactor`, so the factor
+  was multiplied away and a material that asked to glow rendered dark. glTF
+  says an absent texture reads as 1.0 on every channel, which is the premise
+  the whole design rests on: absent maps point at defaults and the factors do
+  the scaling, instead of a shader variant per combination of present maps.
+  Emissive was the one slot breaking its own rule. The black default had no
+  other user and is gone.
+
+### Added
+
+- **A sky you can set.** `Environment` takes a `sky`: `ground`, `horizon`,
+  `zenith`, `sun` direction, `sunColor`, `sunIntensity` and `glow`. They were
+  three constants in a shader.
+
+  ```js
+  await Winding.create(canvas, {
+    environment: { sky: { ground: [0.02, 0.02, 0.03], zenith: [0.05, 0.07, 0.12] } },
+  });
+  ```
+
+  Substituted into the shader source rather than uploaded as a uniform,
+  because they are BAKE-TIME values: the cubemap is generated once when an
+  Environment is constructed and read every frame after. A uniform would add a
+  buffer and a binding to describe numbers that never change again.
+
+- **`renderer.drawSkybox`**, which turns the background off without touching
+  the lighting. Setting the sky to black would do both, because the same
+  cubemap is the ambient term -- the sky IS the light.
+
+- **`examples/cdn.html`**: the smallest possible page, importing the engine
+  from jsDelivr and drawing one cube. It is the file that found both bugs
+  above.
+
+### Changed
+
+- `skyRadiance` moved from `brdf.js` to `ibl.js`, next to its only caller. It
+  is not a BRDF, and every shader that included that file was compiling it as
+  dead code.
+
+
 ## [0.7.1] - 2026-09-23
 
 **The package is `winding-engine`.** 0.7.0 could not be published: npm's
@@ -860,7 +926,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/nolanbaxter/winding/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/nolanbaxter/winding/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/nolanbaxter/winding/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/nolanbaxter/winding/compare/v0.6.1...v0.6.2
