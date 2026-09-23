@@ -106,7 +106,7 @@ jobs:
       # Before the tag exists, so a missing changelog costs nothing to fix.
       - name: The changelog must describe this version
         if: steps.tagged.outputs.already == 'false'
-        run: node tools/release-notes.js "${{ steps.version.outputs.version }}" > /tmp/notes.md
+        run: node .github/release-notes.js "${{ steps.version.outputs.version }}" > /tmp/notes.md
 
       - name: The Node suites
         if: steps.tagged.outputs.already == 'false' || steps.published.outputs.already == 'false'
