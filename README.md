@@ -42,7 +42,7 @@ party assets shown here to demonstrate the renderer; neither is part of it, and 
 redistributed in this repository.</sub>
 
 ```js
-import { Winding, Camera, OrbitController } from 'winding';
+import { Winding, Camera, OrbitController } from 'winding-engine';
 
 const canvas = document.querySelector('canvas');
 const engine = await Winding.create(canvas);
@@ -72,18 +72,18 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding@0.7.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.7.1/src/winding.js';
 </script>
 ```
 
 **From npm**, if you have a bundler or an import map:
 
 ```bash
-npm install winding
+npm install winding-engine
 ```
 
 ```js
-import { Winding, Camera } from 'winding';
+import { Winding, Camera } from 'winding-engine';
 ```
 
 **As an import map**, which gets you bare specifiers with no bundler and no install:
@@ -92,8 +92,8 @@ import { Winding, Camera } from 'winding';
 <script type="importmap">
 {
   "imports": {
-    "winding": "https://cdn.jsdelivr.net/npm/winding@0.7.0/src/winding.js",
-    "winding/": "https://cdn.jsdelivr.net/npm/winding@0.7.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.7.1/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.7.1/src/"
   }
 }
 </script>
@@ -102,13 +102,17 @@ import { Winding, Camera } from 'winding';
 **Pin the version.** `@latest` re-resolves on every page load, so a release you have never seen can
 change what your page runs. A pinned URL is immutable on both jsDelivr and unpkg.
 
+**The package is `winding-engine`, the project is Winding.** npm refuses `winding` as too similar to
+the long-established `bindings`, which is a filter worth having and not worth fighting. three.js
+makes the same split for its own reasons: the repository is `three.js` and the package is `three`.
+
 ### The lower tiers come with it
 
 The package exports `./*`, so reaching below the top tier is the same specifier with a path:
 
 ```js
-import { GpuProfiler } from 'winding/render/timing.js';
-import { createBuffer } from 'winding/rhi/buffer.js';
+import { GpuProfiler } from 'winding-engine/render/timing.js';
+import { createBuffer } from 'winding-engine/rhi/buffer.js';
 ```
 
 That is the packaging expression of the rule the engine follows internally: dropping down a tier is

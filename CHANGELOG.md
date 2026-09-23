@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-23
+
+**The package is `winding-engine`.** 0.7.0 could not be published: npm's
+typosquatting filter refuses `winding` as too similar to `bindings`, a
+long-established package that loads native `.node` files. The filter is worth
+having, so the package took a name rather than an argument.
+
+Nothing else changed. The project is still Winding, the repository is still
+`winding`, and the wordmark still carries no extension -- three.js makes the
+same split, with a `three.js` repository publishing a package called `three`.
+
+A note for anyone checking a name before they build on it: **unregistered is
+not publishable.** `npm view winding` returned a clean 404 right up until the
+registry rejected the upload, because the similarity check only runs on PUT.
+The only way to know is to try, and a rejected publish costs nothing.
+
+### Changed
+
+- `package.json` name, and every install line in the README, now say
+  `winding-engine`. Deep imports move with it:
+  `import { GpuProfiler } from 'winding-engine/render/timing.js'`.
+
+
 ## [0.7.0] - 2026-09-23
 
 **Installable from somewhere other than this repository.** No build step and no
@@ -837,7 +860,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/nolanbaxter/winding/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/nolanbaxter/winding/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/nolanbaxter/winding/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/nolanbaxter/winding/compare/v0.6.0...v0.6.1
