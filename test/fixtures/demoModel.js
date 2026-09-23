@@ -457,6 +457,8 @@ export function buildFeatureGLB({
   uv1 = null,
   baseColorTexCoord,
   imageURI = null,
+  normalImageURI = null,
+  normalScale,
   nodeScale,
 } = {}) {
   const S = 1.6;
@@ -508,7 +510,11 @@ export function buildFeatureGLB({
     if (baseColorTexCoord !== undefined) pbr.baseColorTexture.texCoord = baseColorTexCoord;
   }
 
-  const material = { name: 'probe', pbrMetallicRoughness: pbr, metallicFactor: 0, roughnessFactor: 0.8 };
+  const material = { name: 'probe', pbrMetallicRoughness: pbr };
+  if (normalImageURI) {
+    material.normalTexture = { index: imageURI ? 1 : 0 };
+    if (normalScale !== undefined) material.normalTexture.scale = normalScale;
+  }
   if (alphaMode) material.alphaMode = alphaMode;
   if (alphaCutoff !== undefined) material.alphaCutoff = alphaCutoff;
   if (emissiveFactor) material.emissiveFactor = emissiveFactor;
@@ -530,10 +536,11 @@ export function buildFeatureGLB({
     scenes: [{ nodes: [0] }],
     scene: 0,
   };
-  if (imageURI) {
-    json.images = [{ uri: imageURI }];
+  const uris = [imageURI, normalImageURI].filter(Boolean);
+  if (uris.length > 0) {
+    json.images = uris.map((uri) => ({ uri }));
     json.samplers = [{ magFilter: 9728, minFilter: 9728 }];   // NEAREST, so halves stay crisp
-    json.textures = [{ source: 0, sampler: 0 }];
+    json.textures = uris.map((_, i) => ({ source: i, sampler: 0 }));
   }
 
   return encodeGLB(json, bytes);

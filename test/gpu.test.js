@@ -527,17 +527,19 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
     });
 
-    const shoot = async (options) => {
+    const shootWith = async (options, light) => {
       const scene = probe.createScene();
       const cam = new Camera({ fovY: 1.0, near: 0.1 });
       cam.position.set([0, 0, 2]);
       cam.target.set([0, 0, 0]);
       scene.add(await probe.load(buildFeatureGLB(options)));
+      if (light) scene.addLight(light);
       probe.renderFrame(scene, cam);
       // Once per frame, before anything else awaits -- see rhi.readPixels.
       const pixels = await probe.rhi.readPixels();
       return [pixels[MID], pixels[MID + 1], pixels[MID + 2]];
     };
+    const shoot = (options) => shootWith(options, null);
 
     const isSky = ([r, g, b]) => g > r && g > b;
     const red = ([r, g, b]) => r > g && r > b;
@@ -602,6 +604,50 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       // invented tangent frame used to be degenerate on X-facing geometry.
       const flat = await shoot({ includeNormals: false });
       expect('flat-shaded geometry is not NaN', flat, red(flat));
+
+      // A NORMAL MAP, which nothing had ever sampled. The default is a flat
+      // 1x1, so the whole tangent-space path -- the TBN basis, normalScale,
+      // the handedness in tangent.w -- had only ever been fed a normal of
+      // (0,0,1), which is the one input that makes the basis irrelevant.
+      //
+      // This is the code the black-cube bug lived next door to: an arbitrary
+      // tangent is harmless while the map is flat, and becomes the surface
+      // orientation the moment it is not.
+      const flatMap = twoToneImageURI('#8080ff', '#8080ff');     // (0,0,1): no tilt
+      const tiltedMap = twoToneImageURI('#ff8080', '#ff8080');   // hard tilt along +X
+      const withFlat = await shoot({ normalImageURI: flatMap, baseColorFactor: [0.8, 0.8, 0.8, 1] });
+      const withTilt = await shoot({ normalImageURI: tiltedMap, baseColorFactor: [0.8, 0.8, 0.8, 1] });
+      const shift = Math.abs(withFlat[0] - withTilt[0])
+        + Math.abs(withFlat[1] - withTilt[1])
+        + Math.abs(withFlat[2] - withTilt[2]);
+      if (shift < 12) {
+        throw new Error(
+          `a normal map changed nothing: flat ${show(withFlat)} vs tilted ${show(withTilt)}`,
+        );
+      }
+      results.push('a normal map reorients the surface');
+
+      // And scale 0 must put it back, which is the one knob on that texture.
+      const cancelled = await shoot({
+        normalImageURI: tiltedMap, normalScale: 0, baseColorFactor: [0.8, 0.8, 0.8, 1],
+      });
+      const residue = Math.abs(cancelled[0] - withFlat[0]) + Math.abs(cancelled[1] - withFlat[1]);
+      if (residue > 6) {
+        throw new Error(`normalScale 0 did not cancel the map: ${show(cancelled)} vs flat ${show(withFlat)}`);
+      }
+      results.push('normalScale 0 cancels it');
+
+      // CLUSTERED LIGHTING, also never checked against a pixel. The suite
+      // counts lights into the buffer and the cluster passes run, but whether
+      // a punctual light ever reaches a surface was nobody's assertion.
+      const unlit = await shootWith({ baseColorFactor: [0.6, 0.6, 0.6, 1] }, null);
+      const lit = await shootWith({ baseColorFactor: [0.6, 0.6, 0.6, 1] }, {
+        position: [0, 0, 1.2], color: [1, 1, 1], intensity: 40, radius: 6,
+      });
+      if (!(lit[0] > unlit[0] + 20)) {
+        throw new Error(`a point light did not reach the surface: ${show(unlit)} -> ${show(lit)}`);
+      }
+      results.push('a point light reaches the surface');
 
       // Emissive with no texture. The default map was black, so this factor
       // used to be multiplied away entirely.

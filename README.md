@@ -3,6 +3,9 @@
   <img src="docs/wordmark-light.svg" alt="Winding" width="380">
 </picture>
 
+[![npm](https://img.shields.io/npm/v/winding-engine?color=%23cb3837&label=winding-engine)](https://www.npmjs.com/package/winding-engine)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A WebGPU rendering engine for the browser. No dependencies, no build step — ES modules, served as-is.
 
 Written to find out what actually goes into a modern renderer, so it is built the way a production
@@ -72,7 +75,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.7.1/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.7.3/src/winding.js';
 </script>
 ```
 
@@ -92,8 +95,8 @@ import { Winding, Camera } from 'winding-engine';
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.7.1/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.7.1/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.7.3/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.7.3/src/"
   }
 }
 </script>
@@ -150,8 +153,8 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 399 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 16 checks on a real device
+npm test          # 403 checks, Node, no browser
+npm run test:gpu  # serves the page; open test/gpu.html for 17 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort

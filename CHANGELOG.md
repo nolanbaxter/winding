@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-23
+
+**Rendered pixels are something a check can read now**, and the first thing
+they showed was a scene mixup that had nothing to do with what I was looking
+for.
+
+### Fixed
+
+- **A second scene drew the first one's geometry.** `GpuDriven` decided its
+  cached batches were stale by comparing `scene.revision` alone. Revision
+  counts changes WITHIN a scene and starts at zero in every scene, so two
+  scenes one `add()` old each both report 1 -- and rendering the second kept
+  the first's batches: its primitives, its materials, and therefore its
+  pipelines.
+
+  `createScene()` is public and multi-scene was deliberately fixed once
+  already, so this is a menu behind a game, or a preview beside a main view,
+  drawing the wrong thing. Scenes carry an `id` now and staleness is a
+  (scene, revision) pair, because a revision alone never identified anything.
+
+### Added
+
+- **`rhi.readPixels()`**, returning RGBA bytes from the frame just drawn. The
+  swap chain is now `COPY_SRC`, which costs a lazy-clear optimisation and buys
+  the only way to ask what colour a pixel is -- a WebGPU canvas has no working
+  `toDataURL`, so without it the answer did not exist at any price.
+
+  Two things it undoes, both found by using it. The swap chain is
+  `bgra8unorm` nearly everywhere, so blue and red are swapped back: a method
+  promising RGBA that returns BGRA is a bug that reads as a rendering bug. And
+  it works ONCE per frame -- the await inside lets the browser present, so a
+  second call copies from a texture that has just been handed over and
+  cleared. There is deliberately no `readPixel(x, y)`, because that shape
+  invites exactly that.
+
+- **A feature-matrix check**: one full-view quad per feature, rendered, with
+  the middle pixel read back. Fourteen of them -- opaque, sky, MASK either
+  side of its cutoff, COLOR_0, texCoord 0 and 1, a mirrored node, a
+  non-indexed primitive, flat-shaded geometry, a normal map, `normalScale` 0
+  cancelling it, a point light reaching a surface, and emissive with no map.
+
+  Between them the rendered fixtures had used ONE material texture slot, one
+  alpha mode that draws, positive scales only, indexed geometry only and
+  supplied normals only. Everything else was imported, unit-tested, compiled
+  into a pipeline, and never turned into a pixel. The suite's strongest claim
+  was "no device errors, no WGSL errors", and a NaN normal and a black default
+  texture both produce neither.
+
+
 ## [0.7.2] - 2026-09-23
 
 **Two bugs that only untextured geometry could reach.** Every asset in this
@@ -926,7 +975,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/nolanbaxter/winding/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/nolanbaxter/winding/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/nolanbaxter/winding/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/nolanbaxter/winding/compare/v0.6.2...v0.7.0
