@@ -160,6 +160,70 @@ export class OrbitController {
   }
 
   /**
+   * Adopt wherever the camera is now, instead of overwriting it.
+   *
+   * This controller OWNS the camera's position: update() rebuilds it from
+   * yaw, pitch, distance and target every frame. So anything that moves the
+   * camera directly -- a cutscene, a teleport, a saved viewpoint,
+   * Camera.frameBounds -- works for exactly one frame and is then silently
+   * undone. There was no way to hand control back.
+   *
+   * This is the inverse of what update() does, so the two agree by
+   * construction: distance is the length of the offset, pitch is the angle it
+   * makes with the horizontal plane, and yaw is its bearing in that plane.
+   *
+   * TWO PLACES IT CANNOT BE EXACT, both because the controller's coordinates
+   * cannot express every pose:
+   *
+   *   Past the pitch clamp. Looking straight down is a pose this controller
+   *   deliberately refuses -- at the pole the up vector is ambiguous -- so a
+   *   camera aimed there is adopted at the nearest angle it can hold.
+   *
+   *   Outside the distance clamp, for the same reason.
+   *
+   * Both are applied immediately rather than on the next frame, because a
+   * camera that moves one frame after you stopped touching it is harder to
+   * explain than one that moves when you ask.
+   *
+   * Yaw is left alone when the camera is directly above or below its target,
+   * where the bearing is genuinely undefined -- keeping the old one means no
+   * spin when it comes back off the pole.
+   */
+  syncFromCamera() {
+    const camera = this.camera;
+    const dx = camera.position[0] - camera.target[0];
+    const dy = camera.position[1] - camera.target[1];
+    const dz = camera.position[2] - camera.target[2];
+    const distance = Math.hypot(dx, dy, dz);
+
+    this.target.set(camera.target);
+    this.desired.target.set(camera.target);
+
+    if (distance > 0) {
+      // sin(pitch) = dy / distance, straight out of update()'s Y term. The
+      // clamp is against floating point pushing the ratio past 1, not against
+      // bad input.
+      this.pitch = clamp(Math.asin(clamp(dy / distance, -1, 1)), MIN_PITCH, MAX_PITCH);
+
+      // atan2(x, z), not the usual (y, x): update() puts sin(yaw) on X and
+      // cos(yaw) on Z, and both carry the same positive scale, so it divides
+      // out. Skipped at the pole, where both are zero and the answer would be
+      // whatever the noise says.
+      if (Math.hypot(dx, dz) > 1e-6) this.yaw = Math.atan2(dx, dz);
+
+      this.distance = clamp(distance, this.minDistance, this.maxDistance);
+    }
+
+    this.desired.yaw = this.yaw;
+    this.desired.pitch = this.pitch;
+    this.desired.distance = this.distance;
+
+    // Both actual AND desired, so the damping has nothing to travel: adopting
+    // a pose should be instant, not a glide from wherever it used to be.
+    return this.update(0);
+  }
+
+  /**
    * Frame an axis-aligned box: point at its centre and back off to fit it.
    *
    * Same signature as Camera.frameBounds on purpose, so anything that frames

@@ -572,4 +572,87 @@ test('the controller and a bare camera agree on how far to back off', () => {
   controller.detach();
 });
 
+
+test('syncFromCamera reproduces the pose it adopted', () => {
+  // The inverse of what update() does, so the two have to agree exactly.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const controller = new OrbitController(camera, stubElement(), { distance: 6 });
+
+  camera.position.set([3, 4, 5]);
+  camera.target.set([1, 1, 1]);
+  controller.syncFromCamera();
+
+  vecClose(camera.position, [3, 4, 5], 1e-5, 'position survives the round trip');
+  vecClose(camera.target, [1, 1, 1], 1e-5, 'target too');
+  controller.detach();
+});
+
+test('a camera moved directly is no longer snapped back', () => {
+  // THE gap. The controller rebuilds position from yaw/pitch/distance every
+  // frame, so anything that moved the camera itself lasted exactly one frame
+  // and was then silently undone. There was no way to hand control back.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const controller = new OrbitController(camera, stubElement(), { distance: 6 });
+
+  camera.position.set([9, 2, 4]);
+  camera.target.set([0, 0, 0]);
+  controller.syncFromCamera();
+
+  // Several frames of the normal loop, which is what used to undo it.
+  for (let i = 0; i < 10; i++) controller.update(1 / 60);
+
+  vecClose(camera.position, [9, 2, 4], 1e-4, 'still where it was put');
+  controller.detach();
+});
+
+test('framing a camera then handing it back holds', () => {
+  // The combination this exists for: Camera.frameBounds writes position and
+  // target, which the controller owns. Without the sync the frame is gone by
+  // the next frame.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const controller = new OrbitController(camera, stubElement(), { distance: 50 });
+  camera.update(1);
+
+  camera.frameBounds([-1, -1, -1], [1, 1, 1]);
+  const framed = [...camera.position];
+  controller.syncFromCamera();
+  for (let i = 0; i < 10; i++) controller.update(1 / 60);
+
+  vecClose(camera.position, framed, 1e-4, 'the framing survived the controller');
+  controller.detach();
+});
+
+test('a pose the controller cannot hold is adopted at the nearest it can', () => {
+  // Straight down is refused on purpose: at the pole the up vector is
+  // ambiguous and the view flips. Adopting it has to clamp, and saying so is
+  // better than a silent flip later.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const controller = new OrbitController(camera, stubElement(), { distance: 6 });
+
+  camera.position.set([0, 10, 0]);       // directly above
+  camera.target.set([0, 0, 0]);
+  controller.syncFromCamera();
+
+  assert.ok(Number.isFinite(controller.pitch), 'pitch must not be NaN');
+  assert.ok(Math.abs(controller.pitch) < Math.PI / 2, `pitch stays off the pole: ${controller.pitch}`);
+  assert.ok(Number.isFinite(camera.position[0]) && Number.isFinite(camera.position[2]));
+  controller.detach();
+});
+
+test('a camera sitting on its own target keeps the angles it had', () => {
+  // No offset means no direction to derive. Inventing one would spin the view
+  // for no reason the user could see.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const controller = new OrbitController(camera, stubElement(), { distance: 6, yaw: 1.2, pitch: 0.3 });
+
+  camera.position.set([5, 5, 5]);
+  camera.target.set([5, 5, 5]);
+  controller.syncFromCamera();
+
+  close(controller.yaw, 1.2, EPS, 'yaw kept');
+  close(controller.pitch, 0.3, EPS, 'pitch kept');
+  vecClose(controller.target, [5, 5, 5], EPS, 'but the target moved');
+  controller.detach();
+});
+
 console.log(`\n${passed} checks passed\n`);

@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-23
+
+**Numbers you used to have to guess.** A camera distance, and a colour in a
+space nobody tells you about. Both were derivable all along.
+
+Minor rather than patch because two behaviours change: orbiting tilts the
+other way, and `OrbitController.frameBounds` takes `margin` where it took
+`fill`, with a different default.
+
+### Fixed
+
+- **Orbiting tilted the wrong way.** `clientY` grows downward, so a drag
+  upward is a negative delta -- and the pitch line subtracted it, raising the
+  camera. The yaw line directly above subtracts its delta, which sends the
+  camera the other way and turns the object with your hand.
+
+  So horizontal was "grab the object" and vertical was "grab the camera": two
+  conventions in one gesture, which reads as the model being hinged behind
+  itself. Grab the front of a ball and pull up and its underside rotates
+  toward you, so the camera goes down. Reported from a page someone was
+  actually using, which is the only way this was ever going to be found.
+
+- **`OrbitController.frameBounds` left the aspect out**, so a wide object on
+  a portrait viewport ran off both sides -- by nearly a factor of two. It
+  computed the distance inline rather than sharing the one definition.
+
+- **The package shipped whatever was lying around.** `files` listed
+  `examples` and `DESIGN.md`, both of which `.gitignore` says in as many
+  words are "Not published". They are untracked, so the tarball depended on
+  who published it: CI, from a clean clone, produced 59 files; a local publish
+  produced 62, including files in no version control anywhere. `files` is
+  `["src"]` now.
+
+### Added
+
+- **Camera framing.** `scene.frame(camera)` -- or a controller; the same
+  method serves either -- points at everything in the scene and backs off far
+  enough to see it.
+
+  ```js
+  scene.frame(controller);          // no distance to pick
+  ```
+
+  A sphere of radius r fills a frustum of half-angle a at `r / sin(a)`, and
+  the scene already computes those bounds every frame for culling. The number
+  was always there, just never offered. It fits the bounding SPHERE rather
+  than the eight corners, so orbiting does not change how much of the view the
+  object fills -- fitting corners makes an object breathe as it turns, which
+  is the same reason the shadow cascades are sphere-fitted.
+
+  `Camera.frameBounds`, `Scene.bounds`, and `fitDistance` / `boundsRadius`
+  for anything that wants the arithmetic on its own.
+
+- **`OrbitController.syncFromCamera()`**, which adopts wherever the camera is
+  instead of overwriting it. The controller rebuilds position from yaw, pitch,
+  distance and target every frame, so a cutscene, a teleport, a saved
+  viewpoint or `Camera.frameBounds` all worked for exactly one frame and were
+  then silently undone. There was no way to hand control back; now there is.
+
+  It is the exact inverse of what `update()` does, so the two agree by
+  construction. It cannot be exact past the pitch clamp or outside the
+  distance clamp -- those are poses the controller deliberately refuses -- so
+  it adopts the nearest it can hold, immediately rather than a frame later.
+
+- **sRGB to linear.** `colorFromHex`, `colorFromBytes`, `srgbToLinear`,
+  `linearToSrgb`.
+
+  Every colour this engine takes is linear -- base colour, emissive, light
+  colour, sun colour, the sky -- and every colour a human has is not. Typing a
+  picked value straight in is not slightly off: sRGB 0.35 is linear 0.10, so
+  it arrives roughly three times too bright and washed toward white with
+  nothing reported. I made that mistake writing an example, picked
+  `[0.85, 0.35, 0.25]` for red and got salmon, and a user asked why.
+
+  Alpha is deliberately NOT converted, which is what a hand-rolled version
+  gets wrong: the transfer function is for colour channels, and curving alpha
+  makes transparency subtly wrong in a way that reads as a blending bug.
+
+  Note that a light EMITS, so its colour is radiance that routinely exceeds 1
+  -- the default sun is `[3.2, 3.0, 2.7]`. `#ffffff` converts to `[1,1,1]`,
+  which is a correct white and a dim sun.
+
+### Changed
+
+- The 0.7.2 notes listed `examples/cdn.html` as an addition to the package.
+  It is gitignored and shipped to nobody; the entry now says so.
+
+
 ## [0.7.3] - 2026-09-23
 
 **Rendered pixels are something a check can read now**, and the first thing
@@ -978,7 +1066,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/nolanbaxter/winding/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/nolanbaxter/winding/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/nolanbaxter/winding/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/nolanbaxter/winding/compare/v0.7.0...v0.7.1

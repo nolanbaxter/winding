@@ -75,7 +75,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.7.3/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.8.0/src/winding.js';
 </script>
 ```
 
@@ -95,8 +95,8 @@ import { Winding, Camera } from 'winding-engine';
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.7.3/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.7.3/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.8.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.8.0/src/"
   }
 }
 </script>
@@ -153,7 +153,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 403 checks, Node, no browser
+npm test          # 429 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 17 checks on a real device
 ```
 
