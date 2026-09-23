@@ -1,0 +1,108 @@
+# Release, derived from package.json.
+#
+# The whole release is a normal commit:
+#
+#   edit package.json + CHANGELOG.md
+#   git commit -m "Release 0.7.4: ..." && git push
+#
+# and this tags it, writes the GitHub release from the changelog, and publishes
+# to npm. Nothing to tag by hand, nothing to remember in order.
+#
+# ONE SOURCE OF TRUTH. This used to be two -- a tag and a version field -- with
+# a guard comparing them, which is the shape of a design that has a problem
+# rather than a solution. package.json is the one that gets published, the one
+# `npm view` reports and the one the /gh/ CDN route serves, so it is the truth
+# and the tag is derived from it. Nothing can disagree with itself.
+#
+# THE GUARD THAT REPLACED IT is the changelog. A version with no `## [x.y.z]`
+# section does not release, which makes "bumped" and "written up" one event
+# instead of two things to remember separately -- and stops a version bump in
+# some unrelated commit from shipping by itself.
+#
+# NO TOKEN for npm. Trusted publishing: GitHub mints a short-lived OIDC token
+# for this exact workflow in this repository and npm verifies it. An automation
+# token in a secret would work and be worse -- long-lived, bypasses 2FA by
+# design, and anything that can read it can publish forever.
+#
+# ONE-TIME SETUP on npmjs.com:
+#   winding-engine -> Settings -> Trusted publishers -> GitHub Actions,
+#   repository nolanbaxter/winding, workflow file release.yml.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: ['package.json']
+  # For re-running a release whose publish failed, without inventing a version.
+  workflow_dispatch:
+
+permissions:
+  contents: write        # create the tag and the release
+  id-token: write        # mint the OIDC token npm checks
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # tags, so an already-released version is visible
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or newer; the runner ships older.
+      - run: npm install -g npm@latest
+
+      - name: What does package.json claim
+        id: version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version"
+
+      # package.json is touched by plenty of commits that are not releases.
+      # An existing tag is the honest way to ask "has this already shipped",
+      # and makes the whole job idempotent.
+      - name: Skip if this version is already tagged
+        id: tagged
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.version.outputs.version }} exists; nothing to do."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Before the tag exists, so a missing changelog costs nothing to fix.
+      - name: The changelog must describe this version
+        if: steps.tagged.outputs.already == 'false'
+        run: node tools/release-notes.js "${{ steps.version.outputs.version }}" > /tmp/notes.md
+
+      - name: The Node suites
+        if: steps.tagged.outputs.already == 'false'
+        run: npm test
+
+      - name: Tag and release
+        if: steps.tagged.outputs.already == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          git tag -a "v$version" -m "Winding $version"
+          git push origin "v$version"
+          gh release create "v$version" \
+            --title "Winding $version" \
+            --notes-file /tmp/notes.md
+
+      # Provenance comes free with trusted publishing: npm records the
+      # workflow, commit and repository that produced the tarball.
+      - name: Publish
+        if: steps.tagged.outputs.already == 'false'
+        run: npm publish
