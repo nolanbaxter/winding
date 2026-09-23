@@ -134,6 +134,10 @@ export class Device {
     // through an -srgb VIEW of it, so the hardware does the encode on write and
     // shaders never do gamma math by hand.
     const storageFormat = navigator.gpu.getPreferredCanvasFormat();
+    // Windows and macOS both prefer bgra8unorm, so the bytes a copy produces
+    // are B,G,R,A. readPixels undoes that rather than handing callers a
+    // platform detail dressed up as RGBA.
+    this._swapBlueAndRed = storageFormat.startsWith('bgra');
     this.viewFormat = storageFormat.endsWith('-srgb') ? storageFormat : `${storageFormat}-srgb`;
 
     this.context.configure({
@@ -141,7 +145,17 @@ export class Device {
       format: storageFormat,
       viewFormats: [this.viewFormat],
       alphaMode: 'opaque',
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      // COPY_SRC as well as RENDER_ATTACHMENT, so what was drawn can be read
+      // back -- see readPixels. It costs a lazy-clear optimisation the driver
+      // could otherwise make on the swap chain, and buys the only way to ask
+      // what colour a pixel actually is: a WebGPU canvas has no working
+      // toDataURL, so without this the answer does not exist at any price.
+      //
+      // That matters more than a screenshot API. Until this was here, no check
+      // anywhere could assert a rendered RESULT -- only that nothing threw --
+      // and "nothing threw" is exactly what a NaN normal or a black default
+      // texture produces.
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
 
     this._observeResize();
@@ -231,6 +245,65 @@ export class Device {
     // is a new object each time. The view is invalidated with the texture.
     this._depthView ??= this.depthTexture.createView({ label: 'depth' });
     return this._depthView;
+  }
+
+  /**
+   * Read rendered pixels back as RGBA bytes, row by row, from the top left.
+   *
+   *     engine.renderFrame(scene, camera);
+   *     const pixels = await engine.rhi.readPixels();
+   *     const at = (x, y) => pixels.subarray((y * engine.rhi.width + x) * 4, ...);
+   *
+   * ONCE PER FRAME, and before anything else awaits. The swap chain hands out
+   * a fresh texture each frame and presents the old one when the task ends, so
+   * the `await` inside this method is already enough to lose it: a second call
+   * copies from a texture that has just been handed over and cleared, and
+   * returns zeros. Which is why this reads a REGION and callers index into it,
+   * rather than offering a readPixel(x, y) that invites the broken shape.
+   *
+   * Two things are undone on the way out, both of which would otherwise leak a
+   * platform detail into every caller. Rows come back 256-byte aligned because
+   * that is a GPU rule, and the padding is dropped. And the swap chain is
+   * bgra8unorm nearly everywhere, so blue and red are swapped back -- a method
+   * that says RGBA and returns BGRA is a trap that reads as a rendering bug.
+   */
+  async readPixels({ x = 0, y = 0, width = this.width, height = this.height } = {}) {
+    const BYTES_PER_ROW_ALIGNMENT = 256;
+    const tightRow = width * 4;
+    const paddedRow = Math.ceil(tightRow / BYTES_PER_ROW_ALIGNMENT) * BYTES_PER_ROW_ALIGNMENT;
+
+    const staging = this.device.createBuffer({
+      label: 'readback',
+      size: paddedRow * height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+
+    const encoder = this.device.createCommandEncoder({ label: 'readback' });
+    encoder.copyTextureToBuffer(
+      { texture: this.context.getCurrentTexture(), origin: { x, y } },
+      { buffer: staging, bytesPerRow: paddedRow, rowsPerImage: height },
+      { width, height },
+    );
+    this.queue.submit([encoder.finish()]);
+
+    await staging.mapAsync(GPUMapMode.READ);
+    const padded = new Uint8Array(staging.getMappedRange());
+
+    const out = new Uint8Array(tightRow * height);
+    for (let row = 0; row < height; row++) {
+      out.set(padded.subarray(row * paddedRow, row * paddedRow + tightRow), row * tightRow);
+    }
+    staging.unmap();
+    staging.destroy();
+
+    if (this._swapBlueAndRed) {
+      for (let i = 0; i < out.length; i += 4) {
+        const b = out[i];
+        out[i] = out[i + 2];
+        out[i + 2] = b;
+      }
+    }
+    return out;
   }
 
   destroy() {

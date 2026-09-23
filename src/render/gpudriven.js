@@ -248,6 +248,10 @@ export class GpuDriven {
     /** Read for isTransparent() only: which renderables skip the batched path. */
     this.materials = materials;
     this.batchCount = 0;
+    // Which scene these batches were built from, and how many changes into
+    // it. BOTH, because revision alone does not identify anything: it counts
+    // changes within one scene and starts at zero in every scene.
+    this.sceneId = -1;
     this.sceneRevision = -1;
 
     const device = rhi.device;
@@ -660,6 +664,7 @@ export class GpuDriven {
     queue.writeBuffer(this.visibleFlagsBuffer, 0, this._zeroFlags, 0, Math.max(count, 1));
 
     this._needsFullUpload = true;
+    this.sceneId = scene.id;
     this.sceneRevision = scene.revision;
     this.stats.batches = this.batchCount;
     this.stats.items = count;
@@ -668,7 +673,16 @@ export class GpuDriven {
 
   /** Upload this frame's transforms, bounds and reset argument buffer. */
   update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets, morph) {
-    if (scene.revision !== this.sceneRevision) this.rebuildBatches(scene);
+    // A DIFFERENT scene needs rebuilding even when its revision happens to
+    // match, and it usually does: every scene's first add() takes it to 1. The
+    // check used to be on the revision alone, so rendering a second scene
+    // silently kept the first one's batches -- its primitives, its materials
+    // and therefore its pipelines. Two scenes one add() old each is all it
+    // took, which is the shape of a menu behind a game, or a preview beside a
+    // main view.
+    if (scene.id !== this.sceneId || scene.revision !== this.sceneRevision) {
+      this.rebuildBatches(scene);
+    }
 
     const count = scene.renderableCount;
 

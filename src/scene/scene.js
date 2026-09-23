@@ -24,8 +24,18 @@ import { grownCapacity, growArray } from '../core/grow.js';
 
 const DEFAULT_CAPACITY = 4096;
 
+/**
+ * Identity for a scene, so anything caching work derived from one can tell
+ * WHICH one it cached. `revision` cannot do that job: it counts changes within
+ * a scene and starts at zero in every scene, so two of them are equal almost
+ * immediately and mean entirely different things.
+ */
+let nextSceneId = 1;
+
 export class Scene {
   constructor({ capacity = DEFAULT_CAPACITY, renderableCapacity = capacity, lightCapacity = 256 } = {}) {
+    /** Unique for the life of the page. See nextSceneId. */
+    this.id = nextSceneId++;
     this.capacity = capacity;
     this.entities = new HandleAllocator(capacity);
     this.transforms = new TransformStore(capacity);

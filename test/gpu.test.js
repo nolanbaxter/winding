@@ -15,7 +15,9 @@
 import { Winding, Camera } from '../src/winding.js';
 import { shaderErrors } from '../src/rhi/shader.js';
 import { NOT_BATCHED, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
-import { buildDemoGLB, buildRiggedGLB, buildMorphedGLB } from './fixtures/demoModel.js';
+import {
+  buildDemoGLB, buildRiggedGLB, buildMorphedGLB, buildFeatureGLB, twoToneImageURI,
+} from './fixtures/demoModel.js';
 import { PBR_SHADER } from '../src/render/shaders/pbr.js';
 
 const FRAMES = 30;
@@ -497,6 +499,124 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     bothNode.destroy();
     return `skinned batch with ${targets} target, box top ${posedTop.toFixed(1)}, `
       + `front ${restingFront.toFixed(1)} -> ${morphedFront.toFixed(1)}`;
+  });
+
+  await step('every material and geometry feature actually draws', async () => {
+    // The gap this closes: between them, the rendered fixtures used ONE
+    // material texture slot, one alpha mode that draws, positive scales only,
+    // indexed geometry only, and supplied normals only. Everything else was
+    // imported, tested on the CPU, compiled into a pipeline -- and never once
+    // turned into a pixel. A constant tangent and a black emissive default
+    // both shipped through that gap.
+    //
+    // So this renders one full-view quad per feature and reads the middle
+    // pixel. No screen-space arithmetic, no screenshot to squint at: each
+    // feature gets one unambiguous answer.
+    const SIZE = 64;
+    const MID = ((SIZE / 2) * SIZE + SIZE / 2) * 4;
+
+    const probeCanvas = document.createElement('canvas');
+    probeCanvas.width = SIZE;
+    probeCanvas.height = SIZE;
+    document.body.appendChild(probeCanvas);
+
+    // A flat green sky, so "the quad was not drawn here" is unmistakable and
+    // no lighting gradient can be mistaken for geometry.
+    const SKY = [0, 1, 0];
+    const probe = await Winding.create(probeCanvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+
+    const shoot = async (options) => {
+      const scene = probe.createScene();
+      const cam = new Camera({ fovY: 1.0, near: 0.1 });
+      cam.position.set([0, 0, 2]);
+      cam.target.set([0, 0, 0]);
+      scene.add(await probe.load(buildFeatureGLB(options)));
+      probe.renderFrame(scene, cam);
+      // Once per frame, before anything else awaits -- see rhi.readPixels.
+      const pixels = await probe.rhi.readPixels();
+      return [pixels[MID], pixels[MID + 1], pixels[MID + 2]];
+    };
+
+    const isSky = ([r, g, b]) => g > r && g > b;
+    const red = ([r, g, b]) => r > g && r > b;
+    const blue = ([r, g, b]) => b > r && b > g;
+    const show = (p) => `rgb(${p.join(',')})`;
+
+    const results = [];
+    const expect = (name, pixel, ok) => {
+      if (!ok) throw new Error(`${name}: got ${show(pixel)}`);
+      results.push(name);
+    };
+
+    try {
+      // The control. Everything below is only meaningful if this is a red quad
+      // over a green sky.
+      const control = await shoot({});
+      expect('opaque', control, red(control));
+
+      const sky = await shoot({ baseColorFactor: [0.9, 0.15, 0.1, 1], nodeScale: [0.001, 0.001, 1] });
+      expect('sky', sky, isSky(sky));
+
+      // MASK, both sides of the cutoff. The discard in the fragment shader had
+      // never executed: the suite compiles all six material variants, and
+      // compiling is not drawing.
+      const cutOut = await shoot({ alphaMode: 'MASK', alphaCutoff: 0.5, baseColorFactor: [0.9, 0.15, 0.1, 0.2] });
+      expect('MASK below cutoff discards', cutOut, isSky(cutOut));
+
+      const kept = await shoot({ alphaMode: 'MASK', alphaCutoff: 0.5, baseColorFactor: [0.9, 0.15, 0.1, 0.9] });
+      expect('MASK above cutoff draws', kept, red(kept));
+
+      // COLOR_0, shipped in 0.3.0 and never rendered. White material, blue
+      // vertices: if the multiply is dropped the quad comes back white.
+      const vertexColour = await shoot({
+        baseColorFactor: [1, 1, 1, 1],
+        colors: [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1],
+      });
+      expect('COLOR_0 tints the surface', vertexColour, blue(vertexColour));
+
+      // TEXCOORD_1, also 0.3.0 and also never rendered. uv0 lands on the red
+      // half of a two-pixel texture and uv1 on the blue half, so which set the
+      // material asked for is the whole answer.
+      const image = twoToneImageURI('#ff0000', '#0000ff');
+      const LEFT = [0.25, 0.5, 0.25, 0.5, 0.25, 0.5, 0.25, 0.5];    // wholly inside the red texel
+      const RIGHT = [0.75, 0.5, 0.75, 0.5, 0.75, 0.5, 0.75, 0.5];   // wholly inside the blue one
+      const onSet0 = await shoot({ imageURI: image, baseColorTexCoord: 0, uv0: LEFT, uv1: RIGHT });
+      expect('texCoord 0 samples uv0', onSet0, red(onSet0));
+
+      const onSet1 = await shoot({ imageURI: image, baseColorTexCoord: 1, uv0: LEFT, uv1: RIGHT });
+      expect('texCoord 1 samples uv1', onSet1, blue(onSet1));
+
+      // A negative scale flips the winding, which is why there is a mirrored
+      // pipeline variant. Seven CPU checks and no draws until now: if the
+      // front face were wrong the quad would be culled and the sky would show.
+      const mirrored = await shoot({ nodeScale: [-1, 1, 1] });
+      expect('a mirrored node still faces the camera', mirrored, red(mirrored));
+
+      // Geometry the importer has to synthesise something for.
+      const unindexed = await shoot({ indexed: false });
+      expect('a non-indexed primitive draws', unindexed, red(unindexed));
+
+      // The tangent bug's own case: no NORMAL means flat shading, and the
+      // invented tangent frame used to be degenerate on X-facing geometry.
+      const flat = await shoot({ includeNormals: false });
+      expect('flat-shaded geometry is not NaN', flat, red(flat));
+
+      // Emissive with no texture. The default map was black, so this factor
+      // used to be multiplied away entirely.
+      const dim = await shoot({ baseColorFactor: [0.05, 0.05, 0.05, 1] });
+      const glowing = await shoot({ baseColorFactor: [0.05, 0.05, 0.05, 1], emissiveFactor: [0.9, 0.1, 0.1] });
+      if (!(glowing[0] > dim[0] + 30)) {
+        throw new Error(`emissive factor did nothing: ${show(dim)} -> ${show(glowing)}`);
+      }
+      results.push('emissive without a map glows');
+    } finally {
+      probe.destroy();
+      probeCanvas.remove();
+    }
+
+    return `${results.length} features drawn and read back`;
   });
 
   await step('order-independent transparency resolves into the scene', async () => {

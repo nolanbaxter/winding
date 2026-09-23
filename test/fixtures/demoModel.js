@@ -430,3 +430,124 @@ export function buildMorphedGLB() {
     scene: 0,
   }, bytes);
 }
+
+/**
+ * One quad, filling the view, with exactly one feature turned on.
+ *
+ * Every other fixture here is a scene. This is a probe: the point is that a
+ * check can render it and read the middle pixel, so each feature gets a single
+ * unambiguous answer instead of a screenshot somebody has to squint at.
+ *
+ * It exists because the rendered fixtures between them used ONE material
+ * texture slot, one alpha mode that draws, positive scales only, indexed
+ * geometry only and supplied normals only. Everything outside that had been
+ * imported and tested on the CPU, compiled into a pipeline, and never once
+ * turned into a pixel -- which is how a constant tangent and a black emissive
+ * default both shipped.
+ */
+export function buildFeatureGLB({
+  baseColorFactor = [0.9, 0.15, 0.1, 1],
+  alphaMode,
+  alphaCutoff,
+  emissiveFactor,
+  colors = null,
+  includeNormals = true,
+  indexed = true,
+  uv0 = null,
+  uv1 = null,
+  baseColorTexCoord,
+  imageURI = null,
+  nodeScale,
+} = {}) {
+  const S = 1.6;
+  const corners = [[-S, -S], [S, -S], [S, S], [-S, S]];
+  const uvCorners = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  // A non-indexed primitive is the same quad written out as six vertices,
+  // which is exactly what the importer's sequentialIndices path has to cope
+  // with and what nothing had ever drawn.
+  const order = indexed ? [0, 1, 2, 3] : [0, 1, 2, 0, 2, 3];
+
+  const positions = Float32Array.from(order.flatMap((i) => [...corners[i], 0]));
+  const normals = Float32Array.from(order.flatMap(() => [0, 0, 1]));
+  const uvs = Float32Array.from(order.flatMap((i) => (uv0 ? uv0.slice(i * 2, i * 2 + 2) : uvCorners[i])));
+  const count = order.length;
+
+  const arrays = [positions, normals, uvs];
+  const accessors = [
+    { componentType: 5126, count, type: 'VEC3', min: [-S, -S, 0], max: [S, S, 0] },
+    { componentType: 5126, count, type: 'VEC3' },
+    { componentType: 5126, count, type: 'VEC2' },
+  ];
+  const attributes = { POSITION: 0, TEXCOORD_0: 2 };
+  if (includeNormals) attributes.NORMAL = 1;
+  let next = 3;
+
+  let indicesAccessor;
+  if (indexed) {
+    arrays.push(Uint16Array.from([0, 1, 2, 0, 2, 3]));
+    accessors.push({ componentType: 5123, count: 6, type: 'SCALAR' });
+    indicesAccessor = next++;
+  }
+  if (colors) {
+    arrays.push(Float32Array.from(order.flatMap((i) => colors.slice(i * 4, i * 4 + 4))));
+    accessors.push({ componentType: 5126, count, type: 'VEC4' });
+    attributes.COLOR_0 = next++;
+  }
+  if (uv1) {
+    arrays.push(Float32Array.from(order.flatMap((i) => uv1.slice(i * 2, i * 2 + 2))));
+    accessors.push({ componentType: 5126, count, type: 'VEC2' });
+    attributes.TEXCOORD_1 = next++;
+  }
+
+  const { bytes, views } = packBuffer(arrays);
+  accessors.forEach((a, i) => { a.bufferView = i; });
+
+  const pbr = { baseColorFactor };
+  if (imageURI) {
+    pbr.baseColorTexture = { index: 0 };
+    if (baseColorTexCoord !== undefined) pbr.baseColorTexture.texCoord = baseColorTexCoord;
+  }
+
+  const material = { name: 'probe', pbrMetallicRoughness: pbr, metallicFactor: 0, roughnessFactor: 0.8 };
+  if (alphaMode) material.alphaMode = alphaMode;
+  if (alphaCutoff !== undefined) material.alphaCutoff = alphaCutoff;
+  if (emissiveFactor) material.emissiveFactor = emissiveFactor;
+
+  const primitive = { attributes, material: 0 };
+  if (indexed) primitive.indices = indicesAccessor;
+
+  const node = { name: 'probe', mesh: 0 };
+  if (nodeScale) node.scale = nodeScale;
+
+  const json = {
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors,
+    materials: [material],
+    meshes: [{ name: 'probe', primitives: [primitive] }],
+    nodes: [node],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  };
+  if (imageURI) {
+    json.images = [{ uri: imageURI }];
+    json.samplers = [{ magFilter: 9728, minFilter: 9728 }];   // NEAREST, so halves stay crisp
+    json.textures = [{ source: 0, sampler: 0 }];
+  }
+
+  return encodeGLB(json, bytes);
+}
+
+/** A 2x1 PNG as a data URI: left half one colour, right half another. */
+export function twoToneImageURI(left, right) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 2;
+  canvas.height = 1;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = left;
+  ctx.fillRect(0, 0, 1, 1);
+  ctx.fillStyle = right;
+  ctx.fillRect(1, 0, 1, 1);
+  return canvas.toDataURL('image/png');
+}

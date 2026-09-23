@@ -747,4 +747,30 @@ test('an ordinary tree still adds', () => {
   assert.ok(root.alive);
 });
 
+
+test('two scenes are distinguishable, not merely countable', () => {
+  // GpuDriven caches batches and decided they were stale by comparing
+  // scene.revision ALONE. That counts changes within a scene and starts at
+  // zero in every scene, so two scenes one add() old each both report 1 --
+  // and rendering the second silently kept the first one's batches: its
+  // primitives, its materials, and therefore its pipelines. A menu behind a
+  // game, or a preview beside a main view, is all it takes.
+  //
+  // The collision below is the bug, reproduced. `id` is what makes the two
+  // answerable apart.
+  const a = new Scene({ capacity: 8 });
+  const b = new Scene({ capacity: 8 });
+  assert.notEqual(a.id, b.id, 'scenes must be distinguishable');
+
+  const primitive = { indexCount: 6, materialId: 0, bounds: { min: [0, 0, 0], max: [1, 1, 1] } };
+  for (const scene of [a, b]) {
+    const entity = scene.entities.alloc();
+    scene.transforms.add(entity, {});
+    scene._addRenderable(entity, primitive);
+  }
+
+  assert.equal(a.revision, b.revision,
+    'and their revisions DO collide, which is exactly why revision alone cannot decide');
+});
+
 console.log(`\n${passed} checks passed\n`);
