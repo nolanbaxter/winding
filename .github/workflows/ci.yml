@@ -1,0 +1,31 @@
+# The Node suites, on every push and pull request.
+#
+# There is no install step because there are no dependencies. That is not a
+# boast, it is why this file is eight lines: nothing to cache, nothing to audit,
+# nothing to go stale between a green run and a red one.
+#
+# The GPU suite is NOT here and cannot be. It needs a real adapter, and a
+# headless runner has none -- `npm run test:gpu` serves the page and a human
+# opens it. So a green tick here means the 403 Node checks passed, and says
+# nothing about WGSL. Worth knowing, given that everything this engine got
+# wrong this year was invisible to exactly these suites.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
