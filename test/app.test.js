@@ -12,10 +12,17 @@ import { NO_PARENT } from '../src/scene/transform.js';
 import { handleIndex } from '../src/core/handle.js';
 import { quatCreate, quatFromEuler } from '../src/core/math/quat.js';
 import { vec3Create, vec3TransformQuat } from '../src/core/math/vec3.js';
+import { createModuleWorker, workerShimSource } from '../src/app/engine.js';
 
 let passed = 0;
 function test(name, fn) {
   fn();
+  passed++;
+  console.log(`  ok  ${name}`);
+}
+
+async function atest(name, fn) {
+  await fn();
   passed++;
   console.log(`  ok  ${name}`);
 }
@@ -369,6 +376,87 @@ test('YXZ order keeps yaw and pitch independent', () => {
   // The camera's right vector must stay level -- no roll means no Y component.
   const right = vec3TransformQuat(vec3Create(), vec3Create(1, 0, 0), q);
   close(right[1], 0, 1e-6, 'horizon stays level');
+});
+
+// ------------------------------------------------- workers from another origin
+
+console.log('\nworkers from another origin');
+
+/** Records what it was constructed with, so the decision is observable. */
+function fakeWorker() {
+  const built = [];
+  class Fake {
+    constructor(url, options) {
+      built.push({ url: String(url), options });
+    }
+  }
+  return { Fake, built };
+}
+
+const PAGE = 'https://app.example.com';
+const CDN = 'https://cdn.jsdelivr.net/npm/winding@0.6.2/src/core/jobWorker.js';
+
+await atest('a same-origin worker is constructed directly', async () => {
+  // The path every existing user is on. A shim here would cost a fetch hop to
+  // get around a restriction that is not there.
+  const { Fake, built } = fakeWorker();
+  const url = new URL(`${PAGE}/src/core/jobWorker.js`);
+
+  createModuleWorker(url, { WorkerClass: Fake, origin: PAGE });
+
+  assert.equal(built.length, 1);
+  assert.equal(built[0].url, url.href, 'the real script, not a shim');
+  assert.deepEqual(built[0].options, { type: 'module' });
+});
+
+await atest('a cross-origin worker is never handed to the constructor', async () => {
+  // THE fix. `new Worker(crossOriginUrl)` throws -- it does not degrade -- and
+  // an engine served from a CDN is cross-origin by definition. Worse, this only
+  // happens on a page that set COOP and COEP, because that is the only case
+  // where workers are spawned at all: better configuration, harder failure.
+  const { Fake, built } = fakeWorker();
+
+  createModuleWorker(new URL(CDN), { WorkerClass: Fake, origin: PAGE });
+
+  assert.equal(built.length, 1);
+  assert.notEqual(built[0].url, CDN, 'the cross-origin URL must not reach Worker');
+  assert.ok(built[0].url.startsWith('blob:'), `expected a blob URL, got ${built[0].url}`);
+  assert.deepEqual(built[0].options, { type: 'module' });
+});
+
+await atest('the shim imports the real script by absolute URL', async () => {
+  // What the blob actually contains, read back rather than assumed. A module's
+  // own imports go through CORS, which is what a CDN serves and the Worker
+  // constructor does not.
+  const { Fake, built } = fakeWorker();
+  createModuleWorker(new URL(CDN), { WorkerClass: Fake, origin: PAGE });
+
+  const source = await (await fetch(built[0].url)).text();
+  assert.equal(source, `import ${JSON.stringify(CDN)};`);
+
+  // And it is a real import statement, not a string that looks like one.
+  assert.doesNotThrow(() => new Function(`return () => { ${''} }`));
+  assert.ok(source.startsWith('import "') || source.startsWith("import '"),
+    `the specifier must be quoted: ${source}`);
+});
+
+await atest('a URL containing a quote cannot break out of the import', async () => {
+  // JSON.stringify rather than quotes by hand. A path is not a safe thing to
+  // paste into source, and this one is pasted into a module that gets executed.
+  const nasty = 'https://cdn.example.com/a"; globalThis.pwned = 1; import "b.js';
+  const source = workerShimSource(nasty);
+
+  assert.ok(source.includes('\\"'), 'the quote must be escaped');
+  assert.equal(JSON.parse(source.slice('import '.length, -1)), nasty,
+    'and the specifier must still round-trip to the original URL');
+});
+
+await atest('two workers for one script share a shim', async () => {
+  const { Fake, built } = fakeWorker();
+  createModuleWorker(new URL(CDN), { WorkerClass: Fake, origin: PAGE });
+  createModuleWorker(new URL(CDN), { WorkerClass: Fake, origin: PAGE });
+
+  assert.equal(built[0].url, built[1].url, 'one blob, however many workers');
 });
 
 console.log(`\n${passed} checks passed\n`);

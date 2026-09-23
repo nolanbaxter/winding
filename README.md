@@ -42,7 +42,7 @@ party assets shown here to demonstrate the renderer; neither is part of it, and 
 redistributed in this repository.</sub>
 
 ```js
-import { Winding, Camera, OrbitController } from './src/winding.js';
+import { Winding, Camera, OrbitController } from 'winding';
 
 const canvas = document.querySelector('canvas');
 const engine = await Winding.create(canvas);
@@ -63,6 +63,71 @@ engine.run({
 That is the whole setup. There is no `init()` to forget, no render-order to get right, no pass list to
 maintain, and no far plane to tune.
 
+## Install
+
+There is no build step and there are no dependencies, so a URL is the whole install. The files you
+import are the files in this repository.
+
+**From a CDN**, which needs nothing installed at all:
+
+```html
+<script type="module">
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding@0.7.0/src/winding.js';
+</script>
+```
+
+**From npm**, if you have a bundler or an import map:
+
+```bash
+npm install winding
+```
+
+```js
+import { Winding, Camera } from 'winding';
+```
+
+**As an import map**, which gets you bare specifiers with no bundler and no install:
+
+```html
+<script type="importmap">
+{
+  "imports": {
+    "winding": "https://cdn.jsdelivr.net/npm/winding@0.7.0/src/winding.js",
+    "winding/": "https://cdn.jsdelivr.net/npm/winding@0.7.0/src/"
+  }
+}
+</script>
+```
+
+**Pin the version.** `@latest` re-resolves on every page load, so a release you have never seen can
+change what your page runs. A pinned URL is immutable on both jsDelivr and unpkg.
+
+### The lower tiers come with it
+
+The package exports `./*`, so reaching below the top tier is the same specifier with a path:
+
+```js
+import { GpuProfiler } from 'winding/render/timing.js';
+import { createBuffer } from 'winding/rhi/buffer.js';
+```
+
+That is the packaging expression of the rule the engine follows internally: dropping down a tier is
+additive, and there is never a wall, only a floor. A package that exported one entry point would put
+a wall exactly where the design says there isn't one.
+
+### Two things a CDN changes
+
+**Workers.** The job system spawns them only on a cross-origin-isolated page (COOP + COEP), and
+`new Worker()` refuses a cross-origin script — it throws rather than degrading. So the engine loads
+its worker through a same-origin shim module that imports the real one, because a module's own
+imports go through CORS where the Worker constructor never does. Nothing to configure; it is only
+paid when the origins actually differ.
+
+**Cross-origin isolation is still yours to set.** Without those headers `SharedArrayBuffer` does not
+exist, the job system runs inline, and results are identical — see
+[Nothing is sized in advance](#what-it-does). Serving Winding from a CDN does not change that either
+way; the headers belong to your page.
+
 ## Running it
 
 Requires a browser with WebGPU (Chrome/Edge 113+, Safari 26+, Firefox 141+ on Windows) and Node 20+
@@ -81,8 +146,8 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 348 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 14 checks on a real device
+npm test          # 399 checks, Node, no browser
+npm run test:gpu  # serves the page; open test/gpu.html for 16 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort

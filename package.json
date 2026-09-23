@@ -1,9 +1,43 @@
 {
   "name": "winding",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "A WebGPU rendering engine for the browser. No dependencies, no build step.",
   "license": "MIT",
+  "author": "Nolan Baxter",
+  "homepage": "https://github.com/nolanbaxter/winding#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nolanbaxter/winding.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nolanbaxter/winding/issues"
+  },
+  "keywords": [
+    "webgpu",
+    "3d",
+    "renderer",
+    "rendering-engine",
+    "graphics",
+    "gltf",
+    "pbr",
+    "wgsl",
+    "gpu-driven",
+    "clustered-shading"
+  ],
   "type": "module",
+  "main": "./src/winding.js",
+  "exports": {
+    ".": "./src/winding.js",
+    "./*": "./src/*"
+  },
+  "unpkg": "./src/winding.js",
+  "jsdelivr": "./src/winding.js",
+  "sideEffects": false,
+  "files": [
+    "src",
+    "examples",
+    "DESIGN.md"
+  ],
   "engines": {
     "node": ">=20"
   },

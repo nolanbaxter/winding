@@ -34,6 +34,57 @@ import { JobSystem, JOB_COMPOSE_TRANSFORMS } from '../core/jobs.js';
 import { composeRange } from '../scene/transformJob.js';
 import { sharedMemoryAvailable } from '../core/shared.js';
 
+
+/**
+ * The shim module a cross-origin worker is loaded through.
+ *
+ * A module's own imports are fetched with CORS, which a CDN serves happily.
+ * The Worker constructor is the thing that refuses, so the way past it is a
+ * worker script that is same-origin and does nothing but import the real one.
+ *
+ * JSON.stringify rather than quotes by hand: it is the specifier of a real
+ * import statement, and a URL may legally contain a quote.
+ */
+export function workerShimSource(href) {
+  return `import ${JSON.stringify(href)};`;
+}
+
+/** Blob URL of the shim for each worker href. One per URL, for the page's life. */
+const shimUrls = new Map();
+
+/**
+ * A module Worker, whether or not the engine was served from the page's origin.
+ *
+ * `new Worker(url)` REFUSES a cross-origin script -- it THROWS rather than
+ * degrading -- and an engine loaded from a CDN is cross-origin by definition.
+ * So the case this exists for is the good one: a page that set COOP and COEP,
+ * which is the only case where the job system spawns workers at all, loading
+ * Winding from jsDelivr. Without this, better configuration produces a harder
+ * failure, which is exactly backwards.
+ *
+ * Same-origin stays a direct construction. The shim costs a fetch hop and
+ * exists to get around a restriction that is not there.
+ *
+ * The blob URL is deliberately not revoked. It is a few dozen bytes, shared by
+ * every worker that loads the same script, and revoking it while a worker is
+ * still fetching it is a race whose best outcome is nothing.
+ */
+export function createModuleWorker(
+  url,
+  { WorkerClass = globalThis.Worker, origin = globalThis.location?.origin } = {},
+) {
+  if (url.origin === origin) return new WorkerClass(url, { type: 'module' });
+
+  let shim = shimUrls.get(url.href);
+  if (shim === undefined) {
+    shim = URL.createObjectURL(
+      new Blob([workerShimSource(url.href)], { type: 'text/javascript' }),
+    );
+    shimUrls.set(url.href, shim);
+  }
+  return new WorkerClass(shim, { type: 'module' });
+}
+
 export class Winding {
   /**
    * @param canvas a <canvas>; it is sized, configured and observed for you
@@ -77,7 +128,7 @@ export class Winding {
     const jobs = new JobSystem({
       workerCount: options.workerCount,
       createWorker: sharedMemoryAvailable
-        ? () => new Worker(new URL('../core/jobWorker.js', import.meta.url), { type: 'module' })
+        ? () => createModuleWorker(new URL('../core/jobWorker.js', import.meta.url))
         : null,
     });
 

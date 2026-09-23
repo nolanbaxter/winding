@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-23
+
+**Installable from somewhere other than this repository.** No build step and no
+dependencies, so the files that get published are the files that are here --
+what was missing was the packaging metadata, an install section, and one bug
+that only appears when the engine is served from another origin.
+
+Minor: new public exports and a package surface, nothing existing changed shape.
+
+### Added
+
+- **npm packaging.** `exports`, `files`, `repository`, `keywords`,
+  `sideEffects` and the `unpkg`/`jsdelivr` entry fields. 200 kB packed, 62
+  files.
+
+  `exports` maps `./*` on purpose, so `import 'winding/render/timing.js'`
+  works. A package with one entry point would put a wall exactly where the
+  design says there isn't one -- dropping a tier is additive, and that has to
+  survive the package boundary or it was never true.
+
+- **An Install section** covering the CDN, npm and import-map routes, with the
+  version pinned in every example. `@latest` re-resolves on every page load,
+  which means a release nobody has seen can change what a page runs.
+
+### Fixed
+
+- **A cross-origin worker threw instead of loading.** `new Worker(url)` refuses
+  a cross-origin script -- it throws, it does not degrade -- and an engine
+  loaded from a CDN is cross-origin by definition.
+
+  The case it broke was the good one. Workers are only spawned on a page that
+  set COOP and COEP, because that is what `SharedArrayBuffer` needs, so the
+  better-configured the host page, the harder the failure: a page that did
+  everything right got an exception out of `Winding.create`, while a page that
+  did nothing quietly ran inline and worked.
+
+  Cross-origin now loads through a same-origin blob module that imports the
+  real URL, because a module's own imports go through CORS where the Worker
+  constructor never does. Same-origin is untouched -- the shim costs a fetch
+  hop to get around a restriction that is not there.
+
+  The specifier is built with `JSON.stringify`, not hand-quoted. It is pasted
+  into a module that gets executed, and a URL may legally contain a quote.
+
+### Changed
+
+- The README's opening example imports `'winding'` rather than a repo-relative
+  path, and the test counts it quotes are current again (399 Node, 16 GPU).
+
+
 ## [0.6.2] - 2026-09-22
 
 A race in the job system, and the reason nobody had seen it.
@@ -787,7 +837,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/nolanbaxter/winding/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/nolanbaxter/winding/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/nolanbaxter/winding/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/nolanbaxter/winding/compare/v0.5.0...v0.6.0
