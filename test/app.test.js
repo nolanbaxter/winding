@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 
 import { Scene } from '../src/scene/scene.js';
 import { Node } from '../src/scene/node.js';
+import { Camera } from '../src/scene/camera.js';
+import { OrbitController } from '../src/app/controllers.js';
 import { NO_PARENT } from '../src/scene/transform.js';
 import { handleIndex } from '../src/core/handle.js';
 import { quatCreate, quatFromEuler } from '../src/core/math/quat.js';
@@ -457,6 +459,117 @@ await atest('two workers for one script share a shim', async () => {
   createModuleWorker(new URL(CDN), { WorkerClass: Fake, origin: PAGE });
 
   assert.equal(built[0].url, built[1].url, 'one blob, however many workers');
+});
+
+
+// ------------------------------------------------------------ orbit control
+
+console.log('\norbit control');
+
+/** Enough of an element for the controller to attach to and be driven. */
+function stubElement() {
+  const handlers = new Map();
+  return {
+    handlers,
+    addEventListener: (type, fn) => handlers.set(type, fn),
+    removeEventListener: (type) => handlers.delete(type),
+    setPointerCapture() {},
+    hasPointerCapture: () => false,
+    releasePointerCapture() {},
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+    send(type, event) { handlers.get(type)?.({ preventDefault() {}, button: 0, pointerId: 1, ...event }); },
+  };
+}
+
+/** Drag from one point to another with the left button held. */
+function drag(element, fromX, fromY, toX, toY) {
+  element.send('pointerdown', { clientX: fromX, clientY: fromY });
+  element.send('pointermove', { clientX: toX, clientY: toY });
+  element.send('pointerup', { clientX: toX, clientY: toY });
+}
+
+test('dragging up shows the underside, like grabbing the object', () => {
+  // The bug: this was inverted relative to the horizontal drag, so turning the
+  // object left and right felt like turning the OBJECT and tilting felt like
+  // moving the CAMERA. Two metaphors in one gesture, which reads as the model
+  // being hinged behind itself.
+  //
+  // Grab the front of a ball and pull up: the front goes over the top and the
+  // UNDERSIDE rotates toward you. So the camera has to go down.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const element = stubElement();
+  const controller = new OrbitController(camera, element, { distance: 10, pitch: 0, yaw: 0 });
+
+  const before = camera.position[1];
+  drag(element, 400, 400, 400, 300);     // 100px UP
+  controller.update(0);                  // 0 snaps past the damping
+
+  assert.ok(camera.position[1] < before,
+    `drag up must lower the camera: ${before} -> ${camera.position[1]}`);
+  controller.detach();
+});
+
+test('dragging down shows the top', () => {
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const element = stubElement();
+  const controller = new OrbitController(camera, element, { distance: 10, pitch: 0, yaw: 0 });
+
+  const before = camera.position[1];
+  drag(element, 400, 300, 400, 400);     // 100px DOWN
+  controller.update(0);
+
+  assert.ok(camera.position[1] > before,
+    `drag down must raise the camera: ${before} -> ${camera.position[1]}`);
+  controller.detach();
+});
+
+test('both axes turn the object the way the hand moves', () => {
+  // The property the vertical drag was breaking: one metaphor, not two. A
+  // drag right and a drag up must both move the camera the OPPOSITE way, so
+  // the surface under the cursor follows it.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const element = stubElement();
+  const controller = new OrbitController(camera, element, { distance: 10, pitch: 0, yaw: 0 });
+
+  drag(element, 400, 400, 500, 400);     // 100px RIGHT
+  controller.update(0);
+  assert.ok(camera.position[0] < 0, `drag right must send the camera left: ${camera.position[0]}`);
+
+  controller.detach();
+});
+
+test('pitch cannot reach the pole', () => {
+  // At exactly straight up the up-vector is ambiguous and the view flips.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const element = stubElement();
+  const controller = new OrbitController(camera, element, { distance: 10, pitch: 0 });
+
+  drag(element, 400, 400, 400, 9999);    // absurdly far down
+  controller.update(0);
+  assert.ok(Math.abs(controller.pitch) < Math.PI / 2,
+    `pitch must stay off the pole: ${controller.pitch}`);
+  controller.detach();
+});
+
+test('the controller and a bare camera agree on how far to back off', () => {
+  // Two things frame, and they used to disagree: the controller worked the
+  // distance out inline and left out the aspect term. One definition now.
+  const a = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const b = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  a.update(0.5);            // portrait, where the missing aspect term showed
+  b.update(0.5);
+
+  const element = stubElement();
+  const controller = new OrbitController(b, element, { distance: 99 });
+
+  a.frameBounds([-1, -1, -1], [1, 1, 1]);
+  controller.frameBounds([-1, -1, -1], [1, 1, 1]);
+
+  const distanceOf = (c) => Math.hypot(
+    c.position[0] - c.target[0], c.position[1] - c.target[1], c.position[2] - c.target[2],
+  );
+  close(distanceOf(b), distanceOf(a), 1e-4, 'same fit');
+  controller.detach();
 });
 
 console.log(`\n${passed} checks passed\n`);

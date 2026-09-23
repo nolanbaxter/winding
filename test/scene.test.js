@@ -22,6 +22,9 @@ const EPS = 1e-5;
 function close(a, b, eps = EPS, what = '') {
   assert.ok(Math.abs(a - b) <= eps, `${what} expected ${b}, got ${a}`);
 }
+function vecClose(a, b, eps = EPS, what = '') {
+  for (let i = 0; i < b.length; i++) close(a[i], b[i], eps, `${what}[${i}]`);
+}
 
 /** World-space translation of an entity, straight out of the SoA column. */
 function worldPos(store, entity) {
@@ -771,6 +774,143 @@ test('two scenes are distinguishable, not merely countable', () => {
 
   assert.equal(a.revision, b.revision,
     'and their revisions DO collide, which is exactly why revision alone cannot decide');
+});
+
+
+// ------------------------------------------------------------------ framing
+
+console.log('\ncamera framing');
+
+/** How far the camera ended up from what it is looking at. */
+function camDistance(camera) {
+  return Math.hypot(
+    camera.position[0] - camera.target[0],
+    camera.position[1] - camera.target[1],
+    camera.position[2] - camera.target[2],
+  );
+}
+
+test('the distance is the one the field of view implies', () => {
+  // A sphere of radius r exactly fills a frustum of half-angle a at r/sin(a).
+  // Nothing to tune: this is the number every example used to pick by eye.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.update(16 / 9);
+  camera.frameBounds([-1, -1, -1], [1, 1, 1]);
+
+  const radius = Math.sqrt(3);                 // half the diagonal of a 2-cube
+  close(camDistance(camera), radius / Math.sin(Math.PI / 6), EPS, 'distance');
+  vecClose(camera.target, [0, 0, 0], EPS, 'target is the centre');
+});
+
+test('an off-centre box is framed about its own centre', () => {
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.update(1);
+  camera.frameBounds([4, 6, -10], [6, 8, -8]);
+  vecClose(camera.target, [5, 7, -9], EPS, 'centre of the box');
+});
+
+test('the viewing direction survives framing', () => {
+  // Framing is a zoom, not a jump to some canonical angle -- otherwise it
+  // fights the orbit controls the moment anyone uses both.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.update(1);
+  camera.position.set([10, 10, 10]);
+  camera.target.set([0, 0, 0]);
+
+  camera.frameBounds([-1, -1, -1], [1, 1, 1]);
+
+  // Still on the same ray from the origin, just closer.
+  const d = camDistance(camera);
+  vecClose(
+    [...camera.position].map((v) => v / d),
+    [1 / Math.sqrt(3), 1 / Math.sqrt(3), 1 / Math.sqrt(3)],
+    1e-5,
+    'direction',
+  );
+});
+
+test('a portrait viewport is framed by its narrower axis', () => {
+  // fovY is the VERTICAL angle; horizontally the frustum is
+  // atan(tan(fovY/2) * aspect), which on a tall thin viewport is smaller.
+  // Fitting to fovY alone would push a wide object off both sides.
+  const wide = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const tall = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  wide.update(2);         // landscape: fovY limits
+  tall.update(0.5);       // portrait:  fovX limits
+
+  wide.frameBounds([-1, -1, -1], [1, 1, 1]);
+  tall.frameBounds([-1, -1, -1], [1, 1, 1]);
+
+  assert.ok(camDistance(tall) > camDistance(wide) + 1,
+    `portrait must back off further: ${camDistance(tall)} vs ${camDistance(wide)}`);
+
+  // And precisely: r / sin(atan(tan(30deg) * 0.5)).
+  const half = Math.atan(Math.tan(Math.PI / 6) * 0.5);
+  close(camDistance(tall), Math.sqrt(3) / Math.sin(half), EPS, 'portrait distance');
+});
+
+test('the near plane never cuts what was framed', () => {
+  // A tiny object with a large near plane: the fit distance alone would put
+  // the near plane through the middle of it, and the object would vanish.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 5 });
+  camera.update(1);
+  camera.frameBounds([-0.01, -0.01, -0.01], [0.01, 0.01, 0.01]);
+
+  const radius = 0.01 * Math.sqrt(3);
+  assert.ok(camDistance(camera) - radius >= camera.near - EPS,
+    `the sphere must clear the near plane: ${camDistance(camera) - radius} vs ${camera.near}`);
+});
+
+test('a degenerate box keeps the camera where it is', () => {
+  // Zero radius has no distance to derive, so the only honest answer is to
+  // look at it from wherever you already were.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.update(1);
+  camera.position.set([0, 0, 7]);
+  camera.frameBounds([2, 2, 2], [2, 2, 2]);
+
+  vecClose(camera.target, [2, 2, 2], EPS, 'target still moves');
+  close(camDistance(camera), 7, EPS, 'distance is unchanged');
+});
+
+test('margin scales the fit', () => {
+  const tight = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  const loose = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  tight.update(1);
+  loose.update(1);
+  tight.frameBounds([-1, -1, -1], [1, 1, 1]);
+  loose.frameBounds([-1, -1, -1], [1, 1, 1], { margin: 2 });
+  close(camDistance(loose), camDistance(tight) * 2, EPS);
+});
+
+test('scene.frame fits everything in the scene', () => {
+  const scene = new Scene({ capacity: 16 });
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.update(1);
+
+  const primitive = { indexCount: 36, materialId: 0, bounds: { min: [-1, -1, -1], max: [1, 1, 1] } };
+  for (const x of [-10, 10]) {
+    const entity = scene.entities.alloc();
+    scene.transforms.add(entity, { position: [x, 0, 0] });
+    scene._addRenderable(entity, primitive);
+  }
+
+  assert.equal(scene.frame(camera), true);
+  vecClose(camera.target, [0, 0, 0], EPS, 'centre of both boxes');
+
+  // The union spans x from -11 to 11, so the sphere is much bigger than
+  // either box and the camera has to be well outside it.
+  const radius = 0.5 * Math.hypot(22, 2, 2);
+  close(camDistance(camera), radius / Math.sin(Math.PI / 6), 1e-4, 'distance');
+});
+
+test('scene.frame on an empty scene moves nothing and says so', () => {
+  const scene = new Scene({ capacity: 8 });
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.position.set([1, 2, 3]);
+
+  assert.equal(scene.frame(camera), false, 'there is no box meaning "nothing"');
+  vecClose(camera.position, [1, 2, 3], EPS, 'and the camera did not move');
 });
 
 console.log(`\n${passed} checks passed\n`);

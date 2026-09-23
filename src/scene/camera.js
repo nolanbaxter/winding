@@ -4,11 +4,50 @@
 // infinite far distance, so there is no "draw distance" number
 // to pick, tune, or get wrong. One less arbitrary value in the API.
 
-import { DEBUG, assert } from '../core/assert.js';
+import { DEBUG, assert, assertFinite } from '../core/assert.js';
 import { vec3Create, vec3Copy, vec3Cross, vec3Normalize, vec3Sub } from '../core/math/vec3.js';
 import {
   mat4Create, mat4Invert, mat4LookAt, mat4Multiply, mat4PerspectiveReverseZInfinite,
 } from '../core/math/mat4.js';
+
+/**
+ * How far back a sphere of `radius` has to sit to fill the view.
+ *
+ * Exported because TWO things frame: a bare Camera, and an OrbitController,
+ * which owns its camera's position through yaw/pitch/distance and would
+ * overwrite anything written directly. They need the same number and must not
+ * each have their own idea of it -- the controller used to compute this
+ * inline, without the aspect term, so a wide object on a portrait viewport ran
+ * off both sides.
+ *
+ * THE TIGHTER HALF-ANGLE WINS. fovY is vertical; horizontally the frustum is
+ * `atan(tan(fovY/2) * aspect)`, which on a portrait viewport is the smaller of
+ * the two.
+ *
+ * Returns 0 for a degenerate radius, because there is no distance to derive
+ * and the caller knows better what to do about it than this does.
+ */
+export function fitDistance(radius, { fovY, aspect = 1, margin = 1, near = 0 } = {}) {
+  if (!(radius > 0)) return 0;
+  const halfY = fovY * 0.5;
+  // A non-positive aspect means update() has not run; square is the
+  // conservative read, since it can only over-estimate the distance.
+  const halfX = Math.atan(Math.tan(halfY) * (aspect > 0 ? aspect : 1));
+  const fit = (radius / Math.sin(Math.min(halfY, halfX))) * margin;
+
+  // The near plane must not cut the sphere: its nearest point is
+  // `distance - radius` away and that has to clear `near`. Bites when framing
+  // something smaller than the near plane.
+  return Math.max(fit, radius + near);
+}
+
+/** Half the diagonal of an axis-aligned box: the radius that contains it. */
+export function boundsRadius(min, max) {
+  return 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+}
+
+/** Scratch for frameBounds. Not re-entrant, and it never needs to be. */
+const FRAME_DIRECTION = vec3Create();
 
 export class Camera {
   constructor({ fovY = Math.PI / 3, near = 0.1 } = {}) {
@@ -33,6 +72,70 @@ export class Camera {
      */
     this.inverseProjection = mat4Create();
     this.aspect = 1;
+  }
+
+  /**
+   * Move the camera so a world-space box fills the view, keeping the direction
+   * it is already looking from.
+   *
+   * The guess this removes: every example ever written picks a camera distance
+   * by eye and adjusts until the model fits. That number is derivable from the
+   * bounds and the field of view, and nothing else in this engine asks you to
+   * remember a value it could have computed.
+   *
+   * FITS THE BOUNDING SPHERE, not the eight corners. The sphere is rotation
+   * invariant, so orbiting does not change how much of the view the object
+   * fills -- fitting corners makes an object breathe as it turns, growing and
+   * shrinking with the projected silhouette. The same argument the shadow
+   * cascades are sphere-fitted for, and the same reason.
+   *
+   * It also means `margin` can default to an exact fit. A box is strictly
+   * inside its own sphere except at the eight corners, so a sphere that
+   * exactly touches the frustum already leaves visible air on every side.
+   *
+   * THE TIGHTER HALF-ANGLE WINS. fovY is the vertical one; horizontally the
+   * frustum is `atan(tan(fovY/2) * aspect)`. On a portrait viewport that is
+   * the SMALLER of the two, so fitting to fovY alone would push a wide object
+   * off both sides. Aspect defaults to the last one update() was given, which
+   * is zero before the first frame -- pass it explicitly when framing during
+   * setup.
+   */
+  frameBounds(min, max, { margin = 1, aspect = this.aspect } = {}) {
+    if (DEBUG) {
+      assertFinite(min, 'frameBounds min', 0, 3);
+      assertFinite(max, 'frameBounds max', 0, 3);
+    }
+
+    const cx = (min[0] + max[0]) * 0.5;
+    const cy = (min[1] + max[1]) * 0.5;
+    const cz = (min[2] + max[2]) * 0.5;
+
+    const fit = fitDistance(boundsRadius(min, max), {
+      fovY: this.fovY, aspect, margin, near: this.near,
+    });
+
+    // Where the camera is now, relative to what it was looking at. Preserved
+    // so framing is a zoom rather than a jump to some canonical angle.
+    vec3Sub(FRAME_DIRECTION, this.position, this.target);
+    let length = Math.hypot(FRAME_DIRECTION[0], FRAME_DIRECTION[1], FRAME_DIRECTION[2]);
+    if (!(length > 0)) {
+      // Degenerate: the camera is sitting on its own target and has no
+      // direction to preserve. Looking down -Z is the convention everything
+      // else here starts from.
+      FRAME_DIRECTION[0] = 0; FRAME_DIRECTION[1] = 0; FRAME_DIRECTION[2] = 1;
+      length = 1;
+    }
+    const inv = 1 / length;
+
+    // A degenerate box has no distance to derive, so the only honest answer
+    // is to look at it from wherever you already were.
+    const distance = fit > 0 ? fit : length;
+
+    this.target[0] = cx; this.target[1] = cy; this.target[2] = cz;
+    this.position[0] = cx + FRAME_DIRECTION[0] * inv * distance;
+    this.position[1] = cy + FRAME_DIRECTION[1] * inv * distance;
+    this.position[2] = cz + FRAME_DIRECTION[2] * inv * distance;
+    return this;
   }
 
   /** Recompute from the current position/target/fov. Call once per frame. */

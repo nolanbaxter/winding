@@ -14,7 +14,7 @@ import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
 import { TransformStore } from './transform.js';
 import { Node } from './node.js';
 import {
-  updateWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds,
+  updateWorldBounds, unionWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds,
 } from './bounds.js';
 import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
@@ -537,20 +537,7 @@ export class Scene {
     assertFinite(origin, 'raycast origin', 0, 3);
     assertFinite(direction, 'raycast direction', 0, 3);
 
-    this.update();
-    updateWorldBounds(
-      this.renderableCount, this.localMin, this.localMax, this.worldMin, this.worldMax,
-      this.transforms.world, this.renderableMatrixSlot, this.transforms.moved,
-    );
-    // Picking has to see the pose too, or a click lands on where a character
-    // was authored rather than where it is standing.
-    if (this.skins.length > 0) {
-      updateSkinBounds(this.skins, this.transforms.world);
-      applySkinBounds(
-        this.renderableCount, this.renderableSkin, this.skins, this.worldMin, this.worldMax,
-      );
-    }
-    if (this.morphs.length > 0) this.applyMorphBounds();
+    this._refreshBounds();
 
     const candidates = [];
 
@@ -606,6 +593,58 @@ export class Scene {
   }
 
   /**
+   * Compose transforms and bring every world bound up to date.
+   *
+   * Shared by raycast and bounds because they want the same thing: the scene
+   * as it IS, not as it was when something last rendered. Both are no-ops on a
+   * settled scene, which is what makes calling them unconditionally fine.
+   */
+  _refreshBounds() {
+    this.update();
+    updateWorldBounds(
+      this.renderableCount, this.localMin, this.localMax, this.worldMin, this.worldMax,
+      this.transforms.world, this.renderableMatrixSlot, this.transforms.moved,
+    );
+    // Picking has to see the pose too, or a click lands on where a character
+    // was authored rather than where it is standing.
+    if (this.skins.length > 0) {
+      updateSkinBounds(this.skins, this.transforms.world);
+      applySkinBounds(
+        this.renderableCount, this.renderableSkin, this.skins, this.worldMin, this.worldMax,
+      );
+    }
+    if (this.morphs.length > 0) this.applyMorphBounds();
+  }
+
+  /**
+   * World-space bounds of everything in the scene, into `outMin`/`outMax`.
+   *
+   * Returns false and leaves the outputs alone for an empty scene: there is no
+   * box meaning "nothing" that a caller would not have to special-case anyway.
+   */
+  bounds(outMin, outMax) {
+    this._refreshBounds();
+    return unionWorldBounds(this.renderableCount, this.worldMin, this.worldMax, outMin, outMax);
+  }
+
+  /**
+   * Point a camera at the whole scene, from wherever it is already looking.
+   *
+   * The guess this removes: every example picks a camera distance by eye and
+   * nudges it until the model fits. It is derivable from the bounds and the
+   * field of view, and the scene already computes those bounds every frame for
+   * culling -- so the number was always there, just never offered.
+   *
+   * Returns false for an empty scene, having moved nothing. See
+   * Camera.frameBounds for what the fit actually is.
+   */
+  frame(camera, options) {
+    if (!this.bounds(FRAME_MIN, FRAME_MAX)) return false;
+    camera.frameBounds(FRAME_MIN, FRAME_MAX, options);
+    return true;
+  }
+
+  /**
    * Nearest triangle of one renderable along a ray, or -1.
    *
    * The ray is pushed into local space rather than the triangles into world
@@ -651,6 +690,10 @@ export class Scene {
     return this.raycast(PICK_ORIGIN, PICK_DIRECTION, options);
   }
 }
+
+/** Scratch for frame(). Not re-entrant, and it never needs to be. */
+const FRAME_MIN = new Float32Array(3);
+const FRAME_MAX = new Float32Array(3);
 
 // Scratch for pick(). A scene is not raycast re-entrantly, and the result is
 // read before the next call.

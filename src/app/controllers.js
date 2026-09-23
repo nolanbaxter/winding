@@ -8,6 +8,7 @@
 // from an animation.
 
 import { vec3Create } from '../core/math/vec3.js';
+import { fitDistance, boundsRadius } from '../scene/camera.js';
 
 const MIN_PITCH = -Math.PI / 2 + 0.01;   // never exactly straight down: at the
 const MAX_PITCH = Math.PI / 2 - 0.01;    // pole the up vector becomes ambiguous
@@ -89,7 +90,16 @@ export class OrbitController {
 
       if (this._dragging === 1) {
         this.desired.yaw -= dx * this.rotateSpeed;
-        this.desired.pitch = clamp(this.desired.pitch - dy * this.rotateSpeed, MIN_PITCH, MAX_PITCH);
+        // PLUS dy, matching the yaw line above. clientY grows downward, so a
+        // drag upward is negative and this lowers the camera -- which is what
+        // grabbing the front of an object and pulling it up does: the
+        // underside rotates toward you.
+        //
+        // It was minus, which raised the camera instead. That is the opposite
+        // metaphor from the one the yaw line uses, so horizontal felt like
+        // turning the object and vertical felt like the object was hinged
+        // behind itself. Two conventions in one drag.
+        this.desired.pitch = clamp(this.desired.pitch + dy * this.rotateSpeed, MIN_PITCH, MAX_PITCH);
       } else {
         // Pan in the camera's own plane, scaled by distance so the target
         // tracks the cursor at any zoom level.
@@ -149,13 +159,32 @@ export class OrbitController {
     return this;
   }
 
-  /** Frame an axis-aligned box: point at its centre and back off to fit it. */
-  frameBounds(min, max, { fill = 1.4 } = {}) {
+  /**
+   * Frame an axis-aligned box: point at its centre and back off to fit it.
+   *
+   * Same signature as Camera.frameBounds on purpose, so anything that frames
+   * can take either -- the controller owns the camera's position through
+   * yaw/pitch/distance, so writing to the camera directly would be undone on
+   * the next update(). Scene.frame relies on that.
+   *
+   * The fit itself comes from fitDistance rather than being worked out here.
+   * It used to be inline and left out the aspect term, which pushed a wide
+   * object off both sides of a portrait viewport, and defaulted to a fill of
+   * 1.4 that meant nothing in particular. One definition now, and its default
+   * is an exact fit -- a box is strictly inside its own bounding sphere except
+   * at the corners, so exact already leaves air.
+   */
+  frameBounds(min, max, { margin = 1 } = {}) {
     for (let i = 0; i < 3; i++) this.desired.target[i] = (min[i] + max[i]) * 0.5;
-    const radius = 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
-    // Distance at which a sphere of this radius fills the vertical fov.
     this.desired.distance = clamp(
-      (radius / Math.sin(this.camera.fovY * 0.5)) * fill, this.minDistance, this.maxDistance,
+      fitDistance(boundsRadius(min, max), {
+        fovY: this.camera.fovY,
+        aspect: this.camera.aspect,
+        margin,
+        near: this.camera.near,
+      }),
+      this.minDistance,
+      this.maxDistance,
     );
     return this.update(0);
   }
