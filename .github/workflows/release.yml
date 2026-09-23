@@ -118,6 +118,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${{ steps.version.outputs.version }}"
+          # An annotated tag records who made it, and a runner has no identity
+          # of its own. The bot is the honest answer: a workflow did make it.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v$version" -m "Winding $version"
           git push origin "v$version"
           gh release create "v$version" \
