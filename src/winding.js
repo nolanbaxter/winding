@@ -22,3 +22,8 @@ export * from './core/math/vec3.js';
 export * from './core/math/quat.js';
 export * from './core/math/mat4.js';
 export * from './core/math/aabb.js';
+
+// Colour conversion, for the same reason the math is here: every colour this
+// engine takes is linear and every colour a human picks is not, and leaving
+// the conversion out meant every caller hand-rolling it or getting it wrong.
+export * from './core/color.js';

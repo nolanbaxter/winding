@@ -22,6 +22,9 @@ import {
 } from '../src/core/math/mat4.js';
 
 import { rayTriangleDistance } from '../src/core/math/aabb.js';
+import {
+  srgbToLinear, linearToSrgb, colorFromHex, colorFromBytes,
+} from '../src/core/color.js';
 import { assertFinite } from '../src/core/assert.js';
 import { HandleAllocator, NULL_HANDLE, handleIndex } from '../src/core/handle.js';
 import { Clock } from '../src/core/time.js';
@@ -628,6 +631,72 @@ test('distance is in units of the direction, not of world length', () => {
   // local space WITHOUT renormalizing, so that t stays comparable to the
   // world-space box distances. Halving the direction doubles t.
   assert.equal(shoot(0.25, 0.25, 5, 0, 0, -0.5), 10);
+});
+
+
+// ------------------------------------------------------------------- colour
+
+console.log('\nsRGB to linear');
+
+test('the transfer function round-trips', () => {
+  for (const c of [0, 0.001, 0.04045, 0.05, 0.5, 0.85, 1]) {
+    close(linearToSrgb(srgbToLinear(c)), c, 1e-6, `round trip at ${c}`);
+  }
+});
+
+test('the linear segment is used below the knee, the curve above', () => {
+  // Two pieces, and the join is where a hand-rolled version usually goes
+  // wrong: below 0.04045 sRGB is LINEAR, not a power curve, and using the
+  // curve there crushes near-blacks.
+  close(srgbToLinear(0.02), 0.02 / 12.92, 1e-9, 'below the knee is a plain divide');
+  close(srgbToLinear(1), 1, 1e-9, 'white is white in both spaces');
+  close(srgbToLinear(0), 0, 1e-9, 'black is black in both spaces');
+});
+
+test('a mid grey is much darker in linear than it looks', () => {
+  // THE mistake this exists to stop. 0.35 reads as "about a third" and is
+  // about a tenth, so a colour typed as sRGB arrives roughly three times too
+  // bright and washed toward white, with nothing reported.
+  close(srgbToLinear(0.35), 0.100482, 1e-6);
+  close(srgbToLinear(0.5), 0.214041, 1e-6);
+});
+
+test('hex parses in every form that gets pasted', () => {
+  const red = colorFromHex('#e03a2f');
+  vecClose(red, [0.7454, 0.0423, 0.0284, 1], 1e-4, 'six digits');
+  vecClose(colorFromHex('e03a2f'), red, 1e-9, 'without the hash');
+  vecClose(colorFromHex('#EE3322'), colorFromHex('#e32'), 1e-9, 'shorthand doubles its digits');
+  vecClose(colorFromHex('#ffffff'), [1, 1, 1, 1], 1e-9, 'white');
+  vecClose(colorFromHex('#000000'), [0, 0, 0, 1], 1e-9, 'black');
+});
+
+test('alpha is carried through untouched, not curved', () => {
+  // The part a hand-rolled version gets wrong. The sRGB transfer function is
+  // for colour channels; alpha is already linear in both spaces, and putting
+  // it through the curve makes every transparency subtly wrong in a way that
+  // reads as a blending bug.
+  close(colorFromHex('#00000080')[3], 128 / 255, 1e-9, 'eight-digit hex');
+  close(colorFromBytes(0, 0, 0, 128)[3], 128 / 255, 1e-9, 'bytes');
+  close(colorFromHex('#0008')[3], 136 / 255, 1e-9, 'four-digit shorthand');
+
+  // Which is to say: NOT srgbToLinear(0.502), which would be 0.216.
+  assert.ok(Math.abs(colorFromBytes(0, 0, 0, 128)[3] - srgbToLinear(128 / 255)) > 0.2,
+    'alpha must not have been converted');
+});
+
+test('a malformed hex throws rather than resolving to black', () => {
+  // A silently black material is the failure this module exists to stop, so
+  // it would be perverse to add a second way to reach it.
+  for (const bad of ['#gg0000', '#12345', 'red', '', '#', '#1234567']) {
+    assert.throws(() => colorFromHex(bad), /is not a 3, 4, 6 or 8 digit hex/, `"${bad}"`);
+  }
+});
+
+test('the result is a plain array, so it survives JSON', () => {
+  // The most likely thing anyone does with this is write it straight into a
+  // glTF's baseColorFactor. A Float32Array serialises to {"0":...} there.
+  assert.equal(JSON.stringify(colorFromHex('#ff0000')), '[1,0,0,1]');
+  assert.ok(Array.isArray(colorFromBytes(255, 0, 0)));
 });
 
 console.log(`\n${passed} checks passed\n`);
