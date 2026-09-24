@@ -199,3 +199,49 @@ export function quatSlerp(out, a, b, t) {
   out[3] = scale0 * aw + scale1 * bw;
   return out;
 }
+
+/**
+ * The shortest rotation taking unit vector `from` onto unit vector `to`.
+ *
+ * Used to point a node's forward axis along a direction someone handed in --
+ * a spot light given `direction` rather than a rotation. The node then carries
+ * the aim, so parenting it to a head or a turret works without anyone
+ * recomputing anything.
+ *
+ * One degenerate case, and it is the opposite of the one people guard. Exactly
+ * OPPOSED has no shortest rotation -- every half turn about a perpendicular
+ * axis works equally well -- so one perpendicular is chosen, by crossing with
+ * whichever cardinal axis `from` leans on least. Falling through without that
+ * branch gives a zero axis and a quaternion of all zeros, which normalizes to
+ * NaN and takes the whole transform with it.
+ */
+export function quatFromTo(out, from, to) {
+  const dot = from[0] * to[0] + from[1] * to[1] + from[2] * to[2];
+
+  // No early-out for "already aligned". The general path below handles it
+  // exactly -- the cross product is zero and w is 2, which normalizes to the
+  // identity -- whereas a threshold SNAPS every rotation smaller than it to
+  // identity and introduces the error it looks like it is avoiding. Only the
+  // opposed case is genuinely singular.
+  if (dot < -0.999999) {
+    const ax = Math.abs(from[0]);
+    const ay = Math.abs(from[1]);
+    const az = Math.abs(from[2]);
+    const axis = ax < ay && ax < az ? [1, 0, 0] : ay < az ? [0, 1, 0] : [0, 0, 1];
+    // A half turn about anything perpendicular to `from` maps it onto -from.
+    out[0] = from[1] * axis[2] - from[2] * axis[1];
+    out[1] = from[2] * axis[0] - from[0] * axis[2];
+    out[2] = from[0] * axis[1] - from[1] * axis[0];
+    out[3] = 0;
+    return quatNormalize(out, out);
+  }
+
+  // The standard half-way trick: the cross product is the axis scaled by
+  // sin(angle), and 1 + cos(angle) as w gives the half-angle after
+  // normalizing -- no trigonometry anywhere.
+  out[0] = from[1] * to[2] - from[2] * to[1];
+  out[1] = from[2] * to[0] - from[0] * to[2];
+  out[2] = from[0] * to[1] - from[1] * to[0];
+  out[3] = 1 + dot;
+  return quatNormalize(out, out);
+}

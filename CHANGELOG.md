@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Lights you attach, and a camera without perspective.**
+
+Breaking: `addLight` returns a node, and the index-based light calls are
+gone. A light index was never stable -- removal swap-compacts the array -- so
+anything holding one could end up pointing at a different light.
+
+### Changed
+
+- **Lights are scene nodes.** `scene.addLight(...)` returns a `Node` and
+  accepts a `parent`, so a light on a moving object follows it with no
+  per-frame bookkeeping -- the viewer example used to call
+  `setLightPosition` on twelve lights every frame. A spot aims down its
+  node's -Z (glTF `KHR_lights_punctual`), so it turns with its parent too.
+  `setLightPosition`, `setLightColor` and `removeLight(index)` are
+  removed: move the node, call `light.setLight({ color, intensity, radius,
+  innerAngle, outerAngle })` for the rest, and `light.destroy()` to remove
+  it. Destroying a parent takes its lights with it.
+
+### Added
+
+- **Orthographic camera.** `new Camera({ orthographic: true })`. What it
+  shows is derived from the distance to its target -- the height a
+  perspective camera with the same `fovY` sees there -- so orbit zoom,
+  `frameBounds`, `syncFromCamera` and picking need nothing new, and
+  switching projection keeps the model the same size. It is the one camera
+  with a `far` (default 1000, linear depth, so generosity is free), which
+  `frameBounds` pushes out if what it frames would not fit. A perspective
+  camera still has no `far` at all.
+- `quatFromTo(out, from, to)`, the shortest rotation between two
+  directions.
+
+### Fixed
+
+Each of these was invisible under perspective and would have broken the
+orthographic camera on arrival.
+
+- **Froxels assumed every ray passes through the eye.** The cluster builder
+  scaled one near-plane point out to each slice. Under ortho an off-centre
+  froxel landed nowhere near its cell, and lights there lit nothing. Now two
+  unprojections of the same pixel, correct under any projection.
+- **Fragment view depth came from `clip.w`**, which is the view depth only
+  because a perspective matrix has -1 in its w row. Under ortho it is 1
+  everywhere, so every fragment read the lights and shadow cascade for depth
+  1. Now measured along the camera's view axis.
+- **Shadow cascades were fitted as a pyramid**, leaving the near corners of an
+  orthographic view outside every cascade.
+- **The frustum extractor rejected any finite projection.** Leaving the far
+  plane out only ever keeps more, and the rasteriser clips it, so it is left
+  out for ortho too rather than asserted away.
+- **The GPU feature matrix read the wrong pixel.** It indexed a 64x64 canvas
+  the engine had resized to its 320x240 CSS box, so "the middle" was near the
+  top-left corner. The quad fills the view, so every check passed anyway, and
+  the one lighting check passed only because its light's radius reached the
+  corner. It now addresses pixels by fraction of the real size, and a new
+  check lights an off-centre spot under ortho -- verified to fail against
+  either of the first two fixes reverted.
+
 ## [0.8.0] - 2026-09-23
 
 **Numbers you used to have to guess.** A camera distance, and a colour in a

@@ -20,6 +20,7 @@ import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
 import { vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
 import { mat4Create, mat4Copy, mat4Invert } from '../core/math/mat4.js';
+import { quatCreate, quatFromTo } from '../core/math/quat.js';
 import { grownCapacity, growArray } from '../core/grow.js';
 
 const DEFAULT_CAPACITY = 4096;
@@ -92,6 +93,14 @@ export class Scene {
     this.lightCount = 0;
     this.lightCapacity = lightCapacity;
     this.lights = new Float32Array(lightCapacity * LIGHT_FLOATS);
+    /**
+     * The entity each light IS. A light is a scene object: it has a transform,
+     * so it can be parented, animated and moved like anything else, and its
+     * position and spot direction are READ from that transform every frame
+     * rather than written by hand.
+     */
+    this.lightEntity = new Uint32Array(lightCapacity);
+    this._lightOf = new Map();   // entity -> index into the packed arrays
 
     this._childrenOf = new Map();   // entity -> [entity], asset declaration order
     /** Resolved skin instances: joint ENTITIES plus the bind pose. */
@@ -381,6 +390,13 @@ export class Scene {
       this.revision++;
     }
 
+    // Lights on any doomed entity go too. Before the entities are freed, so
+    // the handles are still the ones the map was built from.
+    for (const entity of doomed) {
+      const index = this._lightOf.get(entity);
+      if (index !== undefined) this._removeLightAt(index);
+    }
+
     for (const entity of doomed) {
       this.transforms.remove(entity);
       this._childrenOf.delete(entity);
@@ -392,15 +408,30 @@ export class Scene {
   // ------------------------------------------------------------------ lights
 
   /**
-   * Add a point or spot light. Returns its index.
+   * Add a point or spot light, as a node in the scene. Returns the Node.
+   *
+   *   const lamp = scene.addLight({ position: [0, 3, 0], color: [1, 0.7, 0.4], intensity: 20 });
+   *   lamp.setPosition(2, 3, 0);                     // moves the light
+   *
+   *   const torch = scene.addLight({ direction: [0, 0, -1], parent: hand });
+   *   // follows the hand, aims where the hand aims, and nobody updates it
+   *
+   * A LIGHT IS A SCENE OBJECT. It used to be a row in a packed array addressed
+   * by index: moving one meant calling setLightPosition every frame, a light
+   * could not follow anything, and removal swap-deleted -- so the last light
+   * silently took the removed one's index and anyone holding it now pointed at
+   * a different light. Entities already solved that with generation-tagged
+   * handles; lights now use them.
+   *
+   * POSITION AND AIM COME FROM THE TRANSFORM. A spot shines down its node's -Z,
+   * which is glTF's KHR_lights_punctual convention. `direction` here is a
+   * convenience that sets the node's rotation to point that way -- after which
+   * the node carries it, so parenting and animation aim it for free.
    *
    * `radius` is where the light reaches exactly zero. Physical inverse-square
    * falloff never quite does, so without a cutoff every light would have to be
    * tested against every cluster in the scene -- the radius is what makes
    * clustering possible at all, not a shortcut.
-   *
-   *   scene.addLight({ position: [0, 3, 0], color: [1, 0.7, 0.4], intensity: 20, radius: 12 });
-   *   scene.addLight({ position, direction, innerAngle: 0.3, outerAngle: 0.5, ... });
    */
   addLight({
     position = [0, 0, 0],
@@ -410,33 +441,128 @@ export class Scene {
     direction = null,
     innerAngle = 0.2,
     outerAngle = 0.5,
+    parent = null,
   } = {}) {
     if (this.lightCount >= this.lightCapacity) {
       const capacity = grownCapacity(this.lightCapacity, this.lightCount + 1);
       this.lights = growArray(this.lights, capacity, LIGHT_FLOATS);
+      this.lightEntity = growArray(this.lightEntity, capacity);
       this.lightCapacity = capacity;
     }
+
+    // Aim a spot by rotating its node: -Z onto the requested direction.
+    let rotation;
+    if (direction) {
+      const length = Math.hypot(direction[0], direction[1], direction[2]) || 1;
+      rotation = quatFromTo(quatCreate(), LIGHT_FORWARD, [
+        direction[0] / length, direction[1] / length, direction[2] / length,
+      ]);
+    }
+
+    const entity = this.entities.alloc();
+    this.transforms.add(entity, {
+      position,
+      rotation,
+      parent: parent ? parent.entity : NULL_HANDLE,
+    });
+
     const index = this.lightCount++;
-    this._writeLight(index, position, color, intensity, radius, direction, innerAngle, outerAngle);
-    return index;
+    this.lightEntity[index] = entity;
+    this._lightOf.set(entity, index);
+    this._writeLightProperties(index, {
+      color, intensity, radius, spot: direction !== null, innerAngle, outerAngle,
+    });
+
+    // Children list, so removing a parent removes the light with it.
+    if (parent) {
+      const siblings = this._childrenOf.get(parent.entity) ?? [];
+      siblings.push(entity);
+      this._childrenOf.set(parent.entity, siblings);
+    }
+    return new Node(this, entity);
   }
 
-  _writeLight(index, position, color, intensity, radius, direction, innerAngle, outerAngle) {
+  /**
+   * Change what a light IS -- colour, brightness, reach, cone -- without
+   * touching where it is. Partial: only the fields given change.
+   *
+   * Returns false if the entity is not a light, rather than throwing, so a
+   * caller that is not sure can ask by trying.
+   */
+  setLight(entity, changes) {
+    const index = this._lightOf.get(entity);
+    if (index === undefined) return false;
     const o = index * LIGHT_FLOATS;
     const light = this.lights;
 
-    light[o] = position[0]; light[o + 1] = position[1]; light[o + 2] = position[2];
-    light[o + 3] = radius;
+    const spot = light[o + 14] === LIGHT_SPOT;
+    this._writeLightProperties(index, {
+      color: changes.color ?? [light[o + 4], light[o + 5], light[o + 6]],
+      intensity: changes.intensity ?? light[o + 7],
+      radius: changes.radius ?? light[o + 3],
+      spot,
+      innerAngle: changes.innerAngle ?? this._lightCone[index * 2] ?? 0.2,
+      outerAngle: changes.outerAngle ?? this._lightCone[index * 2 + 1] ?? 0.5,
+    });
+    return true;
+  }
 
+  /**
+   * Copy every light's position and aim out of its transform.
+   *
+   * Runs before the lights are uploaded, after transforms have composed. The
+   * packed array stays the GPU's format, unchanged -- what changed is that
+   * nobody writes positions into it by hand any more.
+   */
+  refreshLights() {
+    const world = this.transforms.world;
+    const light = this.lights;
+    for (let i = 0; i < this.lightCount; i++) {
+      const m = handleIndex(this.lightEntity[i]) * 16;
+      const o = i * LIGHT_FLOATS;
+
+      light[o] = world[m + 12];
+      light[o + 1] = world[m + 13];
+      light[o + 2] = world[m + 14];
+
+      if (light[o + 14] === LIGHT_SPOT) {
+        // -Z of the world matrix. Normalized, because a scaled parent scales
+        // this column too, and a cone test on a non-unit axis is wrong.
+        const x = -world[m + 8];
+        const y = -world[m + 9];
+        const z = -world[m + 10];
+        const inv = 1 / (Math.hypot(x, y, z) || 1);
+        light[o + 8] = x * inv;
+        light[o + 9] = y * inv;
+        light[o + 10] = z * inv;
+      }
+    }
+  }
+
+  /**
+   * Everything about a light except where it is and which way it points --
+   * those come from its transform, in refreshLights.
+   */
+  _writeLightProperties(index, { color, intensity, radius, spot, innerAngle, outerAngle }) {
+    const o = index * LIGHT_FLOATS;
+    const light = this.lights;
+
+    light[o + 3] = radius;
     light[o + 4] = color[0]; light[o + 5] = color[1]; light[o + 6] = color[2];
     light[o + 7] = intensity;
 
-    if (direction) {
-      const length = Math.hypot(direction[0], direction[1], direction[2]) || 1;
-      light[o + 8] = direction[0] / length;
-      light[o + 9] = direction[1] / length;
-      light[o + 10] = direction[2] / length;
+    // The cone is stored as the scale/offset the shader wants, which cannot be
+    // turned back into angles exactly -- so the angles are kept alongside, for
+    // a partial setLight that changes only one of them.
+    if (!this._lightCone || this._lightCone.length < this.lightCapacity * 2) {
+      const cone = new Float32Array(this.lightCapacity * 2);
+      if (this._lightCone) cone.set(this._lightCone);
+      this._lightCone = cone;
+    }
+    this._lightCone[index * 2] = innerAngle;
+    this._lightCone[index * 2 + 1] = outerAngle;
 
+    if (spot) {
       // Frostbite's smooth cone: precomputing scale and offset turns the
       // per-pixel test into a multiply-add instead of two cosines.
       const cosOuter = Math.cos(outerAngle);
@@ -453,22 +579,23 @@ export class Scene {
     light[o + 15] = 0;
   }
 
-  setLightPosition(index, x, y, z) {
-    const o = index * LIGHT_FLOATS;
-    this.lights[o] = x; this.lights[o + 1] = y; this.lights[o + 2] = z;
-  }
-
-  setLightColor(index, r, g, b, intensity = this.lights[index * LIGHT_FLOATS + 7]) {
-    const o = index * LIGHT_FLOATS + 4;
-    this.lights[o] = r; this.lights[o + 1] = g; this.lights[o + 2] = b;
-    this.lights[o + 3] = intensity;
-  }
-
-  /** Swap-remove, so light indices are not stable across a removal. */
-  removeLight(index) {
+  /**
+   * Drop one light by index, keeping the packed array dense.
+   *
+   * Swap-remove, same as renderables -- and safe now, because nothing outside
+   * this class holds a light INDEX. Callers hold the entity, and the map from
+   * entity to index is fixed up here, so the light that moved into the gap is
+   * still found by the handle its owner already has.
+   */
+  _removeLightAt(index) {
     const last = --this.lightCount;
+    this._lightOf.delete(this.lightEntity[index]);
     if (index !== last) {
       this.lights.copyWithin(index * LIGHT_FLOATS, last * LIGHT_FLOATS, (last + 1) * LIGHT_FLOATS);
+      this._lightCone.copyWithin(index * 2, last * 2, last * 2 + 2);
+      const moved = this.lightEntity[last];
+      this.lightEntity[index] = moved;
+      this._lightOf.set(moved, index);
     }
   }
 
@@ -714,3 +841,6 @@ function byDistance(a, b) {
 export const LIGHT_FLOATS = 16;
 export const LIGHT_POINT = 0;
 export const LIGHT_SPOT = 1;
+
+/** The axis a spot shines along, in its own space: -Z, as in glTF. */
+const LIGHT_FORWARD = Object.freeze([0, 0, -1]);

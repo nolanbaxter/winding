@@ -37,7 +37,8 @@ struct Frame {
   shadowParams   : vec4<f32>,               // 400  x = normal bias, y = map size
   clusterGrid    : vec4<u32>,               // 416  x, y, z cells; w = light count
   clusterDepth   : vec4<f32>,               // 432  x slice scale, y bias, zw tile size
-};                                          // 448
+  cameraForward  : vec4<f32>,               // 448  world-space view axis; w unused
+};                                          // 464
 
 struct Light {
   positionRadius : vec4<f32>,
@@ -465,9 +466,14 @@ fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
 
   // View-space depth, shared by cascade selection and the cluster lookup.
   // Both are defined against planes of constant z on the CPU side, so neither
-  // may use radial distance. The projection has -1 in its w row, making clip.w
-  // exactly -viewZ; the fragment's builtin position carries the reciprocal.
-  let viewDepth = 1.0 / v.clip.w;
+  // may use radial distance.
+  //
+  // Measured along the view axis rather than read from clip.w. That used to be
+  // 1 / v.clip.w, which is -viewZ only because a PERSPECTIVE projection has -1
+  // in its w row; an orthographic one has w = 1 everywhere, so every fragment
+  // would have claimed to sit at depth 1 and read the lights and shadow
+  // cascade for that slice. The dot product is the same number in both.
+  let viewDepth = dot(v.world - frame.cameraPosition.xyz, frame.cameraForward.xyz);
 
   // Dielectrics reflect ~4% head-on; metals reflect their own colour and have
   // no diffuse term at all. That single split is the whole metallic workflow.
@@ -507,8 +513,6 @@ fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // than the froxel they are actually in: they then read a light list built for
   // somewhere else, and the lights that should reach them are simply absent.
   //
-  // The projection is [.., -1] in the w row, so clip.w is exactly -viewZ, and
-  // the fragment's builtin position carries its reciprocal. No extra uniform.
   let cluster = clusterFor(v.clip.xy, viewDepth);
   let lightCount = clusterCounts[cluster];
   let clusterBase = cluster * ${MAX_LIGHTS_PER_CLUSTER}u;
@@ -638,4 +642,4 @@ fn fsOIT(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> OitOut {
 `;
 
 /** Frame uniform size in bytes. Matches the struct above. */
-export const FRAME_BYTES = 448;
+export const FRAME_BYTES = 464;

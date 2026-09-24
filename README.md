@@ -166,8 +166,14 @@ builds, 30 frames submit without the device complaining, and that per-pass GPU t
 
 **Reverse-Z with an infinite far plane.** Depth is mapped 1 → 0 with the far plane at infinity, which
 puts floating-point precision where the geometry is instead of where it isn't. This is load-bearing
-rather than a setting: the camera API has no `far`, the frustum has five planes because the sixth is
-degenerate, depth clears to 0, and the comparison is `greater`.
+rather than a setting: a perspective camera has no `far`, the frustum has five planes because the
+sixth is degenerate, depth clears to 0, and the comparison is `greater`.
+
+**Orthographic too.** `new Camera({ orthographic: true })` is the one camera with a `far`, because
+parallel rays have no infinite form; its depth is linear, so a generous far costs no precision. What
+it shows is derived rather than set -- the height a perspective camera with the same `fovY` sees at
+its target -- so orbit zoom, `frameBounds` and picking work unchanged, and switching projection keeps
+the model the same size on screen.
 
 **GPU-driven rendering.** Renderables are batched by primitive and material; a compute pass does
 frustum and occlusion culling and writes indirect draw arguments with an atomic as the allocator.
@@ -191,6 +197,11 @@ with resolution, since the depth pyramid takes one pass per mip.
 fragment only ever evaluates the handful of lights whose radius reaches its cluster. The grid splits
 a fixed tile budget to match the viewport aspect, so the cells stay near cubic on a phone, a square
 editor pane or an ultrawide rather than only at 16:9.
+
+**Lights are scene nodes.** `scene.addLight(...)` returns a node, so a light can have a parent: a
+headlamp on a moving car, a torch in an animated hand. A spot aims down its node's -Z, as glTF's
+`KHR_lights_punctual` defines it, so it turns with whatever it is attached to. Colour, intensity,
+radius and cone change through `light.setLight({ ... })`; position and aim are the node's.
 
 **Two transparency paths.** Blended geometry is culled and sorted back-to-front on the CPU, then
 drawn after every opaque batch. `{ oit: true }` swaps that for weighted-blended order-independent

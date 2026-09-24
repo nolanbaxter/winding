@@ -119,6 +119,20 @@ export class Node {
     return this.scene.morphWeights(this.entity);
   }
 
+  /**
+   * Change this light's colour, brightness, reach or cone. Partial: only the
+   * fields given change. Returns false if this node is not a light.
+   *
+   *   lamp.setLight({ intensity: 30 });
+   *   torch.setLight({ color: colorFromHex('#ffb060'), outerAngle: 0.4 });
+   *
+   * Position and aim are not here, because they are not properties of the
+   * light -- they are where its node is. Move the node.
+   */
+  setLight(changes) {
+    return this.scene.setLight(this.entity, changes);
+  }
+
   /** Nodes created for this entity's children, in the order the asset declared them. */
   children() {
     return this.scene.childrenOf(this);

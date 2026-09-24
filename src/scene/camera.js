@@ -1,13 +1,27 @@
 // Camera.
 //
-// Note what is absent: a far plane. The projection is reverse-Z with an
-// infinite far distance, so there is no "draw distance" number
-// to pick, tune, or get wrong. One less arbitrary value in the API.
+// Note what is absent: a far plane. The perspective projection is reverse-Z
+// with an infinite far distance, so there is no "draw distance" number to
+// pick, tune, or get wrong. One less arbitrary value in the API.
+//
+// Orthographic is the exception, and it cannot avoid one. Parallel rays never
+// converge, so there is no infinite-far form -- the box has to end somewhere.
+// Depth precision is uniform across it (linear depth, see mat4.js), so a
+// generous `far` costs nothing, and frameBounds pushes it out if what it frames
+// would not fit.
+//
+// WHAT AN ORTHOGRAPHIC CAMERA SHOWS is derived, not set: the height a
+// perspective camera with the same fovY would see at its target,
+// 2 * distance * tan(fovY / 2). There is no separate "ortho size" knob, so
+// everything that already works by moving the camera -- orbit zoom, framing,
+// syncFromCamera -- works here unchanged, and switching projection keeps the
+// thing you are looking at the same size on screen.
 
 import { DEBUG, assert, assertFinite } from '../core/assert.js';
 import { vec3Create, vec3Copy, vec3Cross, vec3Normalize, vec3Sub } from '../core/math/vec3.js';
 import {
   mat4Create, mat4Invert, mat4LookAt, mat4Multiply, mat4PerspectiveReverseZInfinite,
+  mat4OrthographicReverseZ,
 } from '../core/math/mat4.js';
 
 /**
@@ -46,11 +60,33 @@ export function boundsRadius(min, max) {
   return 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
 }
 
+/**
+ * How far an orthographic box reaches when nothing has said otherwise.
+ *
+ * Generous on purpose: orthographic depth is linear, so precision is uniform
+ * across the box and a large far costs nothing. It is a bound on what can be
+ * seen, not a precision trade.
+ */
+const ORTHO_DEFAULT_FAR = 1000;
+
 /** Scratch for frameBounds. Not re-entrant, and it never needs to be. */
 const FRAME_DIRECTION = vec3Create();
 
 export class Camera {
-  constructor({ fovY = Math.PI / 3, near = 0.1 } = {}) {
+  constructor({
+    fovY = Math.PI / 3, near = 0.1, orthographic = false, far = ORTHO_DEFAULT_FAR,
+  } = {}) {
+    /**
+     * Parallel projection: size on screen does not change with depth.
+     * Isometric views, CAD, a 2D overlay. See the header for what it shows.
+     */
+    this.orthographic = orthographic;
+    // Where an orthographic box ends -- present ONLY on an orthographic camera.
+    // A perspective camera has no far plane at all (the infinite reverse-Z
+    // form), and an object shape that carried an unused one would advertise a
+    // knob that does nothing. A test guards exactly that.
+    if (orthographic) this.far = far;
+
     /** Vertical field of view in radians. Horizontal follows from the aspect. */
     this.fovY = fovY;
     /**
@@ -110,9 +146,8 @@ export class Camera {
     const cy = (min[1] + max[1]) * 0.5;
     const cz = (min[2] + max[2]) * 0.5;
 
-    const fit = fitDistance(boundsRadius(min, max), {
-      fovY: this.fovY, aspect, margin, near: this.near,
-    });
+    const radius = boundsRadius(min, max);
+    const fit = fitDistance(radius, { fovY: this.fovY, aspect, margin, near: this.near });
 
     // Where the camera is now, relative to what it was looking at. Preserved
     // so framing is a zoom rather than a jump to some canonical angle.
@@ -131,6 +166,11 @@ export class Camera {
     // is to look at it from wherever you already were.
     const distance = fit > 0 ? fit : length;
 
+    // Orthographic needs nothing else: its view height follows the distance
+    // (see the header), and at the fit distance that is 2r / cos(half-angle),
+    // which contains the sphere. Only the box's far end has to be sure to.
+    if (this.orthographic) this.far = Math.max(this.far ?? 0, distance + radius);
+
     this.target[0] = cx; this.target[1] = cy; this.target[2] = cz;
     this.position[0] = cx + FRAME_DIRECTION[0] * inv * distance;
     this.position[1] = cy + FRAME_DIRECTION[1] * inv * distance;
@@ -138,11 +178,36 @@ export class Camera {
     return this;
   }
 
+  /**
+   * Half the world height an orthographic camera shows: what a perspective one
+   * with the same fovY sees at the target. One function, because the
+   * projection and rayFromScreen have to agree on it exactly.
+   */
+  orthographicHalfHeight() {
+    const distance = Math.hypot(
+      this.position[0] - this.target[0],
+      this.position[1] - this.target[1],
+      this.position[2] - this.target[2],
+    );
+    return distance * Math.tan(this.fovY * 0.5);
+  }
+
   /** Recompute from the current position/target/fov. Call once per frame. */
   update(aspect) {
     this.aspect = aspect;
     mat4LookAt(this.view, this.position, this.target, this.up);
-    mat4PerspectiveReverseZInfinite(this.projection, this.fovY, aspect, this.near);
+    if (this.orthographic) {
+      const halfHeight = this.orthographicHalfHeight();
+      const halfWidth = halfHeight * aspect;
+      // ??, for a camera switched to orthographic after construction, which
+      // never had a far to begin with.
+      this.far ??= ORTHO_DEFAULT_FAR;
+      mat4OrthographicReverseZ(
+        this.projection, -halfWidth, halfWidth, -halfHeight, halfHeight, this.near, this.far,
+      );
+    } else {
+      mat4PerspectiveReverseZInfinite(this.projection, this.fovY, aspect, this.near);
+    }
     // P * V: the view transform applies first, then the projection.
     mat4Multiply(this.viewProjection, this.projection, this.view);
     mat4Invert(this.inverseProjection, this.projection);
@@ -185,6 +250,21 @@ export class Camera {
     vec3Cross(RIGHT, FORWARD, this.up);
     vec3Normalize(RIGHT, RIGHT);
     vec3Cross(UP, RIGHT, FORWARD);
+
+    if (this.orthographic) {
+      // Parallel rays: every one points straight down the view axis, and it is
+      // the ORIGIN that moves across the screen. Using the perspective form
+      // here would fan the rays out from the eye and pick things that are not
+      // under the cursor at all.
+      const halfHeight = this.orthographicHalfHeight();
+      const sx = ndcX * halfHeight * this.aspect;
+      const sy = ndcY * halfHeight;
+      for (let i = 0; i < 3; i++) {
+        outOrigin[i] = this.position[i] + RIGHT[i] * sx + UP[i] * sy;
+        outDirection[i] = FORWARD[i];
+      }
+      return outDirection;
+    }
 
     const sx = ndcX * tanHalf * this.aspect;
     const sy = ndcY * tanHalf;

@@ -18,13 +18,16 @@
 // "distance <= infinity". Always true. That plane's normal is the zero vector,
 // and normalizing it divides by zero: every test then returns NaN, NaN >= 0 is
 // false, and the renderer silently culls the entire scene. So it is not
-// extracted at all, and DEBUG asserts that it really is degenerate in case
-// someone hands this a finite projection.
+// extracted at all.
+//
+// An ORTHOGRAPHIC camera does have a real far plane, and it is left out there
+// too. Skipping a side can only keep more, never cull wrongly: something past
+// the far plane is drawn and the rasteriser clips it. Culling it here would buy
+// back draws that are beyond a far plane chosen to be generous in the first
+// place.
 //
 // Planes are (a, b, c, d) with a point inside when a*x + b*y + c*z + d >= 0,
 // normalized so that expression is the signed distance in world units.
-
-import { DEBUG, assert } from '../assert.js';
 
 export const PLANE_LEFT = 0;
 export const PLANE_RIGHT = 1;
@@ -50,17 +53,6 @@ export function frustumFromViewProjection(out, m) {
   const r1x = m[1], r1y = m[5], r1z = m[9], r1w = m[13];
   const r2x = m[2], r2y = m[6], r2z = m[10], r2w = m[14];
   const r3x = m[3], r3y = m[7], r3z = m[11], r3w = m[15];
-
-  if (DEBUG) {
-    // The far plane must be the degenerate one. If it isn't, this matrix is a
-    // finite projection and the frustum it produces here is missing a side.
-    const farLength = Math.hypot(r2x, r2y, r2z);
-    assert(
-      farLength < 1e-6,
-      'frustumFromViewProjection: expected an infinite reverse-Z projection ' +
-      `(far plane normal has length ${farLength}, should be 0)`,
-    );
-  }
 
   setPlane(out, PLANE_LEFT, r3x + r0x, r3y + r0y, r3z + r0z, r3w + r0w);
   setPlane(out, PLANE_RIGHT, r3x - r0x, r3y - r0y, r3z - r0z, r3w - r0w);

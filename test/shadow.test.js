@@ -146,6 +146,27 @@ test('the sphere contains every corner of the slice', () => {
   }
 });
 
+test('an orthographic slice is a box, and the sphere contains its near corners', () => {
+  // Fitting it as a pyramid would shrink the near end to a point, leaving the
+  // part of an orthographic view closest to the camera outside every cascade.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1, orthographic: true });
+  camera.position.set([0, 0, 10]);
+  camera.target.set([0, 0, 0]);
+  camera.update(16 / 9);
+  const sphere = frustumSliceSphere(new Float32Array(4), camera, 0.1, 20);
+
+  const h = camera.orthographicHalfHeight();
+  const w = h * camera.aspect;
+  for (const distance of [0.1, 20]) {
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        const d = Math.hypot(w * sx - sphere[0], h * sy - sphere[1], 10 - distance - sphere[2]);
+        assert.ok(d <= sphere[3] + 1e-4, `corner at ${distance} is outside by ${d - sphere[3]}`);
+      }
+    }
+  }
+});
+
 test('the radius does not change when the camera rotates', () => {
   // THE reason a sphere is used instead of the frustum corners. If the radius
   // moved with the camera's heading, the shadow box would resize every frame

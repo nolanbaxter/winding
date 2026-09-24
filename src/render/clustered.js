@@ -115,20 +115,41 @@ struct Bounds {
 @group(0) @binding(4) var<storage, read_write> counts  : array<u32>;
 
 /** Screen pixel to a point on the near plane, in view space. */
-fn screenToView(pixel : vec2<f32>) -> vec3<f32> {
+fn unproject(pixel : vec2<f32>, ndcZ : f32) -> vec3<f32> {
   let ndc = vec4<f32>(
     (pixel.x / params.screen.x) * 2.0 - 1.0,
     1.0 - (pixel.y / params.screen.y) * 2.0,
-    1.0, 1.0,                       // reverse-Z: 1.0 IS the near plane
+    ndcZ, 1.0,
   );
   let view = params.invProjection * ndc;
   return view.xyz / view.w;
 }
 
-/** Where a ray from the eye through the target point crosses the plane z = -distance. */
-fn rayAtDepth(nearPoint : vec3<f32>, distance : f32) -> vec3<f32> {
-  // The eye is the origin in view space, so the ray is just that point scaled.
-  return nearPoint * (-distance / nearPoint.z);
+/**
+ * The point where the ray through a pixel reaches a view depth.
+ *
+ * Built from TWO unprojections of the same pixel and a walk along the line
+ * between them, which is the correct ray under any projection.
+ *
+ * This used to scale a single near-plane point by distance/near, commented
+ * "the eye is the origin in view space, so the ray is just that point
+ * scaled". True for perspective, where every ray passes through the eye. False
+ * for orthographic, where rays are PARALLEL -- and not merely loose: an
+ * off-centre tile spanning x in [2, 3] got a froxel at [20, 30] ten near-
+ * distances out, a box that does not contain the cell at all. Lights inside
+ * it were assigned somewhere else and surfaces went unlit, with nothing
+ * reported.
+ *
+ * ndc 1.0 is the near plane (reverse-Z). ndc 0.5 is finite under both
+ * projections -- 2 * near for the infinite perspective, midway for an
+ * orthographic box -- and never at the same depth as 1.0, so the division
+ * below is always defined.
+ */
+fn pointAtDepth(pixel : vec2<f32>, distance : f32) -> vec3<f32> {
+  let a = unproject(pixel, 1.0);
+  let b = unproject(pixel, 0.5);
+  let t = (-distance - a.z) / (b.z - a.z);
+  return a + (b - a) * t;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -138,9 +159,6 @@ fn buildClusters(@builtin(global_invocation_id) id : vec3<u32>) {
 
   let tileMin = vec2<f32>(f32(id.x), f32(id.y)) * params.screen.zw;
   let tileMax = tileMin + params.screen.zw;
-
-  let cornerMin = screenToView(tileMin);
-  let cornerMax = screenToView(tileMax);
 
   // Inverse of the exponential slice mapping, giving this slice's depth range.
   let near = params.depth.x;
@@ -165,10 +183,10 @@ fn buildClusters(@builtin(global_invocation_id) id : vec3<u32>) {
   // Four points: the tile's two corners projected onto each slice plane. The
   // other four corners of the froxel are covered because the AABB of these
   // already contains them.
-  let a = rayAtDepth(cornerMin, sliceNear);
-  let b = rayAtDepth(cornerMax, sliceNear);
-  let c = rayAtDepth(cornerMin, sliceFar);
-  let d = rayAtDepth(cornerMax, sliceFar);
+  let a = pointAtDepth(tileMin, sliceNear);
+  let b = pointAtDepth(tileMax, sliceNear);
+  let c = pointAtDepth(tileMin, sliceFar);
+  let d = pointAtDepth(tileMax, sliceFar);
 
   bounds[cluster].minPoint = vec4<f32>(min(min(a, b), min(c, d)), 0.0);
   bounds[cluster].maxPoint = vec4<f32>(max(max(a, b), max(c, d)), 0.0);

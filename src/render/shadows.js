@@ -174,9 +174,14 @@ export function frustumSliceSphere(out, camera, nearDistance, farDistance) {
 
   const ex = camera.position[0], ey = camera.position[1], ez = camera.position[2];
 
+  // Perspective widens with depth; an orthographic box is the same size at
+  // both ends of the slice, so fitting it as a pyramid would leave the near
+  // corners -- the part of the view closest to the camera -- unshadowed.
   const tanHalf = Math.tan(camera.fovY * 0.5);
-  const nearH = tanHalf * nearDistance, nearW = nearH * camera.aspect;
-  const farH = tanHalf * farDistance, farW = farH * camera.aspect;
+  const nearH = camera.orthographic ? camera.orthographicHalfHeight() : tanHalf * nearDistance;
+  const farH = camera.orthographic ? nearH : tanHalf * farDistance;
+  const nearW = nearH * camera.aspect;
+  const farW = farH * camera.aspect;
 
   // Centroid of the eight corners. It lies on the view axis by symmetry, so
   // this reduces to a point between the two slice centres.

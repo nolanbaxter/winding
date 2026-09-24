@@ -174,12 +174,24 @@ test('the left plane passes through the 90-degree fov edge', () => {
   close(onEdge, 0, 1e-5, 'point on the edge has zero distance');
 });
 
-test('a finite projection is rejected instead of silently losing a plane', () => {
-  // Standard-Z projection: near/far both real, so the far row is NOT
-  // degenerate and a five-plane frustum would leak distant geometry.
-  const finite = mat4Create();
-  finite[0] = 1; finite[5] = 1; finite[10] = -1.002; finite[11] = -1; finite[14] = -0.2; finite[15] = 0;
-  assert.throws(() => frustumFromViewProjection(frustumCreate(), finite), /infinite reverse-Z/);
+test('an orthographic box culls by its sides and keeps what is past far', () => {
+  // This used to be "a finite projection is rejected", and an orthographic
+  // camera is exactly a finite projection. Its far plane is real, but leaving
+  // it out only ever KEEPS more: the rasteriser clips what is past it. So the
+  // sides must still cull, and far must not.
+  const camera = new Camera({ fovY: Math.PI / 2, near: 0.1, orthographic: true, far: 20 });
+  camera.position.set([0, 0, 10]);
+  camera.update(1);                                     // half extent: 10 * tan(45) = 10
+  const frustum = frustumFromViewProjection(frustumCreate(), camera.viewProjection);
+
+  for (let i = 0; i < FRUSTUM_PLANE_COUNT * 4; i++) {
+    assert.ok(Number.isFinite(frustum[i]), `plane component ${i} is finite`);
+  }
+  const keeps = ({ min, max }) => frustumTestAABB(frustum, min, max);
+  assert.equal(keeps(boxAt(9, 0, -5)), true, 'inside, near the right edge');
+  assert.equal(keeps(boxAt(12, 0, -5)), false, 'past the right edge');
+  assert.equal(keeps(boxAt(0, 0, 11)), false, 'behind the camera');
+  assert.equal(keeps(boxAt(0, 0, -50)), true, 'past far is kept, not culled');
 });
 
 console.log('\nculling');

@@ -338,6 +338,12 @@ test('lights grow too', () => {
   for (let i = 0; i < 10; i++) {
     scene.addLight({ position: [i, 0, 0], color: [1, 1, 1], intensity: 1, radius: 1 });
   }
+  // Lights are entities now, so this also grows the handle allocator and the
+  // transform store past a capacity of 8 -- and positions arrive from those
+  // transforms when a frame refreshes them, not at addLight.
+  scene.update();
+  scene.refreshLights();
+
   assert.equal(scene.lightCount, 10);
   assert.equal(scene.lights[0], 0, 'first light survived');
   assert.equal(scene.lights[9 * 16], 9, 'tenth light was written');

@@ -502,6 +502,11 @@ export class Renderer {
     this.shadows.shadowDistance = shadowRange;
     this.skybox.update(camera, 1.0);
     this.shadows.update(camera, scene.sun.direction);
+    // Lights are scene objects: their position and aim live in their
+    // transforms, which have composed by now. Copied into the packed array
+    // here, immediately before upload, so a light parented to something that
+    // moved this frame is lit from where it is rather than where it was.
+    if (scene.lightCount > 0) scene.refreshLights();
     this.clusters.update(scene, camera, lightRange);
     // Growing the light list replaced lightBuffer, which every cached frame
     // bind group names. Dropping the cache rebuilds them on next use.
@@ -544,6 +549,11 @@ export class Renderer {
     this.frameData[109] = this.clusters.sliceBias;
     this.frameData[110] = this.clusters.tileSize[0];
     this.frameData[111] = this.clusters.tileSize[1];
+    // The view axis, for view depth in the shader. The view matrix's third row
+    // is the camera's +Z in world space; the camera looks down -Z.
+    this.frameData[112] = -camera.view[2];
+    this.frameData[113] = -camera.view[6];
+    this.frameData[114] = -camera.view[10];
     rhi.queue.writeBuffer(this.frameBuffer, 0, this.frameData);
 
 

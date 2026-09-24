@@ -513,7 +513,6 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     // pixel. No screen-space arithmetic, no screenshot to squint at: each
     // feature gets one unambiguous answer.
     const SIZE = 64;
-    const MID = ((SIZE / 2) * SIZE + SIZE / 2) * 4;
 
     const probeCanvas = document.createElement('canvas');
     probeCanvas.width = SIZE;
@@ -527,9 +526,16 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
     });
 
-    const shootWith = async (options, light) => {
+    // WHERE is a fraction of the canvas, not a pixel index. This used to read
+    // ((32 * 64) + 32) * 4 on the assumption that the canvas stayed 64x64 --
+    // but the engine sizes its backing store from the CSS box, which is
+    // 320x240 on this page, so "the middle" was pixel (32, 32) near the top-
+    // left corner. Every check still passed because the quad fills the view,
+    // and the one light check passed only because its radius covered the
+    // corner too. A light aimed at the middle measured nothing.
+    const shootWith = async (options, light, { orthographic = false, at = [0.5, 0.5] } = {}) => {
       const scene = probe.createScene();
-      const cam = new Camera({ fovY: 1.0, near: 0.1 });
+      const cam = new Camera({ fovY: 1.0, near: 0.1, orthographic });
       cam.position.set([0, 0, 2]);
       cam.target.set([0, 0, 0]);
       scene.add(await probe.load(buildFeatureGLB(options)));
@@ -537,7 +543,9 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       probe.renderFrame(scene, cam);
       // Once per frame, before anything else awaits -- see rhi.readPixels.
       const pixels = await probe.rhi.readPixels();
-      return [pixels[MID], pixels[MID + 1], pixels[MID + 2]];
+      const { width, height } = probe.rhi;
+      const i = (Math.floor(at[1] * height) * width + Math.floor(at[0] * width)) * 4;
+      return [pixels[i], pixels[i + 1], pixels[i + 2]];
     };
     const shoot = (options) => shootWith(options, null);
 
@@ -648,6 +656,28 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         throw new Error(`a point light did not reach the surface: ${show(unlit)} -> ${show(lit)}`);
       }
       results.push('a point light reaches the surface');
+
+      // The same, through an orthographic camera and well off-centre. The
+      // froxel builder used to assume every ray passes through the eye, which
+      // is only true in perspective: under ortho an edge froxel's box missed
+      // the cell it stood for, and a light there lit nothing. At the centre
+      // the two constructions agree, which is why this reads near the edge.
+      const ortho = { orthographic: true, at: [0.8, 0.5] };
+      // Distance 2, fovY 1: half height 2 tan(0.5) = 1.09, and at 4:3 half
+      // width 1.46, so 80% across is x = 0.6 * 1.46 = 0.87 in world space. A
+      // small radius keeps the light local to it -- and keeps its depth range,
+      // 1.8 +- 0.5 from the camera, clear of depth 1, which is where every
+      // fragment would look for its lights if view depth were read from clip.w
+      // (always 1 under ortho) instead of measured along the view axis.
+      const orthoLight = { position: [0.87, 0, 0.2], color: [1, 1, 1], intensity: 6, radius: 0.5 };
+      const orthoUnlit = await shootWith({ baseColorFactor: [0.6, 0.6, 0.6, 1] }, null, ortho);
+      const orthoLit = await shootWith({ baseColorFactor: [0.6, 0.6, 0.6, 1] }, orthoLight, ortho);
+      if (!(orthoLit[0] > orthoUnlit[0] + 20)) {
+        throw new Error(
+          `an off-centre light did not reach the surface under ortho: ${show(orthoUnlit)} -> ${show(orthoLit)}`,
+        );
+      }
+      results.push('an off-centre light lights an orthographic view');
 
       // Emissive with no texture. The default map was black, so this factor
       // used to be multiplied away entirely.

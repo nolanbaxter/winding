@@ -26,6 +26,9 @@ const EPS = 1e-5;
 function close(a, b, eps = EPS, what = '') {
   assert.ok(Math.abs(a - b) <= eps, `${what} expected ${b}, got ${a}`);
 }
+function vecClose(a, b, eps = EPS, what = '') {
+  for (let i = 0; i < b.length; i++) close(a[i], b[i], eps, `${what}[${i}]`);
+}
 
 const NEAR = 0.1;
 const LIGHT_DISTANCE = 60;
@@ -92,31 +95,40 @@ test('the grid is a sane size for the index buffer it implies', () => {
 
 console.log('\nlight packing');
 
+/** Where a light sits in the packed array. Tests read the GPU format directly. */
+const slot = (scene, light) => scene._lightOf.get(light.entity) * LIGHT_FLOATS;
+
+/** Compose transforms and copy them into the lights, as a frame would. */
+function settle(scene) {
+  scene.update();
+  scene.refreshLights();
+}
+
 test('a point light packs position, radius, colour and intensity', () => {
   const scene = new Scene({ capacity: 16 });
-  const index = scene.addLight({
+  const light = scene.addLight({
     position: [1, 2, 3], color: [0.25, 0.5, 0.75], intensity: 7, radius: 9,
   });
+  settle(scene);
 
-  assert.equal(index, 0);
   assert.equal(scene.lightCount, 1);
-
-  const o = index * LIGHT_FLOATS;
+  const o = slot(scene, light);
   assert.deepEqual([...scene.lights.subarray(o, o + 4)], [1, 2, 3, 9]);
   assert.deepEqual([...scene.lights.subarray(o + 4, o + 8)], [0.25, 0.5, 0.75, 7]);
   assert.equal(scene.lights[o + 14], LIGHT_POINT, 'type marks it a point light');
 });
 
-test('a spot light normalizes its direction and precomputes the cone falloff', () => {
+test('a spot light is aimed by its node, and precomputes the cone falloff', () => {
   const scene = new Scene({ capacity: 16 });
   const inner = 0.3;
   const outer = 0.6;
-  const index = scene.addLight({
+  const light = scene.addLight({
     position: [0, 5, 0], direction: [0, -4, 0], innerAngle: inner, outerAngle: outer,
   });
+  settle(scene);
 
-  const o = index * LIGHT_FLOATS;
-  assert.deepEqual([...scene.lights.subarray(o + 8, o + 11)], [0, -1, 0], 'unit direction');
+  const o = slot(scene, light);
+  vecClose([...scene.lights.subarray(o + 8, o + 11)], [0, -1, 0], 1e-6, 'unit direction');
   assert.equal(scene.lights[o + 14], LIGHT_SPOT);
 
   // saturate(cos(angle) * scale + offset) must be 1 at the inner angle and 0
@@ -129,47 +141,122 @@ test('a spot light normalizes its direction and precomputes the cone falloff', (
 
 test('a degenerate cone does not divide by zero', () => {
   const scene = new Scene({ capacity: 16 });
-  const index = scene.addLight({
+  const light = scene.addLight({
     direction: [0, -1, 0], innerAngle: 0.5, outerAngle: 0.5,
   });
-  const o = index * LIGHT_FLOATS;
+  const o = slot(scene, light);
   assert.ok(Number.isFinite(scene.lights[o + 12]), 'scale is finite');
   assert.ok(Number.isFinite(scene.lights[o + 13]), 'offset is finite');
 });
 
-test('setters update in place without touching neighbours', () => {
+// ------------------------------------------------------ lights as scene nodes
+
+console.log('\nlights as scene nodes');
+
+test('a light follows its parent', () => {
+  // THE point of this change. A light used to be a row in an array, so one on
+  // a moving object meant calling setLightPosition every frame -- the viewer
+  // example did exactly that for twelve lights. Now it is a node, and a node
+  // under a parent goes where the parent goes.
   const scene = new Scene({ capacity: 16 });
-  scene.addLight({ position: [0, 0, 0], radius: 5 });
-  const second = scene.addLight({ position: [9, 9, 9], radius: 5 });
+  const cart = scene.createNode();
+  const lamp = scene.addLight({ position: [0, 1, 0], parent: cart });
 
-  scene.setLightPosition(second, 1, 2, 3);
-  scene.setLightColor(second, 0.1, 0.2, 0.3, 4);
+  cart.setPosition(10, 0, 5);
+  settle(scene);
 
-  const o = second * LIGHT_FLOATS;
-  assert.deepEqual([...scene.lights.subarray(o, o + 4)], [1, 2, 3, 5], 'radius untouched');
-  assert.deepEqual([...scene.lights.subarray(o + 4, o + 8)], [
-    Math.fround(0.1), Math.fround(0.2), Math.fround(0.3), 4,
-  ]);
-  assert.equal(scene.lights[0], 0, 'the first light is unchanged');
+  const o = slot(scene, lamp);
+  vecClose([...scene.lights.subarray(o, o + 3)], [10, 1, 5], 1e-6, 'parent offset + own offset');
 });
 
-test('removal swap-removes, so light indices are not stable', () => {
+test('a spot aims wherever its parent turns', () => {
+  // The same argument for direction. A torch in a hand points where the hand
+  // points, because the aim is the node's -Z and the node inherits rotation.
   const scene = new Scene({ capacity: 16 });
-  scene.addLight({ position: [1, 1, 1] });
-  scene.addLight({ position: [2, 2, 2] });
-  scene.addLight({ position: [3, 3, 3] });
+  const head = scene.createNode();
+  const torch = scene.addLight({ direction: [0, 0, -1], parent: head });
 
-  scene.removeLight(0);
+  // Quarter turn to the left about +Y: -Z swings round onto -X.
+  head.setRotationAxisAngle([0, 1, 0], Math.PI / 2);
+  settle(scene);
+
+  const o = slot(scene, torch);
+  vecClose([...scene.lights.subarray(o + 8, o + 11)], [-1, 0, 0], 1e-5, 'aim followed the head');
+});
+
+test('moving a light is moving its node', () => {
+  const scene = new Scene({ capacity: 16 });
+  const lamp = scene.addLight({ position: [0, 0, 0] });
+  lamp.setPosition(3, 4, 5);
+  settle(scene);
+
+  const o = slot(scene, lamp);
+  vecClose([...scene.lights.subarray(o, o + 3)], [3, 4, 5], 1e-6);
+});
+
+test('setLight changes only what it is given, and only that light', () => {
+  const scene = new Scene({ capacity: 16 });
+  const first = scene.addLight({ position: [0, 0, 0], radius: 5, color: [1, 1, 1], intensity: 1 });
+  const second = scene.addLight({ position: [9, 9, 9], radius: 5, color: [1, 1, 1], intensity: 1 });
+
+  assert.equal(scene.setLight(second.entity, { color: [0.1, 0.2, 0.3], intensity: 4 }), true);
+
+  const o = slot(scene, second);
+  assert.equal(scene.lights[o + 3], 5, 'radius untouched');
+  vecClose([...scene.lights.subarray(o + 4, o + 8)], [0.1, 0.2, 0.3, 4], 1e-6, 'colour + intensity');
+
+  const f = slot(scene, first);
+  vecClose([...scene.lights.subarray(f + 4, f + 8)], [1, 1, 1, 1], 1e-6, 'the other light is unchanged');
+});
+
+test('setLight on something that is not a light says so', () => {
+  const scene = new Scene({ capacity: 16 });
+  const plain = scene.createNode();
+  assert.equal(scene.setLight(plain.entity, { intensity: 9 }), false);
+});
+
+test('removing a light leaves every other light reachable by its handle', () => {
+  // This test used to be called "removal swap-removes, so light indices are
+  // not stable" and ASSERTED the bug: the last light silently took the
+  // removed one's index, so anyone holding an index now pointed at a
+  // different light. Callers hold the node now, and the node still finds its
+  // own light after the array has been compacted under it.
+  const scene = new Scene({ capacity: 16 });
+  const a = scene.addLight({ position: [1, 1, 1], intensity: 1 });
+  const b = scene.addLight({ position: [2, 2, 2], intensity: 2 });
+  const c = scene.addLight({ position: [3, 3, 3], intensity: 3 });
+
+  a.destroy();
+  settle(scene);
+
   assert.equal(scene.lightCount, 2);
-  assert.equal(scene.lights[0], 3, 'the last light moved into the hole');
+  assert.equal(scene.lights[slot(scene, b) + 7], 2, 'b still reaches b');
+  assert.equal(scene.lights[slot(scene, c) + 7], 3, 'c still reaches c -- it moved, the handle did not');
+  vecClose([...scene.lights.subarray(slot(scene, c), slot(scene, c) + 3)], [3, 3, 3], 1e-6);
 });
 
-test('passing the initial light capacity grows rather than dropping lights', () => {
+test('destroying a parent takes its lights with it', () => {
+  const scene = new Scene({ capacity: 16 });
+  const cart = scene.createNode();
+  scene.addLight({ parent: cart });
+  scene.addLight({ parent: cart });
+  const elsewhere = scene.addLight({ position: [7, 7, 7], intensity: 5 });
+
+  cart.destroy();
+  settle(scene);
+
+  assert.equal(scene.lightCount, 1, 'both children went with the cart');
+  assert.equal(scene.lights[slot(scene, elsewhere) + 7], 5, 'and the unrelated light survived intact');
+});
+
+test('light capacity grows rather than dropping lights', () => {
   const scene = new Scene({ capacity: 8, lightCapacity: 2 });
   scene.addLight({});
   scene.addLight({});
-  assert.equal(scene.addLight({}), 2, 'the third light gets a real index');
+  const third = scene.addLight({ intensity: 3 });
+  assert.equal(scene.lightCount, 3);
   assert.ok(scene.lightCapacity >= 3);
+  assert.equal(scene.lights[slot(scene, third) + 7], 3, 'the third light is real');
 });
 
 // --------------------------------------------------- compute pass ordering

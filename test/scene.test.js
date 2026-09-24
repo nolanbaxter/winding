@@ -913,4 +913,123 @@ test('scene.frame on an empty scene moves nothing and says so', () => {
   vecClose(camera.position, [1, 2, 3], EPS, 'and the camera did not move');
 });
 
+// ------------------------------------------------------------- orthographic
+
+console.log('\northographic camera');
+
+/** A camera 10 back from the origin, looking down -Z. */
+function orthoCamera(options = {}) {
+  const camera = new Camera({ fovY: Math.PI / 2, near: 0.1, orthographic: true, ...options });
+  camera.position.set([0, 0, 10]);
+  camera.target.set([0, 0, 0]);
+  camera.update(2);
+  return camera;
+}
+
+/** A world point through the combined matrix, to NDC. */
+function toNdc(m, [x, y, z]) {
+  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+  return [
+    (m[0] * x + m[4] * y + m[8] * z + m[12]) / w,
+    (m[1] * x + m[5] * y + m[9] * z + m[13]) / w,
+    (m[2] * x + m[6] * y + m[10] * z + m[14]) / w,
+  ];
+}
+
+test('only an orthographic camera has a far plane', () => {
+  // The perspective "no far plane" rule still holds; ortho is the one case
+  // that cannot have an infinite form, so it is the one case that carries it.
+  assert.equal('far' in new Camera(), false);
+  assert.equal(orthoCamera().far, 1000);
+  assert.equal(orthoCamera({ far: 50 }).far, 50);
+});
+
+test('it shows what a perspective camera would see at its target', () => {
+  // 90 degrees, 10 away: tan(45) * 10 = 10 up and 20 across at aspect 2.
+  // Deriving it from the distance is what makes wheel zoom work at all.
+  const m = orthoCamera().viewProjection;
+  vecClose(toNdc(m, [0, 10, 0]).slice(0, 2), [0, 1], 1e-6, 'top edge');
+  vecClose(toNdc(m, [20, 0, 0]).slice(0, 2), [1, 0], 1e-6, 'right edge');
+});
+
+test('size on screen does not change with depth', () => {
+  // The definition of the projection. The same offset at two depths lands on
+  // the same pixel; in perspective the farther one would shrink toward centre.
+  const m = orthoCamera().viewProjection;
+  close(toNdc(m, [5, 0, 5])[0], toNdc(m, [5, 0, -50])[0], 1e-6, 'x ignores depth');
+});
+
+test('orthographic depth is reversed and spans near to far', () => {
+  const camera = orthoCamera({ far: 100 });
+  const m = camera.viewProjection;
+  close(toNdc(m, [0, 0, 10 - 0.1])[2], 1, 1e-5, 'near plane -> 1');
+  close(toNdc(m, [0, 0, 10 - 100])[2], 0, 1e-5, 'far plane -> 0');
+  assert.ok(toNdc(m, [0, 0, 0])[2] > toNdc(m, [0, 0, -20])[2], 'closer is larger');
+});
+
+test('zooming an orthographic camera is moving it', () => {
+  // Halve the distance, double the size on screen. No separate knob to keep
+  // in step with an orbit controller that only knows about distance.
+  const camera = orthoCamera();
+  const before = toNdc(camera.viewProjection, [4, 0, 0])[0];
+  camera.position.set([0, 0, 5]);
+  camera.update(2);
+  close(toNdc(camera.viewProjection, [4, 0, 0])[0], before * 2, 1e-6);
+});
+
+test('orthographic rays are parallel, and start under the cursor', () => {
+  const camera = orthoCamera();
+  const origin = vec3Create();
+  const direction = vec3Create();
+
+  // The right edge: aspect 2, half height 10, so 20 across -- and the ray
+  // still points straight down the view axis rather than fanning outward.
+  camera.rayFromScreen(100, 50, 100, 100, origin, direction);
+  vecClose(direction, [0, 0, -1], EPS, 'straight ahead');
+  vecClose(origin, [20, 0, 10], EPS, 'moved across, not tilted');
+
+  // Top-left corner: screen y=0 is up.
+  camera.rayFromScreen(0, 0, 100, 100, origin, direction);
+  vecClose(origin, [-20, 10, 10], EPS, 'corner');
+});
+
+test('orthographic rays agree with the projection', () => {
+  // Every point along a ray through a pixel must project back onto it --
+  // the property the perspective version is tested for, read for ortho.
+  const camera = orthoCamera();
+  const origin = vec3Create();
+  const direction = vec3Create();
+  camera.rayFromScreen(30, 80, 100, 100, origin, direction);
+  for (const t of [1, 10, 40]) {
+    const point = [0, 1, 2].map((i) => origin[i] + direction[i] * t);
+    vecClose(toNdc(camera.viewProjection, point).slice(0, 2), [-0.4, -0.6], 1e-5, `t=${t}`);
+  }
+});
+
+test('picking through an orthographic camera finds an off-centre box', () => {
+  // The case that matters: in perspective a ray from the eye toward the right
+  // edge could still hit a box there, just at an angle. In ortho it must hit
+  // only what is directly beneath the pixel.
+  const { scene, nodes } = pickScene([[15, 0, -5]]);
+  const camera = orthoCamera();
+  const hit = scene.pick(camera, 87.5, 50, 100, 100);      // x = 0.75 * 20 = 15
+  assert.ok(hit, 'the box under the cursor');
+  assert.equal(hit.node.entity, nodes[0]);
+  assert.equal(scene.pick(camera, 50, 50, 100, 100), null, 'nothing at the centre');
+});
+
+test('framing orthographically fits the sphere and keeps it inside far', () => {
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1, orthographic: true, far: 1 });
+  camera.update(1);
+  camera.frameBounds([-1, -1, -1], [1, 1, 1]);
+  camera.update(1);
+
+  const r = Math.sqrt(3);
+  const m = camera.viewProjection;
+  // The sphere's top and its far side are both on screen and in depth.
+  assert.ok(toNdc(m, [0, r, 0])[1] <= 1 + 1e-6, 'top of the sphere is on screen');
+  assert.ok(camera.far >= camDistance(camera) + r - 1e-6, 'far grew to contain it');
+  assert.ok(toNdc(m, [0, 0, -r])[2] >= -1e-6, 'the back of the sphere is not clipped');
+});
+
 console.log(`\n${passed} checks passed\n`);
