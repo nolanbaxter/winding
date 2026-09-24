@@ -33,6 +33,14 @@ an honest list rather than a short one.
 <td><b>Clustered lighting.</b> 576 point lights. The view frustum is diced into froxels, so a fragment only ever evaluates the handful whose radius reaches its cell.</td>
 <td><b>GPU-driven batching.</b> 121 helmets in <b>two</b> draw calls. A compute pass culls them and writes the instance counts; the CPU never learns which survived.</td>
 </tr>
+<tr>
+<td><img src="docs/images/fox.png" alt="A skinned fox cross-fading from a walk to a run and back"></td>
+<td><img src="docs/images/alpha-shadows.png" alt="A cutout lattice and a glass pane casting shadows under a moving sun"></td>
+</tr>
+<tr>
+<td><b>Skinning and cross-fades.</b> A walk blends into a run and back with <code>play('Run', { fade: 0.5 })</code>. Rotations blend the short way round, and one vertex shader skins and morphs.</td>
+<td><b>Alpha-shaped shadows.</b> A cutout casts the shape of its texture, holes and all; a half-transparent pane casts a shadow half as dark. Opaque casters keep the depth-only path.</td>
+</tr>
 </table>
 
 <sub><b>Models.</b>
@@ -40,9 +48,13 @@ an honest list rather than a short one.
 Helmet</a> by ctxwing and theblueturtle_, <a href="https://creativecommons.org/licenses/by/4.0/">CC BY
 4.0</a>. <a href="https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza">Sponza</a>
 by Frank Meinl and Marko Dabrovic, with PBR textures by Alexandre Pestana, from the Khronos glTF
-Sample Assets — <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>. Both are third
-party assets shown here to demonstrate the renderer; neither is part of it, and neither is
-redistributed in this repository.</sub>
+Sample Assets — <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>.
+<a href="https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Fox">Fox</a> modelled by
+PixelMannen (<a href="https://creativecommons.org/publicdomain/zero/1.0/">CC0</a>), rigged and animated
+by tomkranis, converted to glTF by @AsoboStudio and @scurest
+(<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>). All three are third party
+assets shown here to demonstrate the renderer; none is part of it, and none is redistributed in
+this repository.</sub>
 
 ```js
 import { Winding, Camera, OrbitController } from 'winding-engine';
