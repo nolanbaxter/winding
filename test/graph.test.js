@@ -742,4 +742,133 @@ test('no profiler means no timestampWrites key to confuse a driver', () => {
   console.log('  ok  a resolved readback reports a duration per named pass');
 }
 
+// ---------------------------------------------------------- compile reuse
+
+console.log('\ncompile reuse');
+
+/** A small frame: a transient bloom-like chain into an imported target. */
+function declareFrame(graph, { size = 8, reader = true, clearTarget = true, extraPass = false } = {}) {
+  graph.begin();
+  const target = graph.importTexture('target', { id: 'target-view' });
+  const scratch = graph.createTexture('scratch', { ...COLOR, width: size, height: size });
+  const unused = graph.createTexture('unused', COLOR);
+  graph.addPass({ name: 'produce', color: [{ resource: scratch, clear: 0 }], execute() {} });
+  // Writes a transient nothing reads unless `reader`: culled or live by that.
+  graph.addPass({ name: 'maybe-dead', color: [{ resource: unused, clear: 0 }], execute() {} });
+  graph.addPass({
+    name: 'consume',
+    reads: reader ? [scratch, unused] : [scratch],
+    color: [{ resource: target, clear: clearTarget ? 0 : undefined }],
+    execute() {},
+  });
+  if (extraPass) {
+    graph.addPass({ name: 'overlay', color: [{ resource: target }], execute() {} });
+  }
+  graph.compile();
+  const { ran, encoder } = recorder();
+  graph.execute(encoder);
+  return ran.map((p) => ({
+    label: p.label,
+    ops: p.colorAttachments.map((a) => `${a.loadOp}/${a.storeOp}`).join(),
+    view: p.colorAttachments[0].view,
+  }));
+}
+
+/** An rhi that counts what it creates and destroys. */
+function countingRhi() {
+  const counts = { created: 0, destroyed: 0 };
+  return {
+    counts,
+    device: {
+      createTexture(desc) {
+        counts.created++;
+        const texture = { desc, destroy() { counts.destroyed++; } };
+        texture.createView = () => ({ texture });
+        return texture;
+      },
+    },
+  };
+}
+
+test('an identical frame reuses the last compile, and gets the same answer', () => {
+  const rhi = countingRhi();
+  const graph = new RenderGraph(rhi);
+  const first = declareFrame(graph);
+  assert.equal(graph.stats.reused, false, 'the first frame compiles');
+
+  const second = declareFrame(graph);
+  assert.equal(graph.stats.reused, true, 'the second is the same declaration');
+  assert.deepEqual(second.map((p) => p.label), first.map((p) => p.label), 'same order');
+  assert.deepEqual(second.map((p) => p.ops), first.map((p) => p.ops), 'same load/store ops');
+  assert.deepEqual(second.map((p) => p.view), first.map((p) => p.view), 'same physical textures');
+  assert.equal(rhi.counts.created, 2, 'nothing new allocated');
+});
+
+test('reused textures are kept alive, not evicted as unasked-for', () => {
+  // The pool evicts what a frame did not acquire. A reused compile acquires
+  // nothing, so without re-marking its textures they died two frames later
+  // while the graph was still handing out their views.
+  const rhi = countingRhi();
+  const graph = new RenderGraph(rhi);
+  for (let f = 0; f < 10; f++) declareFrame(graph);
+  assert.equal(rhi.counts.destroyed, 0);
+  assert.equal(rhi.counts.created, 2);
+});
+
+test('a pass that comes alive recompiles, and runs', () => {
+  const graph = new RenderGraph(countingRhi());
+  const without = declareFrame(graph, { reader: false });
+  assert.ok(!without.some((p) => p.label === 'maybe-dead'), 'culled while nothing reads it');
+
+  const withReader = declareFrame(graph, { reader: true });
+  assert.equal(graph.stats.reused, false);
+  assert.ok(withReader.some((p) => p.label === 'maybe-dead'), 'live once something reads it');
+});
+
+test('dropping a clear recompiles the load op', () => {
+  const graph = new RenderGraph(countingRhi());
+  declareFrame(graph, { extraPass: true });
+  const overlay = declareFrame(graph, { extraPass: true }).find((p) => p.label === 'overlay');
+  assert.equal(overlay.ops, 'load/store', 'loads what consume wrote');
+
+  // Now consume does not clear either, and nothing wrote target before it.
+  // DEBUG builds refuse that declaration outright; either way it must not be
+  // mistaken for the frame before.
+  let reused = true;
+  try {
+    declareFrame(graph, { extraPass: true, clearTarget: false });
+    reused = graph.stats.reused;
+  } catch { reused = false; }
+  assert.equal(reused, false);
+});
+
+test('a resize recompiles and takes a texture of the new size', () => {
+  const rhi = countingRhi();
+  const graph = new RenderGraph(rhi);
+  const small = declareFrame(graph, { size: 8 });
+  const large = declareFrame(graph, { size: 16 });
+  assert.equal(graph.stats.reused, false);
+  const produced = (frame) => frame.find((p) => p.label === 'produce').view.texture.desc.size[0];
+  assert.equal(produced(small), 8);
+  assert.equal(produced(large), 16);
+});
+
+test('a pass added recompiles', () => {
+  const graph = new RenderGraph(countingRhi());
+  declareFrame(graph);
+  const frame = declareFrame(graph, { extraPass: true });
+  assert.equal(graph.stats.reused, false);
+  assert.ok(frame.some((p) => p.label === 'overlay'));
+});
+
+test('destroy forgets the kept compile, whose textures it just destroyed', () => {
+  const rhi = countingRhi();
+  const graph = new RenderGraph(rhi);
+  declareFrame(graph);
+  graph.destroy();
+  declareFrame(graph);
+  assert.equal(graph.stats.reused, false);
+  assert.equal(rhi.counts.created, 4, 'fresh textures, not the destroyed ones');
+});
+
 console.log(`\n${passed} checks passed\n`);

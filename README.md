@@ -192,7 +192,9 @@ thing carried between frames is one bit per object.
 **A render graph.** Passes declare what they read and write. Execution order, load/store ops, texture
 lifetimes and dead-pass elimination are all derived from that — nothing says "clear here" or "run this
 third". A default frame is 29 passes ordered from 60 dependency edges; the exact count moves
-with resolution, since the depth pyramid takes one pass per mip.
+with resolution, since the depth pyramid takes one pass per mip. The frame is declared every frame
+but compiled only when its shape changes: a signature of what was declared is compared with the
+last one, so a resize or a new pass recompiles by itself and nothing has to remember to invalidate.
 
 **Clustered forward lighting.** The view frustum is diced into froxels with exponential Z slicing; a
 fragment only ever evaluates the handful of lights whose radius reaches its cluster. The grid splits

@@ -35,6 +35,15 @@
 // Rebuilding happens every frame, but allocation does not: begin() resets
 // counters over pooled pass and resource records, so a steady-state frame adds
 // nothing to the heap.
+//
+// And COMPILING happens only when the frame changed. compile() writes a
+// signature of what was declared -- every pass's attachments, reads, writes and
+// whether it clears, every resource's kind and descriptor -- and when it matches
+// the last one, the last result is reused: the same order, the same load and
+// store ops, the same physical textures. Nothing is cached by remembering to
+// invalidate it. The signature is everything compile() reads, so a declaration
+// that would compile differently cannot match, and a resize, a pass added or a
+// toggle recompiles by itself.
 
 import { DEBUG, assert } from '../core/assert.js';
 import { growArray } from '../core/grow.js';
@@ -72,8 +81,23 @@ export class RenderGraph {
     this._edgeTo = new Uint32Array(64);
     this._edgeCount = 0;
 
-    this.stats = { passes: 0, executed: 0, culled: 0, edges: 0, transient: 0, aliased: 0, evicted: 0 };
+    this.stats = {
+      passes: 0, executed: 0, culled: 0, edges: 0, transient: 0, aliased: 0, evicted: 0,
+      /** Whether this frame's compile() reused the last one. */
+      reused: false,
+    };
     this._compiled = false;
+
+    // The last full compile, kept for an identical declaration to reuse. The
+    // signature is written into the scratch array every frame and swapped in
+    // after a full compile, so neither allocates in the steady state.
+    this._signature = new Int32Array(64);
+    this._signatureScratch = new Int32Array(64);
+    this._signatureLength = -1;          // -1: nothing compiled yet
+    this._compiledKeys = [];             // resource descriptor key, per handle
+    this._compiledPhysical = [];         // pooled texture entry, per handle
+    this._compiledFirstUse = new Int32Array(0);
+    this._compiledLastUse = new Int32Array(0);
   }
 
   /** Start a new frame's declaration. Frees nothing; resets counters. */
@@ -275,14 +299,27 @@ export class RenderGraph {
     resource.readers[resource.readerCount++] = passIndex;
   }
 
-  /** Order the passes, drop the dead ones, derive load/store, assign memory. */
+  /**
+   * Order the passes, drop the dead ones, derive load/store, assign memory --
+   * or, when this frame declared exactly what the last compiled one did, reuse
+   * all of that. See the header.
+   */
   compile() {
+    const length = this._writeSignature();
+    this.stats.reused = length === this._signatureLength && this._sameAsCompiled(length);
+    if (this.stats.reused) {
+      this._reuseCompiled();
+      this._compiled = true;
+      return this;
+    }
+
     this._sizeScratch();
     this._cullDeadPasses();
     this._topologicalSort();
     this._computeLifetimes();
     this._assignPhysicalTextures();
     this._deriveAttachmentOps();
+    this._keepCompiled(length);
 
     this.stats.passes = this.passCount;
     this.stats.executed = this._orderCount;
@@ -290,6 +327,107 @@ export class RenderGraph {
     this.stats.edges = this._edgeCount;
     this._compiled = true;
     return this;
+  }
+
+  /**
+   * Everything compile() reads, as integers, into the scratch signature.
+   * Returns its length.
+   *
+   * Pass names and execute functions are left out on purpose: they change
+   * nothing compile() derives. Clear VALUES are left out too, for the same
+   * reason -- only whether there is one decides a load op, and execute() reads
+   * the value fresh from this frame's declaration. Descriptor keys are strings
+   * and are compared separately, in _sameAsCompiled.
+   */
+  _writeSignature() {
+    let needed = 2 + this.resourceCount;
+    for (let p = 0; p < this.passCount; p++) {
+      const pass = this._passes[p];
+      needed += 6 + pass.colorCount * 2 + pass.readCount + pass.writeCount;
+    }
+    if (this._signatureScratch.length < needed) this._signatureScratch = new Int32Array(needed * 2);
+
+    const s = this._signatureScratch;
+    let n = 0;
+    s[n++] = this.passCount;
+    s[n++] = this.resourceCount;
+    for (let r = 0; r < this.resourceCount; r++) {
+      const resource = this._resources[r];
+      s[n++] = (resource.imported ? 1 : 0) | (resource.external ? 2 : 0) | (resource.kind === 'buffer' ? 4 : 0);
+    }
+    for (let p = 0; p < this.passCount; p++) {
+      const pass = this._passes[p];
+      s[n++] = pass.type === 'compute' ? 1 : 0;
+      s[n++] = pass.colorCount;
+      for (let c = 0; c < pass.colorCount; c++) {
+        s[n++] = pass.color[c].resource;
+        s[n++] = pass.color[c].clear === undefined ? 0 : 1;
+      }
+      s[n++] = pass.depth ? pass.depth.resource : -1;
+      s[n++] = pass.depth && pass.depth.clear !== undefined ? 1 : 0;
+      s[n++] = pass.readCount;
+      for (let r = 0; r < pass.readCount; r++) s[n++] = pass.reads[r];
+      s[n++] = pass.writeCount;
+      for (let w = 0; w < pass.writeCount; w++) s[n++] = pass.writes[w];
+    }
+    return n;
+  }
+
+  /** The scratch signature and every descriptor key match the last compile. */
+  _sameAsCompiled(length) {
+    const a = this._signatureScratch;
+    const b = this._signature;
+    for (let i = 0; i < length; i++) if (a[i] !== b[i]) return false;
+    for (let r = 0; r < this.resourceCount; r++) {
+      if (this._resources[r].key !== this._compiledKeys[r]) return false;
+    }
+    return true;
+  }
+
+  /** Record this full compile as the one an identical frame may reuse. */
+  _keepCompiled(length) {
+    const kept = this._signature;
+    this._signature = this._signatureScratch;
+    this._signatureScratch = kept;
+    this._signatureLength = length;
+
+    if (this._compiledFirstUse.length < this.resourceCount) {
+      this._compiledFirstUse = new Int32Array(this.resourceCount);
+      this._compiledLastUse = new Int32Array(this.resourceCount);
+    }
+    this._compiledKeys.length = this.resourceCount;
+    this._compiledPhysical.length = this.resourceCount;
+    for (let r = 0; r < this.resourceCount; r++) {
+      const resource = this._resources[r];
+      this._compiledKeys[r] = resource.key;
+      this._compiledPhysical[r] = resource.physical;
+      this._compiledFirstUse[r] = resource.firstUse;
+      this._compiledLastUse[r] = resource.lastUse;
+    }
+  }
+
+  /**
+   * Put the last compile's results back on this frame's records.
+   *
+   * The order, the live set and every attachment's load and store op are still
+   * where the last compile left them: they live on pooled records that only
+   * compile() writes. What begin() reset is per-resource -- lifetimes and the
+   * physical texture -- so that is what comes back here. The pooled textures
+   * are marked in use again, or the pool would evict them two frames from now
+   * as textures nobody asked for.
+   */
+  _reuseCompiled() {
+    for (let r = 0; r < this.resourceCount; r++) {
+      const resource = this._resources[r];
+      resource.firstUse = this._compiledFirstUse[r];
+      resource.lastUse = this._compiledLastUse[r];
+      const physical = this._compiledPhysical[r];
+      if (!physical) continue;
+      physical.inUse = 1;
+      physical.lastFrame = this._frame;
+      resource.physical = physical;
+      resource.view = physical.view;
+    }
   }
 
   /**
@@ -708,6 +846,9 @@ export class RenderGraph {
       for (const entry of entries) entry.texture.destroy();
     }
     this._pool.clear();
+    // The kept compile names textures that no longer exist.
+    this._signatureLength = -1;
+    this._compiledPhysical.length = 0;
   }
 }
 
