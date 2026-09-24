@@ -97,6 +97,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns a unit rotation for a sheared matrix; an empty box transforms to
   an empty box instead of NaN; quatFromTo no longer snaps turns up to 0.08
   degrees short of opposite onto an exact half turn.
+- **Sharper, fully covered cascades.** Each cascade is fitted to the
+  smallest sphere around its slice rather than the one about the centroid,
+  which wasted 5-17% of its texels, and its box is one texel wider on every
+  side so snapping can no longer leave a sliver of the view outside the map
+  and unshadowed.
+- **Mirrored casters shadowed themselves.** The shadow pass had one pipeline
+  for every winding, so a mirrored instance's front-face cull removed its
+  real back faces; mirrored batches now get the reversed-winding pipeline,
+  as the forward pass already did.
+- **Under OIT, skinned see-through objects drew in their rest pose.** The OIT
+  pipelines were built without the skinned vertex entry and joint buffer.
+- **A skinned and morphed mesh whose skin has no bounds grew its box every
+  frame.** Its morph padding was added in place to a box nothing rebuilt.
 - **Resource and tool hygiene.** Renderer.destroy() now releases the skin
   palette, morph buffers, skybox buffer and the cull pass's visibility
   flags, which it left behind. The OIT resolve keeps one bind group rather

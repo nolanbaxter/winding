@@ -697,10 +697,30 @@ test('a skinned and morphed renderable gets both corrections', () => {
     [{ weights: Float32Array.from([0.5]) }], [Float32Array.from([4])],
     new Float32Array(3), new Float32Array(3), min, max,
     new Float32Array(16), Uint32Array.from([0]), new Float32Array(1),
+    [{ hasBounds: true }],                      // applySkinBounds built this box
   );
   assert.equal(changed, 1);
   close(min[0], -3, EPS, 'grown by 0.5 * 4');
   close(max[2], 3, EPS, 'grown by 0.5 * 4');
+});
+
+test('a skinned and morphed renderable whose skin has no bounds does not grow every frame', () => {
+  // Nothing rebuilt its world box, so padding it in place stacked frame on
+  // frame: +-1.5, +-2, +-2.5, ... It is rebuilt from the local box instead.
+  const identity = new Float32Array(16);
+  identity[0] = identity[5] = identity[10] = identity[15] = 1;
+  const worldMin = new Float32Array([-1, -1, -1]);
+  const worldMax = new Float32Array([1, 1, 1]);
+  const run = () => applyMorphBounds(
+    1, Int32Array.from([0]), Int32Array.from([0]),
+    [{ weights: Float32Array.from([0.5]) }], [Float32Array.from([1])],
+    Float32Array.from([-1, -1, -1]), Float32Array.from([1, 1, 1]), worldMin, worldMax,
+    identity, Uint32Array.from([0]), new Float32Array(1),
+    [{ hasBounds: false }],
+  );
+  for (let frame = 0; frame < 4; frame++) run();
+  close(worldMin[0], -1.5, EPS, 'padded once');
+  close(worldMax[0], 1.5, EPS, 'padded once');
 });
 
 // ------------------------------------------------ asset graphs that are not trees

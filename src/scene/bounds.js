@@ -238,7 +238,7 @@ export function morphPadding(weights, extent) {
  */
 export function applyMorphBounds(
   count, renderableMorph, renderableSkin, morphs, extents,
-  localMin, localMax, worldMin, worldMax, matrices, matrixSlot, lastPad,
+  localMin, localMax, worldMin, worldMax, matrices, matrixSlot, lastPad, skins = [],
 ) {
   let changed = 0;
   for (let i = 0; i < count; i++) {
@@ -258,7 +258,11 @@ export function applyMorphBounds(
     if (pad === 0) continue;
 
     const o = i * 3;
-    if (renderableSkin[i] >= 0) {
+    // In place only on a box applySkinBounds rebuilt this frame. A skin with
+    // no bounds of its own leaves last frame's box there -- already padded --
+    // and growing it again every frame is what this used to do. Such a
+    // renderable's box is its transformed local one, so it is rebuilt that way.
+    if (renderableSkin[i] >= 0 && skins[renderableSkin[i]]?.hasBounds) {
       worldMin[o] -= pad; worldMin[o + 1] -= pad; worldMin[o + 2] -= pad;
       worldMax[o] += pad; worldMax[o + 1] += pad; worldMax[o + 2] += pad;
     } else {

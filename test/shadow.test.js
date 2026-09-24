@@ -198,7 +198,10 @@ test('the centre sits on the view axis, between the slice planes', () => {
   const sphere = frustumSliceSphere(new Float32Array(4), camera, 4, 12);
   close(sphere[0], 0, 1e-5, 'x on the axis');
   close(sphere[1], 0, 1e-5, 'y on the axis');
-  close(sphere[2], -8, 1e-5, 'midway between 4 and 12');
+  // Not midway, which the centroid sphere was: for a slice this wide the far
+  // corners' own circle already holds the near ones, so the smallest sphere
+  // is centred on the far plane.
+  close(sphere[2], -12, 1e-5, 'on the far plane, for a slice this wide');
 });
 
 test('a wider field of view needs a bigger sphere', () => {
@@ -355,6 +358,60 @@ test('the stable range always reaches the whole scene', () => {
     assert.ok(Number.isInteger(Math.log2(range)), `${range} is a power of two`);
   }
   assert.equal(stableShadowDistance(0, 0.2), 0.25, 'an empty scene gets the floor, rounded up');
+});
+
+// ----------------------------------------------------------- tight and covered
+
+console.log('\ntight and covered');
+
+test('the slice sphere is the smallest one, not the centroid one', () => {
+  // For a symmetric slice the smallest sphere touches a near corner and a far
+  // corner at once, unless the far corners alone already hold the near ones.
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.position.set([0, 0, 0]);
+  camera.target.set([0, 0, -1]);
+  camera.update(16 / 9);
+  const tanHalf = Math.tan(Math.PI / 6);
+  for (const [n, f] of [[0.1, 6], [6, 14], [14, 30], [30, 80]]) {
+    const sphere = frustumSliceSphere(new Float32Array(4), camera, n, f);
+    const corner = (d) => [tanHalf * d * (16 / 9), tanHalf * d, -d];
+    const dist = (p) => Math.hypot(p[0] - sphere[0], p[1] - sphere[1], p[2] - sphere[2]);
+    const near = dist(corner(n));
+    const far = dist(corner(f));
+    assert.ok(near <= sphere[3] + 1e-4 && far <= sphere[3] + 1e-4, 'contains both');
+    // Tight: some corner is ON the sphere, and if the centre is short of the
+    // far plane, both are.
+    close(Math.max(near, far), sphere[3], 1e-4, `[${n}, ${f}] touches a corner`);
+    if (-sphere[2] < f - 1e-6) close(near, far, 1e-4, `[${n}, ${f}] touches both`);
+  }
+});
+
+test('the snapped cascade box still contains its whole sphere', () => {
+  // Snapping shifts the box by up to a texel; the box is one texel wider on
+  // every side so the sphere is never clipped by it.
+  const maps = nodeShadowMaps();
+  for (let k = 0; k < 200; k++) {
+    const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    camera.position.set([Math.sin(k) * 37.3, 3 + (k % 5), Math.cos(k * 1.7) * 29.1]);
+    camera.target.set([Math.sin(k * 0.3) * 5, 0, Math.cos(k * 0.7) * 5]);
+    camera.update(16 / 9);
+    maps.update(camera, [-0.4, -1, -0.3]);
+    for (let c = 0; c < maps.activeCascades; c++) {
+      const sphere = frustumSliceSphere(new Float32Array(4), camera,
+        c === 0 ? camera.near : maps.splits[c - 1], maps.splits[c]);
+      // The sphere's extreme points along the light's x and y, through the matrix.
+      const m = maps.matrices;
+      const o = c * 16;
+      for (const axis of [0, 1]) {
+        const row = [m[o + axis], m[o + 4 + axis], m[o + 8 + axis]];
+        const len = Math.hypot(...row);
+        const centre = row[0] * sphere[0] + row[1] * sphere[1] + row[2] * sphere[2] + m[o + 12 + axis];
+        const reach = len * sphere[3];
+        assert.ok(centre - reach >= -1 - 1e-5 && centre + reach <= 1 + 1e-5,
+          `camera ${k} cascade ${c} axis ${axis}: [${(centre - reach).toFixed(5)}, ${(centre + reach).toFixed(5)}]`);
+      }
+    }
+  }
 });
 
 console.log(`\n${passed} checks passed\n`);

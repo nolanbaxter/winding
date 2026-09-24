@@ -414,7 +414,7 @@ export class Scene {
       this.renderableCount, this.renderableMorph, this.renderableSkin,
       this.morphs, this.renderableMorphExtent,
       this.localMin, this.localMax, this.worldMin, this.worldMax,
-      this.transforms.world, this.renderableMatrixSlot, this.renderableMorphPad,
+      this.transforms.world, this.renderableMatrixSlot, this.renderableMorphPad, this.skins,
     );
   }
 

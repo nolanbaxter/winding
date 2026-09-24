@@ -182,11 +182,25 @@ export function frustumSliceSphere(out, camera, nearDistance, farDistance) {
   const nearW = nearH * camera.aspect;
   const farW = farH * camera.aspect;
 
-  // Centroid of the eight corners. It lies on the view axis by symmetry, so
-  // this reduces to a point between the two slice centres.
-  const cx = ex + fx * (nearDistance + farDistance) * 0.5;
-  const cy = ey + fy * (nearDistance + farDistance) * 0.5;
-  const cz = ez + fz * (nearDistance + farDistance) * 0.5;
+  // THE SMALLEST SPHERE, not the one about the centroid. By symmetry its
+  // centre is on the view axis, at the depth c where a near corner and a far
+  // corner are equally far away:
+  //
+  //   nearDiag^2 + (c - near)^2 = farDiag^2 + (far - c)^2
+  //
+  // unless that lands past the far plane, when the far corners' own circle
+  // already holds the near ones and the centre stops there. The centroid used
+  // before wasted 5-17% of each cascade's texels on space outside the slice.
+  const nearDiag2 = nearW * nearW + nearH * nearH;
+  const farDiag2 = farW * farW + farH * farH;
+  const depth = Math.min(
+    (farDiag2 - nearDiag2 + farDistance * farDistance - nearDistance * nearDistance)
+      / (2 * (farDistance - nearDistance)),
+    farDistance,
+  );
+  const cx = ex + fx * depth;
+  const cy = ey + fy * depth;
+  const cz = ez + fz * depth;
 
   // Radius: the distance from that centre to the farthest corner, worked out
   // in the camera's own frame, where a corner of the plane at distance d is
@@ -196,13 +210,9 @@ export function frustumSliceSphere(out, camera, nearDistance, farDistance) {
   // cascades depend on then holds EXACTLY: the world-space form rotated every
   // corner through the camera basis and came back differing in the last bit
   // as the camera turned, resizing the cascade by a rounding error.
-  const mid = (nearDistance + farDistance) * 0.5;
-  const nearDz = nearDistance - mid;
-  const farDz = farDistance - mid;
-  const radius = Math.sqrt(Math.max(
-    nearW * nearW + nearH * nearH + nearDz * nearDz,
-    farW * farW + farH * farH + farDz * farDz,
-  ));
+  const nearDz = nearDistance - depth;
+  const farDz = farDistance - depth;
+  const radius = Math.sqrt(Math.max(nearDiag2 + nearDz * nearDz, farDiag2 + farDz * farDz));
 
   out[0] = cx; out[1] = cy; out[2] = cz; out[3] = radius;
   return out;
@@ -405,7 +415,22 @@ export class ShadowMaps {
       buffers: [VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT],
     };
     this._pipelines = pipelines;
-    await pipelines.warm([this.descriptor, this.skinnedDescriptor]);
+    // And both again with the winding reversed, for mirrored instances --
+    // a negative-determinant world matrix, which the forward pass handles
+    // with a 'cw' pipeline. Here there was one pipeline for everything, so a
+    // mirrored caster's "front" cull removed its real BACK faces and kept the
+    // ones facing the light: the acne front-face culling exists to prevent.
+    const mirror = (descriptor) => ({
+      ...descriptor,
+      label: `${descriptor.label}-mirrored`,
+      primitive: { ...descriptor.primitive, frontFace: 'cw' },
+    });
+    // Indexed by skinned * 2 + mirrored.
+    this.descriptors = [
+      this.descriptor, mirror(this.descriptor),
+      this.skinnedDescriptor, mirror(this.skinnedDescriptor),
+    ];
+    await pipelines.warm(this.descriptors);
 
     // One bound executor per cascade, built once. The graph stores a function
     // per pass, and building them per frame would allocate MAX_CASCADES
@@ -481,7 +506,14 @@ export class ShadowMaps {
     // Snap to whole texels. Without this the box slides by fractions of a texel
     // every frame, every texel samples a slightly different patch of world, and
     // shadow edges crawl even when nothing in the scene is moving.
-    const texelSize = (2 * radius) / this.size;
+    //
+    // Snapping moves the box by up to a texel, so a box exactly the sphere's
+    // size could leave up to one texel of the sphere uncovered -- fragments
+    // there fell outside the map and read as lit. The box is one texel wider
+    // on every side, with the texel sized so that it still spans the map:
+    // 2 (r + t) = size * t, so t = 2r / (size - 2).
+    const texelSize = (2 * radius) / (this.size - 2);
+    const half = radius + texelSize;
     const snappedX = Math.floor(cx / texelSize) * texelSize;
     const snappedY = Math.floor(cy / texelSize) * texelSize;
 
@@ -498,8 +530,8 @@ export class ShadowMaps {
 
     mat4OrthographicReverseZ(
       this._projection,
-      snappedX - radius, snappedX + radius,
-      snappedY - radius, snappedY + radius,
+      snappedX - half, snappedX + half,
+      snappedY - half, snappedY + half,
       nearDistance, Math.max(farDistance, nearDistance + 0.02),
     );
 
@@ -562,9 +594,9 @@ export class ShadowMaps {
     const gpu = this._gpu;
     pass.setBindGroup(GROUP_FRAME, this.cascadeBindGroup, [cascade * this.alignment]);
     this.pipelineLayout.bindEmptyGroups(pass);
-    // Batches arrive sorted, so skinned and unskinned come in runs and this
-    // switches once rather than per draw.
-    let boundSkinned = -1;
+    // Batches arrive sorted by pipeline, so these come in runs and this
+    // switches once per run rather than per draw.
+    let boundVariant = -1;
 
     // Instanced, one call per batch. The shadow pass culls nothing, so the
     // instance count is simply the batch size and the shader walks the static
@@ -577,9 +609,10 @@ export class ShadowMaps {
     for (let b = 0; b < gpu.batchCount; b++) {
       const primitive = gpu.batchPrimitive[b];
       const skinned = gpu.batchSkinned[b];
-      if (skinned !== boundSkinned) {
-        pass.setPipeline(this._pipelines.get(skinned ? this.skinnedDescriptor : this.descriptor));
-        boundSkinned = skinned;
+      const variant = skinned * 2 + gpu.batchMirrored[b];
+      if (variant !== boundVariant) {
+        pass.setPipeline(this._pipelines.get(this.descriptors[variant]));
+        boundVariant = variant;
       }
       pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
       pass.setVertexBuffer(0, primitive.vertexBuffer);

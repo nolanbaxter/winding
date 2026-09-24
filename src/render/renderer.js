@@ -335,11 +335,16 @@ export class Renderer {
       if (this._oitPipelineByVariant.has(variant)) continue;
 
       const state = variantPipelineState(variant);
+      // Skinned variants skin, exactly as the forward ones do. These used to
+      // be built without the entry point or the joint buffer, so a skinned
+      // blended mesh under OIT drew in its rest pose.
+      const skinned = (variant & VARIANT_SKINNED) !== 0;
       const descriptor = {
         label: `pbr-oit:v${variant}`,
         layout: this.pipelineLayout,
         shader: this.shader,
-        buffers: [VERTEX_LAYOUT],
+        vertexEntry: skinned ? 'vsSkinned' : 'vs',
+        buffers: skinned ? [VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT] : [VERTEX_LAYOUT],
         fragmentEntry: 'fsOIT',
         targets: [
           // accum sums, so it adds; reveal multiplies what is left of the
