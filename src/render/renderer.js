@@ -27,7 +27,7 @@ import {
 import { PBR_SHADER, FRAME_BYTES } from './shaders/pbr.js';
 import { OIT_RESOLVE_SHADER } from './shaders/oit.js';
 import { SkyboxPass } from './skybox.js';
-import { ShadowMaps } from './shadows.js';
+import { ShadowMaps, stableShadowDistance } from './shadows.js';
 import { RenderGraph } from './graph.js';
 import { GpuProfiler } from './timing.js';
 import { SkinPalette } from './skin.js';
@@ -36,7 +36,8 @@ import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES } from './gpudriven.js';
 import {
-  updateWorldBounds, unionWorldBounds, farthestViewDepth, updateSkinBounds, applySkinBounds,
+  updateWorldBounds, unionWorldBounds, farthestViewDepth, farthestDistance,
+  updateSkinBounds, applySkinBounds,
 } from '../scene/bounds.js';
 import { HierarchicalDepth } from './hzb.js';
 import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
@@ -525,12 +526,21 @@ export class Renderer {
     // consumers require strictly more than the near plane, so with nothing in
     // the scene -- where the number cannot matter -- twice near is the minimum
     // that satisfies them.
+    //
+    // The two ranges are derived differently on purpose. Clusters want the
+    // tight view-space depth, and re-slicing them as the camera turns costs
+    // nothing visible. Shadows cannot follow the view direction at all: every
+    // change resizes the cascades and makes their edges crawl, so theirs is
+    // radial and held to powers of two (see stableShadowDistance).
+    const floor = camera.near * 2;
     const sceneDepth = this._hasSceneBounds
       ? farthestViewDepth(camera.view, this._sceneMin, this._sceneMax)
       : 0;
-    const derived = Math.max(sceneDepth, camera.near * 2);
-    const shadowRange = this.shadowDistance ?? derived;
-    const lightRange = this.lightDistance ?? derived;
+    const sceneReach = this._hasSceneBounds
+      ? farthestDistance(camera.position, this._sceneMin, this._sceneMax)
+      : 0;
+    const shadowRange = this.shadowDistance ?? stableShadowDistance(sceneReach, floor);
+    const lightRange = this.lightDistance ?? Math.max(sceneDepth, floor);
 
     this.shadows.shadowDistance = shadowRange;
     this.skybox.update(camera, 1.0);

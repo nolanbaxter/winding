@@ -73,6 +73,26 @@ export function unionWorldBounds(count, worldMin, worldMax, outMin, outMax) {
  * in front of the camera; depth is its negation. All eight corners, because a
  * box behind the camera on one axis can still have a far corner in front.
  */
+/**
+ * The straight-line distance from `point` to the box's farthest corner.
+ *
+ * farthestViewDepth's rotation-invariant sibling: it depends on where the
+ * camera IS, not where it looks. That is what the shadow range needs -- a
+ * range that follows the view direction resizes the cascades every time the
+ * camera turns, and a resizing cascade is a shimmering one.
+ */
+export function farthestDistance(point, min, max) {
+  let farthest = 0;
+  for (let c = 0; c < 8; c++) {
+    const dx = ((c & 1) ? max[0] : min[0]) - point[0];
+    const dy = ((c & 2) ? max[1] : min[1]) - point[1];
+    const dz = ((c & 4) ? max[2] : min[2]) - point[2];
+    const squared = dx * dx + dy * dy + dz * dz;
+    if (squared > farthest) farthest = squared;
+  }
+  return Math.sqrt(farthest);
+}
+
 export function farthestViewDepth(view, min, max) {
   let farthest = -Infinity;
   for (let c = 0; c < 8; c++) {

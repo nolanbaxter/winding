@@ -10,7 +10,10 @@ import assert from 'node:assert/strict';
 
 import { mat4Create, mat4OrthographicReverseZ } from '../src/core/math/mat4.js';
 import { Camera } from '../src/scene/camera.js';
-import { cascadeSplits, frustumSliceSphere, MAX_CASCADES, ShadowMaps } from '../src/render/shadows.js';
+import {
+  cascadeSplits, frustumSliceSphere, MAX_CASCADES, ShadowMaps, stableShadowDistance,
+} from '../src/render/shadows.js';
+import { farthestDistance } from '../src/scene/bounds.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -307,6 +310,51 @@ test('where the scene sits does not decide whether it has shadows', () => {
     const z = cascadeDepth(maps, 0, [0, 1 + lift, 0]);
     assert.ok(z >= 0 && z <= 1, `lifted by ${lift}: depth ${z.toFixed(3)}`);
   }
+});
+
+// ------------------------------------------------------ a range that holds still
+
+console.log('\na shadow range that holds still');
+
+test('turning the camera in place does not resize a single cascade', () => {
+  // The crawl this fixes: the range used to be the scene's farthest point
+  // along the view direction, so three degrees of yaw took it 15.0 -> 16.0 and
+  // every cascade's texel size with it. The same scene, the same turn, must
+  // now leave every texel size exactly where it was.
+  const maps = nodeShadowMaps();
+  const min = [-20, 0, -20];
+  const max = [20, 5, 20];
+  const texels = [];
+  for (let degrees = 0; degrees <= 90; degrees += 3) {
+    const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    const yaw = (degrees * Math.PI) / 180;
+    camera.position.set([0, 3, 8]);
+    camera.target.set([Math.sin(yaw) * 10, 0.5, 8 - Math.cos(yaw) * 10]);
+    camera.update(16 / 9);
+    maps.shadowDistance = stableShadowDistance(farthestDistance(camera.position, min, max), camera.near * 2);
+    maps.update(camera, [-0.4, -1, -0.3]);
+    texels.push([...maps.texelSizes.subarray(0, maps.activeCascades)].join());
+  }
+  assert.equal(new Set(texels).size, 1, `texel sizes changed while turning: ${[...new Set(texels)].join(' | ')}`);
+});
+
+test('walking changes the range only at the doublings', () => {
+  const min = [-20, 0, -20];
+  const max = [20, 5, 20];
+  const ranges = new Set();
+  for (let z = 8; z <= 12; z += 0.25) {
+    ranges.add(stableShadowDistance(farthestDistance([0, 3, z], min, max), 0.2));
+  }
+  assert.equal(ranges.size, 1, `a short walk moved the range: ${[...ranges].join(', ')}`);
+});
+
+test('the stable range always reaches the whole scene', () => {
+  for (const reach of [0.3, 1, 1.5, 15, 16, 16.01, 1000]) {
+    const range = stableShadowDistance(reach, 0.2);
+    assert.ok(range >= reach && range < reach * 2 + 1e-9, `${reach} -> ${range}`);
+    assert.ok(Number.isInteger(Math.log2(range)), `${range} is a power of two`);
+  }
+  assert.equal(stableShadowDistance(0, 0.2), 0.25, 'an empty scene gets the floor, rounded up');
 });
 
 console.log(`\n${passed} checks passed\n`);

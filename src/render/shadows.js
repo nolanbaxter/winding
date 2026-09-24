@@ -167,9 +167,8 @@ export function cascadeSplits(near, shadowDistance, count, lambda = 0.7) {
  */
 export function frustumSliceSphere(out, camera, nearDistance, farDistance) {
   const view = camera.view;
-  // The view matrix's rows are the camera basis expressed in world space.
-  const rx = view[0], ry = view[4], rz = view[8];
-  const ux = view[1], uy = view[5], uz = view[9];
+  // The view matrix's third row is the camera's +Z in world space; it looks
+  // down -Z. Only the centre needs a world direction -- see the radius below.
   const fx = -view[2], fy = -view[6], fz = -view[10];
 
   const ex = camera.position[0], ey = camera.position[1], ez = camera.position[2];
@@ -189,25 +188,49 @@ export function frustumSliceSphere(out, camera, nearDistance, farDistance) {
   const cy = ey + fy * (nearDistance + farDistance) * 0.5;
   const cz = ez + fz * (nearDistance + farDistance) * 0.5;
 
-  // Radius is the distance to the furthest corner, which is always a far one.
-  let radius = 0;
-  for (const [signX, signY] of CORNER_SIGNS) {
-    const px = ex + fx * farDistance + rx * farW * signX + ux * farH * signY;
-    const py = ey + fy * farDistance + ry * farW * signX + uy * farH * signY;
-    const pz = ez + fz * farDistance + rz * farW * signX + uz * farH * signY;
-    radius = Math.max(radius, Math.hypot(px - cx, py - cy, pz - cz));
-
-    const nx = ex + fx * nearDistance + rx * nearW * signX + ux * nearH * signY;
-    const ny = ey + fy * nearDistance + ry * nearW * signX + uy * nearH * signY;
-    const nz = ez + fz * nearDistance + rz * nearW * signX + uz * nearH * signY;
-    radius = Math.max(radius, Math.hypot(nx - cx, ny - cy, nz - cz));
-  }
+  // Radius: the distance from that centre to the farthest corner, worked out
+  // in the camera's own frame, where a corner of the plane at distance d is
+  // (+-W, +-H, d) and the centre is (0, 0, mid). All four corners of a plane
+  // are equally far, so one per plane is enough. Computed from those scalars
+  // rather than from world-space corners, because the rotation-invariance the
+  // cascades depend on then holds EXACTLY: the world-space form rotated every
+  // corner through the camera basis and came back differing in the last bit
+  // as the camera turned, resizing the cascade by a rounding error.
+  const mid = (nearDistance + farDistance) * 0.5;
+  const nearDz = nearDistance - mid;
+  const farDz = farDistance - mid;
+  const radius = Math.sqrt(Math.max(
+    nearW * nearW + nearH * nearH + nearDz * nearDz,
+    farW * farW + farH * farH + farDz * farDz,
+  ));
 
   out[0] = cx; out[1] = cy; out[2] = cz; out[3] = radius;
   return out;
 }
 
-const CORNER_SIGNS = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+/**
+ * The shadow range when nothing pins it: far enough to reach the whole scene,
+ * rounded UP to a power of two.
+ *
+ * The cascades are only stable -- moving without resizing, so texel snapping
+ * can hold their edges still -- while this number holds still. It used to be
+ * the scene's farthest point along the VIEW direction, recomputed every
+ * frame, so turning the camera in place resized every cascade: 15.0, 15.5,
+ * 16.0 over three degrees of yaw, and the shadows crawled.
+ *
+ * Two things fix that. The reach is RADIAL -- from where the camera is, not
+ * along where it looks -- so turning changes nothing. And it is rounded up to
+ * a power of two, so walking changes it only at the doublings rather than
+ * continuously. The price is resolution: up to twice the distance the scene
+ * strictly needs. Pinning shadowDistance trades that back.
+ *
+ * `floor` is the smallest legal range (the renderer passes twice the near
+ * plane), for a scene with nothing in it.
+ */
+export function stableShadowDistance(reach, floor) {
+  const needed = Math.max(reach, floor);
+  return Math.max(2 ** Math.ceil(Math.log2(needed)), floor);
+}
 
 export class ShadowMaps {
   static async create(rhi, pipelines, drawLayout, options = {}) {

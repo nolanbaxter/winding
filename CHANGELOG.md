@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 65504, the half-float target's largest value, which such a highlight
   now exceeds. GPU check: a smoother highlight is brighter (fails with the
   old floor).
+- **Shadows crawled when the camera turned.** The default shadow range was
+  the scene's farthest point along the VIEW direction, recomputed every
+  frame, so turning in place resized every cascade (15.0 -> 16.0 over three
+  degrees) and moved the texel-snapping grid with it. The range is now
+  radial -- from where the camera is, not where it looks -- and rounded up to
+  a power of two, so walking changes it only at the doublings; the cost is
+  up to twice the resolution-limiting distance, and pinning shadowDistance
+  trades it back. The slice sphere's radius is now computed in the camera's
+  own frame, so turning leaves it identical to the last bit rather than
+  within a rounding error. Light clustering keeps the tight view depth.
 
 ## [0.9.1] - 2026-09-24
 
