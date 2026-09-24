@@ -63,7 +63,10 @@ const TARGET_ATTRIBUTES = [
  * re-derive it from the vertex data, which is the per-vertex CPU cost this
  * whole design exists to avoid.
  */
-export function readMorphTargets(json, buffers, targets, vertexCount, label) {
+export function readMorphTargets(
+  json, buffers, targets, vertexCount, label,
+  { drawnVertices = vertexCount, maxBytes = Infinity } = {},
+) {
   if (!Array.isArray(targets) || targets.length === 0) return null;
 
   const targetCount = targets.length;
@@ -85,6 +88,14 @@ export function readMorphTargets(json, buffers, targets, vertexCount, label) {
       `glTF: ${label} has ${targetCount} morph targets, none of which deform ` +
       'POSITION, NORMAL or TANGENT',
     );
+  }
+
+  // Sized as drawn -- flat shading duplicates the deltas with the vertices --
+  // before anything is allocated. A thousand targets all naming one accessor
+  // is valid glTF, and it asked for gigabytes this way before any check ran.
+  const bytes = drawnVertices * targetCount * stride * 4;
+  if (bytes > maxBytes) {
+    throw new RangeError(`glTF: ${label} has ${bytes} bytes of morph deltas, past the ${maxBytes} this device can hold`);
   }
 
   const deltas = new Float32Array(vertexCount * targetCount * stride);
@@ -155,6 +166,10 @@ export function morphWeightsFor(meshWeights, nodeWeights, targetCount, label) {
     throw new Error(
       `glTF: ${label} gives ${source.length} morph weights for ${targetCount} targets`,
     );
+  }
+  // JSON numbers: 1e999 parses to Infinity and a string copies in as NaN.
+  if (!source.every(Number.isFinite)) {
+    throw new Error(`glTF: ${label} has a morph weight that is not a finite number: [${source}]`);
   }
   return Float32Array.from(source);
 }

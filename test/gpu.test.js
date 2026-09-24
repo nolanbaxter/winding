@@ -396,6 +396,13 @@ export async function run(canvas, onDone) {
         `bounds did not follow the joint: top was ${beforeTop.toFixed(2)}, now ${afterTop.toFixed(2)}`,
       );
     }
+    // And the box the CULL SHADER reads. The upload was gated on the mesh
+    // node moving, so this one stayed at the bind pose while the one above
+    // was right -- and the GPU culled the character by its old box.
+    const culledTop = engine.renderer.gpu.boundsData[riggedIndex * 8 + 5];
+    if (culledTop !== Math.fround(afterTop)) {
+      throw new Error(`the cull box top is ${culledTop.toFixed(2)}; the scene's is ${afterTop.toFixed(2)}`);
+    }
 
     riggedNode.destroy();
     return `${skinnedBatches} skinned batch, ${palette.jointCount} joints, `

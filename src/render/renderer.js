@@ -44,6 +44,27 @@ import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT } from './ver
 
 const DEFAULT_MAX_DRAWS = 4096;
 
+/**
+ * Refuse, by name, a device with fewer storage buffers per stage than the
+ * frame layout reads. Counted from the layout itself, so it cannot drift from
+ * it. Every core adapter allows 8 and this needs 5 in the vertex stage, but
+ * compatibility-mode devices may allow none there -- and a layout the device
+ * rejects is a validation error and a black frame, nowhere near the cause.
+ */
+function checkStorageStages(rhi, entries) {
+  const limits = rhi.limits;
+  if (!limits) return;
+  for (const [stage, name, limit] of [
+    [GPUShaderStage.VERTEX, 'vertex', limits.maxStorageBuffersInVertexStage ?? limits.maxStorageBuffersPerShaderStage],
+    [GPUShaderStage.FRAGMENT, 'fragment', limits.maxStorageBuffersInFragmentStage ?? limits.maxStorageBuffersPerShaderStage],
+  ]) {
+    const needed = entries.filter((e) => (e.visibility & stage) && e.buffer?.type?.endsWith('storage')).length;
+    if (limit !== undefined && needed > limit) {
+      throw new Error(`This GPU allows ${limit} storage buffers in the ${name} stage; the renderer reads ${needed}.`);
+    }
+  }
+}
+
 /** Scratch for the camera forward axis used by transparent depth sorting. */
 const FORWARD = vec3Create();
 
@@ -74,41 +95,40 @@ export class Renderer {
     this.pipelines = new PipelineCache(rhi.device);
     this.materials = new MaterialRegistry(rhi, { capacity: 1024 });
 
-    this.frameLayout = rhi.device.createBindGroupLayout({
-      label: 'frame',
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-        {
-          binding: 4,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: 'depth', viewDimension: '2d-array' },
-        },
-        { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
-        // Storage rather than uniform: the light list can exceed the 64KB
-        // uniform binding limit, and the shader indexes it dynamically.
-        { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 8, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        // Per-object transforms and the GPU-written visible list. Read in the
-        // VERTEX stage: this is what replaces a bind group per draw.
-        { binding: 9, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-        { binding: 10, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-        // Every skinned instance's joint matrices. Bound for every pipeline,
-        // skinned or not, because a bind group layout is one object -- an
-        // unskinned vertex shader simply never reads it.
-        { binding: 11, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-        // Morph deltas, then morph weights. Same call as the palette: bound
-        // for every pipeline, read only by a draw whose target count is not
-        // zero, which is a number the shader already has in hand.
-        { binding: 12, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-        { binding: 13, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-        // Every directional light but the shadowed one.
-        { binding: 14, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-      ],
-    });
+    const frameEntries = [
+      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+      {
+        binding: 4,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: 'depth', viewDimension: '2d-array' },
+      },
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
+      // Storage rather than uniform: the light list can exceed the 64KB
+      // uniform binding limit, and the shader indexes it dynamically.
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      { binding: 8, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      // Per-object transforms and the GPU-written visible list. Read in the
+      // VERTEX stage: this is what replaces a bind group per draw.
+      { binding: 9, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      { binding: 10, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      // Every skinned instance's joint matrices. Bound for every pipeline,
+      // skinned or not, because a bind group layout is one object -- an
+      // unskinned vertex shader simply never reads it.
+      { binding: 11, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      // Morph deltas, then morph weights. Same call as the palette: bound
+      // for every pipeline, read only by a draw whose target count is not
+      // zero, which is a number the shader already has in hand.
+      { binding: 12, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      { binding: 13, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      // Every directional light but the shadowed one.
+      { binding: 14, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+    ];
+    checkStorageStages(rhi, frameEntries);
+    this.frameLayout = rhi.device.createBindGroupLayout({ label: 'frame', entries: frameEntries });
     this.drawLayout = rhi.device.createBindGroupLayout({
       label: 'draw',
       entries: [{
@@ -431,16 +451,20 @@ export class Renderer {
     const count = scene.renderableCount;
     this.stats.renderables = count;
 
-    const moved = updateWorldBounds(
+    // Only a compose that moved something can have changed a world box.
+    const moved = scene.transforms.movedPending ? updateWorldBounds(
       count, scene.localMin, scene.localMax, scene.worldMin, scene.worldMax,
       scene.transforms.world, scene.renderableMatrixSlot, scene.transforms.moved,
-    );
+    ) : 0;
 
     // Skinned renderables get their bounds replaced: the pass above gave them
     // a bind-pose box transformed by a model matrix the vertices do not follow.
+    // Counted like `moved`: a skeleton moves its mesh's box with no transform
+    // of the mesh's own changing, so the union below has to hear about it.
+    let skinned = 0;
     if (scene.skins.length > 0) {
       updateSkinBounds(scene.skins, scene.transforms.world);
-      applySkinBounds(count, scene.renderableSkin, scene.skins, scene.worldMin, scene.worldMax);
+      skinned = applySkinBounds(count, scene.renderableSkin, scene.skins, scene.worldMin, scene.worldMax);
     }
 
     // And morphed ones get theirs grown, by how far their weights can carry a
@@ -453,7 +477,7 @@ export class Renderer {
     // changed -- a union cannot be updated in place, because a renderable that
     // moves can shrink it as easily as grow it, but on a settled scene that
     // means never paying for it at all.
-    if (moved > 0 || morphed > 0 || this._boundsRevision !== scene.revision) {
+    if (moved > 0 || morphed > 0 || skinned > 0 || this._boundsRevision !== scene.revision) {
       this._hasSceneBounds = unionWorldBounds(
         count, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax,
       );
@@ -494,7 +518,10 @@ export class Renderer {
     // Both consumers of `moved` have now read it, so the record is spent.
     // Clearing here rather than in update() is what makes scene.update() safe
     // to call any number of times before a frame.
-    scene.transforms.moved.fill(0, 0, scene.transforms.capacity);
+    if (scene.transforms.movedPending) {
+      scene.transforms.moved.fill(0, 0, scene.transforms.capacity);
+      scene.transforms.movedPending = false;
+    }
 
     const tAfterUpload = now();
     p?.mark('skin + morph');
@@ -619,7 +646,7 @@ export class Renderer {
     this.frameData[112] = -camera.view[2];
     this.frameData[113] = -camera.view[6];
     this.frameData[114] = -camera.view[10];
-    this.frameU32[115] = scene.directionalCount;
+    this.frameData[115] = scene.directionalCount;   // a value; see the shader
     rhi.queue.writeBuffer(this.frameBuffer, 0, this.frameData);
     p?.mark('clusters + frame uniform');
 

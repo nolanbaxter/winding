@@ -209,19 +209,39 @@ export class Device {
       }
     });
 
+    const applyFromClient = () => {
+      const dpr = globalThis.devicePixelRatio || 1;
+      apply(
+        Math.max(1, Math.round(this.canvas.clientWidth * dpr)),
+        Math.max(1, Math.round(this.canvas.clientHeight * dpr)),
+      );
+    };
+
     try {
       this._observer.observe(this.canvas, { box: 'device-pixel-content-box' });
     } catch {
-      this._observer.observe(this.canvas);   // Safari < 18 has no such box
+      // No WebKit has ever shipped this box, so every Safari lands here.
+      this._observer.observe(this.canvas);
+      // And without it a change of pixel ratio alone -- the window dragged to
+      // another display -- resizes no box, so the observer never fires and the
+      // canvas stays at the old display's resolution. The ratio is watched
+      // directly instead: a query for the current one, renewed each time it
+      // stops matching.
+      const watchRatio = () => {
+        if (this.destroyed || !globalThis.matchMedia) return;
+        matchMedia(`(resolution: ${globalThis.devicePixelRatio || 1}dppx)`)
+          .addEventListener('change', () => {
+            if (this.destroyed) return;
+            applyFromClient();
+            watchRatio();
+          }, { once: true });
+      };
+      watchRatio();
     }
 
     // Observe fires asynchronously, so size it now: the object
     // is usable the instant it exists, not one animation frame later.
-    const dpr = globalThis.devicePixelRatio || 1;
-    apply(
-      Math.max(1, Math.round(this.canvas.clientWidth * dpr)),
-      Math.max(1, Math.round(this.canvas.clientHeight * dpr)),
-    );
+    applyFromClient();
   }
 
   resize(width, height) {

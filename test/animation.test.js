@@ -75,6 +75,15 @@ test('STEP holds the earlier keyframe until the next one arrives', () => {
   assert.deepEqual(t.position, [10, 20, 30]);
 });
 
+test('exactly on a middle key, STEP is on that key', () => {
+  // The test above lands on the LAST key, which the clamp answers before the
+  // search runs. A middle key is what the search's <= decides.
+  const c = clip('translation', [0, 1, 2], [0, 0, 0, 10, 20, 30, 40, 50, 60], 'STEP');
+  const t = recorder();
+  sampleClip(c, 1, t, ENTITY_OF, ENTITIES);
+  assert.deepEqual(t.position, [10, 20, 30]);
+});
+
 test('a time before the first key clamps rather than extrapolating', () => {
   const c = clip('translation', [1, 2], [5, 5, 5, 9, 9, 9]);
   const t = recorder();
@@ -244,6 +253,13 @@ test('a non-looping clip stops at the end and stays there', () => {
   // Further advances do nothing rather than drifting past the end.
   assert.equal(player.advance(5, t), false);
   close(player.time, 2, EPS);
+});
+
+test('a non-looping clip that lands exactly on its end is finished', () => {
+  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], ENTITY_OF, ENTITIES);
+  player.play(0, { loop: false });
+  player.advance(2, recorder());
+  assert.equal(player.finished, true);
 });
 
 test('speed scales time, and a negative speed wraps backwards', () => {

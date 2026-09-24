@@ -15,6 +15,7 @@ import {
 import { HandleAllocator, handleIndex } from '../src/core/handle.js';
 import {
   textureImageIndex, textureSamplerIndex, samplerDescriptor, materialTextureSlots,
+  imageSize, usedImages,
 } from '../src/scene/gltf/images.js';
 import { TransformStore } from '../src/scene/transform.js';
 import { unweldAndComputeFlatNormals } from '../src/scene/gltf/tangents.js';
@@ -1690,6 +1691,9 @@ await atest('a float index accessor is refused, not truncated', async () => {
   const glb = quadGLB();
   const { json, binary } = parseContainer(glb);
   json.accessors[1].componentType = 5126;              // FLOAT indices
+  // Half as many 4-byte elements fill the same bytes, so the view still fits
+  // and only the type rule is left to object.
+  json.accessors[1].count /= 2;
   await assert.rejects(
     () => loadGLTF(makeGLB(json, binary)),
     /stores FLOAT where an unsigned integer is required/,
@@ -1700,6 +1704,7 @@ await atest('a float JOINTS_0 accessor is refused too', async () => {
   const glb = skinnedGLB();
   const { json, binary } = parseContainer(glb);
   json.accessors[4].componentType = 5126;
+  json.accessors[4].count /= 2;   // shorts to floats: the same bytes, half the elements
   await assert.rejects(
     () => loadGLTF(makeGLB(json, binary)),
     /stores FLOAT where an unsigned integer is required/,
@@ -1887,6 +1892,189 @@ await atest('a skin says whether its inverse binds are affine', async () => {
   const { readSkins } = await import('../src/scene/gltf/skin.js');
   const json = { skins: [{ joints: [0] }], nodes: [{}] };
   assert.equal(readSkins(json, []).at(0).affine, true, 'an absent inverse bind is the identity, which is affine');
+});
+
+console.log('\nfiles from strangers');
+
+/** The quad, with its JSON edited before it is packed back up. */
+async function quadWith(edit, options) {
+  const { json, binary } = parseContainer(quadGLB());
+  edit(json, binary);
+  return loadGLTF(makeGLB(json, binary), options);
+}
+
+await atest('a zero-filled accessor cannot ask for more than the device holds', async () => {
+  // Legal glTF: no bufferView means zeros. Thirty million of them, from a
+  // few bytes of JSON, used to be allocated -- several times over -- before
+  // anything looked at the count.
+  await assert.rejects(
+    () => quadWith((json) => {
+      json.accessors[0] = { componentType: 5126, count: 30_000_000, type: 'VEC3' };
+    }, { maxBytes: 256 << 20 }),
+    /accessor 0 reads out to 360000000 bytes, past the 268435456/,
+  );
+});
+
+await atest('flat shading is sized before it multiplies the vertices', async () => {
+  // Accessors that each fit, and a vertex buffer that does not: de-indexing
+  // and interleaving are where a small file became a large allocation.
+  await assert.rejects(
+    () => quadWith(() => {}, { maxBytes: 200 }),
+    new RegExp(`needs a ${4 * VERTEX_STRIDE_BYTES}-byte vertex buffer, past the 200`),
+  );
+  await quadWith(() => {}, { maxBytes: 4 * VERTEX_STRIDE_BYTES });
+});
+
+await atest('a stride, count or offset that is not a real one is refused', async () => {
+  const cases = [
+    [(json) => { json.bufferViews[0].byteStride = 0; }, /byteStride 0/],
+    [(json) => { json.accessors[0].byteOffset = 'x'; }, /byteOffset "x"/],
+    [(json) => { json.accessors[0].count = 2.5; }, /count 2.5/],
+    [(json) => { json.bufferViews[0].byteOffset = -4; }, /whole byteOffset/],
+    [(json) => { json.bufferViews[0].byteStride = 8; }, /12-byte elements in a 8-byte stride/],
+  ];
+  for (const [edit, message] of cases) await assert.rejects(() => quadWith(edit), message);
+});
+
+await atest('sparse data has to fit its accessor and exist', async () => {
+  const sparse = (extra) => (json) => {
+    json.accessors[0].sparse = { count: 2, indices: { bufferView: 1, componentType: 5123 }, values: { bufferView: 0 }, ...extra };
+  };
+  await assert.rejects(() => quadWith(sparse({ count: 100_000_000 })), /100000000 sparse entries for 4 elements/);
+  await assert.rejects(() => quadWith(sparse({ values: {} })), /without indices and values bufferViews/);
+});
+
+await atest('a NaN or infinity in the file is refused, wherever it is', async () => {
+  // In the binary: a NaN position.
+  await assert.rejects(
+    () => quadWith((json, binary) => { new DataView(binary.buffer, binary.byteOffset).setFloat32(0, NaN, true); }),
+    /accessor 0 holds NaN at element 0/,
+  );
+  // In the JSON: 1e999 parses to Infinity, and a string copies in as NaN.
+  await assert.rejects(
+    () => quadWith((json) => { json.nodes[0].translation = [0, 'x', 0]; }),
+    /node 0 translation must be 3 finite numbers/,
+  );
+  await assert.rejects(
+    () => quadWith((json) => { json.materials = [{ pbrMetallicRoughness: { roughnessFactor: 'x' } }]; }),
+    /material 0 roughnessFactor must be a finite number/,
+  );
+});
+
+await atest('an index equal to the vertex count is past the end', async () => {
+  // The quad has four vertices; index 4 is the first one that does not exist.
+  await assert.rejects(
+    () => quadWith((json, binary) => {
+      const at = json.bufferViews[1].byteOffset ?? 0;
+      new DataView(binary.buffer, binary.byteOffset).setUint16(at, 4, true);
+    }),
+    /index 4 is past the 4-vertex attribute array/,
+  );
+});
+
+await atest('every boundary the importer checks is exact', async () => {
+  // Each of these passed with its comparison off by one, or its check gone.
+  const refuses = (edit, message) => assert.rejects(() => quadWith(edit), message);
+  const light = (props) => (json) => {
+    json.extensionsUsed = ['KHR_lights_punctual'];
+    json.extensions = { KHR_lights_punctual: { lights: [props] } };
+    json.nodes[0].extensions = { KHR_lights_punctual: { light: 0 } };
+  };
+  const camera = (props) => (json) => { json.cameras = [props]; json.nodes[0].camera = 0; };
+
+  await refuses(light({ type: 'spot', spot: { innerConeAngle: 0.5, outerConeAngle: 0.5 } }), /cone needs 0 <= inner < outer/);
+  await refuses(light({ type: 'point', range: 0 }), /range must be a positive number/);
+  await refuses(light({ type: 'point', color: [1, '1e999', 1] }), /color must be three non-negative numbers/);
+  await refuses(camera({ type: 'perspective', perspective: { yfov: Math.PI, znear: 0.1 } }), /yfov must be between 0 and pi/);
+  await refuses(camera({ type: 'orthographic', orthographic: { xmag: 0, ymag: 1, znear: 0.1, zfar: 10 } }), /xmag and ymag must be non-zero/);
+  await refuses(camera({ type: 'orthographic', orthographic: { xmag: 1, ymag: 1, znear: 1, zfar: 1 } }), /needs 0 <= znear < zfar/);
+  await refuses((json) => { json.asset.version = '1.0'; }, /version 1.0 is not supported/);
+  await refuses((json) => {
+    json.extensionsUsed = ['KHR_materials_emissive_strength'];
+    json.materials = [{ emissiveFactor: [1, 1, 1], extensions: { KHR_materials_emissive_strength: { emissiveStrength: '1e999' } } }];
+    json.meshes[0].primitives[0].material = 0;
+  }, /emissiveStrength must be a non-negative number/);
+  await refuses((json) => { json.accessors[1].componentType = 5122; }, /uses signed SHORT/);
+  await refuses((json) => { json.buffers.push({ byteLength: 4 }); }, /buffer 1 has no uri/);
+
+  // Keyframes: a node one past the end, and two equal times (zeros, from an
+  // accessor with no bufferView).
+  const zeros = (type) => ({ componentType: 5126, count: 2, type });
+  await refuses((json) => {
+    json.accessors.push(zeros('SCALAR'), zeros('VEC3'));
+    const [t, v] = [json.accessors.length - 2, json.accessors.length - 1];
+    json.animations = [{ samplers: [{ input: t, output: v }], channels: [{ sampler: 0, target: { node: json.nodes.length, path: 'translation' } }] }];
+  }, /targets node 1, which does not exist/);
+  await refuses((json) => {
+    json.accessors.push(zeros('SCALAR'), zeros('VEC3'));
+    const [t, v] = [json.accessors.length - 2, json.accessors.length - 1];
+    json.animations = [{ samplers: [{ input: t, output: v }], channels: [{ sampler: 0, target: { node: 0, path: 'translation' } }] }];
+  }, /keyframe times do not strictly increase/);
+
+  // A sparse override aimed one element past the end.
+  await refuses((json, binary) => {
+    const at = json.bufferViews[1].byteOffset ?? 0;
+    new DataView(binary.buffer, binary.byteOffset).setUint16(at, 4, true);
+    json.accessors[0].sparse = { count: 1, indices: { bufferView: 1, componentType: 5123 }, values: { bufferView: 0 } };
+  }, /sparse index 4 is outside the accessor/);
+});
+
+await atest('a skin naming a node or a node naming a skin one past the end is refused', async () => {
+  const skinned = (edit) => {
+    const { json, binary } = parseContainer(skinnedGLB());
+    edit(json);
+    return loadGLTF(makeGLB(json, binary));
+  };
+  await assert.rejects(() => skinned((json) => { json.skins[0].joints[0] = json.nodes.length; }), /names node \d+, which does not exist/);
+  await assert.rejects(() => skinned((json) => {
+    const node = json.nodes.find((n) => n.skin !== undefined);
+    node.skin = json.skins.length;
+  }), /names skin 1, which does not exist/);
+});
+
+test('a GLB is refused when it is too short, or carries two BIN chunks', () => {
+  // The magic, then less than the 12-byte header it promises.
+  assert.throws(() => parseContainer(Uint8Array.from([0x67, 0x6c, 0x54, 0x46, 2, 0, 0, 0])), /truncated header/);
+  const glb = quadGLB();
+  const extra = new Uint8Array(glb.byteLength + 12);
+  extra.set(new Uint8Array(glb.buffer ?? glb, glb.byteOffset ?? 0, glb.byteLength));
+  const view = new DataView(extra.buffer);
+  view.setUint32(8, extra.byteLength, true);                     // total length
+  view.setUint32(glb.byteLength, 4, true);                       // chunk length
+  view.setUint32(glb.byteLength + 4, 0x004e4942, true);          // 'BIN\0'
+  assert.throws(() => parseContainer(extra), /more than one BIN chunk/);
+});
+
+test('image sizes come from the header, before anything is decoded', () => {
+  const png = new Uint8Array(24);
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  new DataView(png.buffer).setUint32(16, 30000);
+  new DataView(png.buffer).setUint32(20, 20);
+  assert.deepEqual(imageSize(png), { width: 30000, height: 20 });
+
+  // An APP0 segment first, then a baseline frame: height before width.
+  const jpeg = Uint8Array.from([
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+    0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x02, 0x00, 0x03, 0, 0, 0, 0,
+  ]);
+  assert.deepEqual(imageSize(jpeg), { width: 512, height: 256 });
+
+  const webp = new Uint8Array(30);
+  webp.set([...'RIFF'].map((c) => c.charCodeAt(0)), 0);
+  webp.set([...'WEBPVP8X'].map((c) => c.charCodeAt(0)), 8);
+  webp.set([0xff, 0x0f, 0x00, 0x1f, 0x00, 0x00], 24);   // 4096 x 32
+  assert.deepEqual(imageSize(webp), { width: 4096, height: 32 });
+
+  assert.equal(imageSize(Uint8Array.from([0x47, 0x49, 0x46, 0x38])), null, 'GIF is not a glTF image');
+});
+
+test('only images a material samples are decoded', () => {
+  const json = {
+    images: [{}, {}, {}],
+    textures: [{ source: 2 }, { source: 0 }],
+    materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } }, normalTexture: { index: 1 } }],
+  };
+  assert.deepEqual([...usedImages(json)].sort(), [0, 2]);
 });
 
 console.log(`\n${passed} checks passed\n`);

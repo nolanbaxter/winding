@@ -71,6 +71,11 @@ every scene has removed it, since each `load()` uploads a fresh copy. `engine.de
 the rest. And an engine whose canvas leaves the page destroys itself, which is what a live editor
 that reloads by rewriting the page needs.
 
+A file you didn't write can't ask for more than the device can hold. It is checked, rule by rule,
+before anything is allocated: counts, strides, offsets, sparse data, NaNs, and image sizes read
+from their headers. A .gltf still names its own buffers and images, though, and loading it fetches
+them. Pass `load(url, { fetch })` to decide which of those URLs it may reach.
+
 ## Install
 
 There is no build step and there are no dependencies, so a URL is the whole install. The files you
@@ -80,7 +85,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.10.1/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.11.0/src/winding.js';
 </script>
 ```
 
@@ -100,8 +105,8 @@ import { Winding, Camera } from 'winding-engine';
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.10.1/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.10.1/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.11.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.11.0/src/"
   }
 }
 </script>
@@ -158,7 +163,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 537 checks, Node, no browser
+npm test          # 588 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 25 checks on a real device
 ```
 

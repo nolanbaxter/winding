@@ -28,6 +28,19 @@ function targetCountOf(json, meshes, nodeIndex) {
 const INTERPOLATIONS = new Set(['LINEAR', 'STEP', 'CUBICSPLINE']);
 
 export function readAnimations(json, buffers, meshes = []) {
+  // One read per accessor, however many channels share it. Keyframes are
+  // never written after import, so sharing the arrays is safe -- and without
+  // it ten thousand channels naming one sampler read it ten thousand times.
+  const reads = new Map();
+  const read = (index) => {
+    let values = reads.get(index);
+    if (values === undefined) {
+      values = readAccessorAsFloat32(json, buffers, index);
+      reads.set(index, values);
+    }
+    return values;
+  };
+
   return (json.animations ?? []).map((animation, a) => {
     const channels = [];
     let duration = 0;
@@ -52,8 +65,8 @@ export function readAnimations(json, buffers, meshes = []) {
       const sampler = animation.samplers?.[channel.sampler];
       if (!sampler) throw new Error(`glTF: animation ${a} channel references missing sampler ${channel.sampler}`);
 
-      const times = readAccessorAsFloat32(json, buffers, sampler.input);
-      const values = readAccessorAsFloat32(json, buffers, sampler.output);
+      const times = read(sampler.input);
+      const values = read(sampler.output);
       const interpolation = sampler.interpolation ?? 'LINEAR';
       if (!INTERPOLATIONS.has(interpolation)) {
         throw new Error(`glTF: animation ${a} uses interpolation ${JSON.stringify(interpolation)}; glTF defines LINEAR, STEP and CUBICSPLINE`);

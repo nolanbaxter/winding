@@ -26,6 +26,9 @@ ${BRDF_WGSL}
 // own compiled pipeline and opaque geometry never pays for the discard.
 override USE_ALPHA_MASK : bool = false;
 
+/** The smallest normal f32: below it a squared length has no direction left. */
+const F32_MIN_NORMAL : f32 = 1.17549435e-38;
+
 struct Frame {
   viewProjection : mat4x4<f32>,             //   0
   cameraPosition : vec4<f32>,               //  64  w = exposure
@@ -37,7 +40,7 @@ struct Frame {
   shadowParams   : vec4<f32>,               // 400  x = normal bias, y = map size
   clusterGrid    : vec4<u32>,               // 416  x, y, z cells; w = light count
   clusterDepth   : vec4<f32>,               // 432  x slice scale, y bias, zw tile size
-  cameraForward  : vec4<f32>,               // 448  world-space view axis; w = directional count (u32 bits)
+  cameraForward  : vec4<f32>,               // 448  world-space view axis; w = directional count
 };                                          // 464
 
 /** A directional light other than the shadowed one. Packed by Scene.refreshLights. */
@@ -462,12 +465,28 @@ fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   let facing = select(-1.0, 1.0, frontFacing);
   let tangentNormal = (textureSample(normalMap, surfSampler, uvNormal).xyz * 2.0 - 1.0)
                     * vec3<f32>(material.normalScale, material.normalScale, 1.0);
-  let tbn = mat3x3<f32>(
-    normalize(v.tangent),
-    normalize(v.bitangent) * facing,
-    normalize(v.normal) * facing,
-  );
-  let n = normalize(tbn * tangentNormal);
+  //
+  // Every normalize here guards its length first. An interpolated tangent can
+  // reach zero -- a file's zero TANGENT, or opposite tangents meeting inside
+  // one triangle -- and so can a flat normal-map texel, and normalize() of
+  // zero is NaN. D3D's min() happens to swallow one; Vulkan and Metal hand it
+  // to bloom, which spreads it across the frame. Below the smallest normal
+  // f32 there is no direction left to recover, so such a fragment keeps its
+  // geometric normal.
+  let geometric = normalize(v.normal) * facing;
+  let tangentLength = dot(v.tangent, v.tangent);
+  let bitangentLength = dot(v.bitangent, v.bitangent);
+  var n = geometric;
+  if (tangentLength > F32_MIN_NORMAL && bitangentLength > F32_MIN_NORMAL) {
+    let tbn = mat3x3<f32>(
+      v.tangent * inverseSqrt(tangentLength),
+      v.bitangent * inverseSqrt(bitangentLength) * facing,
+      geometric,
+    );
+    let mapped = tbn * tangentNormal;
+    let mappedLength = dot(mapped, mapped);
+    if (mappedLength > F32_MIN_NORMAL) { n = mapped * inverseSqrt(mappedLength); }
+  }
 
   let view = normalize(frame.cameraPosition.xyz - v.world);
   let NoV = max(dot(n, view), 1e-4);
@@ -513,7 +532,10 @@ fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // ---- every other directional light ----
   // The same BRDF as the sun above, without the shadow: there is one shadow
   // map, and it went to the brightest. Nothing else about them is different.
-  let directionalCount = bitcast<u32>(frame.cameraForward.w);
+  // A count stored as its VALUE, not its bits: small integers reinterpreted
+  // as f32 are subnormals, which a backend may flush to zero -- and every
+  // unshadowed directional light would vanish with nothing reported.
+  let directionalCount = u32(frame.cameraForward.w);
   for (var di = 0u; di < directionalCount; di = di + 1u) {
     let dl = directionals[di];
     let dL = -dl.direction.xyz;

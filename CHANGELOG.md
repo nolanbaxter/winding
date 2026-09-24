@@ -7,8 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Limits and lifetimes.** Two audits covered what breaks once a scene gets
-big, and what races once engines destroy themselves.
+## [0.11.0] - 2026-09-24
+
+**Limits, lifetimes, strangers' files, and still scenes.** Six audits:
+- what breaks once a scene gets big;
+- what races once engines destroy themselves;
+- what a stranger's glTF can make the engine do;
+- which guards no test could see break (a mutation pass);
+- what differs off Chrome on Windows;
+- what a frame pays for when nothing changed.
+
+The last gave a large static scene a 13x cheaper frame on the CPU.
+
+### Added
+
+- `engine.load(url, { fetch })` replaces the fetch used for the buffers and
+  images a .gltf names. Those URLs come from the file, so an app loading files
+  it didn't write can refuse, rewrite or restrict them.
+
+### Performance
+
+Measured in Chrome on 10,000 and 100,000 renderables, interleaved in one page.
+
+- **A frame where nothing moved skips composing, bounding and scanning
+  entirely.** At 100,000 renderables it drops from 2.1 ms to 0.17 ms. It used
+  to walk every node to find each one unchanged.
+- **Changed renderables upload as runs.** It used to be one span from the first
+  to the last.
+  - Two movers at opposite ends of 10,000 renderables sent all 10,000: 1.6 MB,
+    3.9 ms a frame. They now send two.
+  - Runs closer than the cost of a `writeBuffer` call (measured at about 512
+    bytes) are merged, so scattered movers can't turn into thousands of calls.
 
 ### Changed
 
@@ -61,6 +90,38 @@ big, and what races once engines destroy themselves.
 - `JOINTS_0` stored as `UNSIGNED_INT`, which glTF doesn't allow, is refused.
   It used to be narrowed to 16 bits.
 - Buffer and GLB-chunk alignment no longer goes negative at 2 GiB.
+- **Skinned and morphed renderables re-send their cull box every frame.** The
+  upload was gated on the mesh's own node moving. In the usual rig that node
+  stays put while the skeleton walks, so the GPU culled the character by its
+  bind-pose box. The scene's extent now hears about skin-only motion too.
+- **A stranger's glTF can't ask for more than the device holds.** Every accessor
+  and bufferView is checked before anything is allocated:
+  - whole counts and offsets;
+  - strides of 4 to 252;
+  - sparse data that fits and exists;
+  - output under the device's buffer limit.
+
+  A 150-byte file used to be able to get gigabytes allocated first. The vertex
+  buffer and morph deltas are sized before flat shading multiplies them.
+  Repeated references to one keyframe accessor are read once.
+- **Images are sized from their header before decoding**, and only images a
+  material samples are decoded. A 30000-pixel PNG of a few kilobytes cost
+  gigabytes before the texture's own size check ran. Formats other than PNG,
+  JPEG and WebP are skipped with a warning, like a failed decode.
+- **NaN and infinity are refused wherever a file supplies numbers:** every float
+  accessor, node transforms, material factors and morph weights. One NaN used
+  to spread through bloom and black out other models too.
+- **A zero-length tangent, or a flat normal-map texel, no longer makes a NaN
+  normal.** D3D's `min()` happened to hide it; Vulkan and Metal spread it.
+- **The directional-light count reaches the shader as a value, not as integer
+  bits.** Small integers read as float bits are subnormals, which a backend may
+  flush to zero, and every unshadowed directional light would vanish.
+- **A GPU with too few storage buffers per shader stage is refused by name** (a
+  compatibility-mode device). It used to get a validation error and a black
+  frame.
+- **Safari re-sizes the canvas when the window moves to a display with another
+  pixel ratio.** WebKit has no device-pixel box, so the resize observer never
+  fired.
 
 ## [0.10.1] - 2026-09-24
 
@@ -1458,7 +1519,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/nolanbaxter/winding/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/nolanbaxter/winding/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/nolanbaxter/winding/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/nolanbaxter/winding/compare/v0.9.0...v0.9.1

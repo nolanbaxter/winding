@@ -171,6 +171,9 @@ await test('workers pick up buffers published after the first', async () => {
   // The first dispatch after a republish is how a waiting worker finds out;
   // it steps out to read the new buffers and the dispatching thread covers.
   jobs.dispatch(JOB_SLOW, count, { chunkSize: 500 });
+  // Even this first one lands in the new buffers: a worker that wakes into it
+  // checks the revision before claiming anything, and steps out instead.
+  for (let i = 0; i < count; i++) assert.equal(touches[i], 1, `first dispatch, item ${i}`);
   await new Promise((resolve) => setTimeout(resolve, 50));
   touches.fill(0);
   who.fill(0);
@@ -179,6 +182,23 @@ await test('workers pick up buffers published after the first', async () => {
   for (let i = 0; i < count; i++) assert.equal(touches[i], 1, `item ${i} was touched ${touches[i]} times`);
   assert.ok(new Set(who).size > 1, 'the workers took part with the new buffers');
   jobs.destroy();
+});
+
+await test('more chunks than the cursor can count still covers every item once', async () => {
+  // chunkSize 1 over 70,000 items is more chunk indices than the 16 bits
+  // beside the epoch tag hold. The chunk is widened to fit rather than
+  // letting the index run into the tag.
+  const count = 70_000;
+  const { jobs, touches } = makeSystem(3, count);
+  await jobs.ready();
+  jobs.dispatch(JOB_TOUCH, count, { chunkSize: 1 });
+  for (let i = 0; i < count; i++) assert.equal(touches[i], 1, `item ${i}`);
+  jobs.destroy();
+});
+
+await test('the epoch tag is the low 16 bits of the epoch', () => {
+  assert.equal(epochTag(65536 + 5), epochTag(5));
+  assert.notEqual(epochTag(6), epochTag(5));
 });
 
 await test('a tiny job is still correct', async () => {

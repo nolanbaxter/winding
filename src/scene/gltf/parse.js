@@ -35,7 +35,9 @@ import {
 } from '../../render/vertex.js';
 import { mat4Decompose } from '../../core/math/mat4.js';
 import { parseContainer, resolveBuffers } from './glb.js';
-import { readAccessorAsFloat32, readAccessorAsUint32, componentCountOf } from './accessor.js';
+import {
+  readAccessorAsFloat32, readAccessorAsUint32, componentCountOf, checkAccessors,
+} from './accessor.js';
 import {
   readSkins, normalizeWeights, checkJointIndices, jointInfluenceRadii,
 } from './skin.js';
@@ -98,16 +100,22 @@ export async function loadGLTF(source, options = {}) {
     throw new Error(`glTF: requires unsupported extensions: ${unsupported.join(', ')}`);
   }
 
+  // Before any resource is fetched or any array allocated. `maxBytes` is the
+  // largest buffer the device can make -- the engine passes it -- and bounds
+  // what the file may ask for; see checkAccessors.
+  const maxBytes = options.maxBytes ?? Infinity;
+  checkAccessors(json, maxBytes);
+
   const buffers = await resolveBuffers(json, binary, options);
-  return buildModel(json, buffers);
+  return buildModel(json, buffers, maxBytes);
 }
 
-function buildModel(json, buffers) {
+function buildModel(json, buffers, maxBytes = Infinity) {
   const materials = readMaterials(json);
   const meshes = (json.meshes ?? []).map((mesh, i) => {
     const name = mesh.name ?? `mesh_${i}`;
     const primitives = (mesh.primitives ?? []).map(
-      (p) => buildPrimitive(json, buffers, p, `mesh "${name}"`),
+      (p) => buildPrimitive(json, buffers, p, `mesh "${name}"`, maxBytes),
     );
 
     // Every primitive of a mesh is deformed by ONE set of weights, so they
@@ -211,7 +219,7 @@ function buildModel(json, buffers) {
 
 // ------------------------------------------------------------- primitives
 
-function buildPrimitive(json, buffers, primitive, label) {
+function buildPrimitive(json, buffers, primitive, label, maxBytes = Infinity) {
   const mode = primitive.mode ?? MODE_TRIANGLES;
   if (mode !== MODE_TRIANGLES) {
     throw new Error(
@@ -240,6 +248,16 @@ function buildPrimitive(json, buffers, primitive, label) {
   // pass, and the tangent pass then wrote NaN into the vertex they named.
   if (indices.length % 3 !== 0) {
     throw new Error(`glTF: ${label} has ${indices.length} indices, which is not a whole number of triangles`);
+  }
+
+  // The vertex buffer this becomes, sized now, before flat shading de-indexes
+  // it -- one vertex per index -- and before interleaving widens every vertex.
+  // Each step multiplies what the accessors alone could ask for, and a mesh
+  // past the device's buffer limit cannot be drawn at any cost.
+  const drawnVertices = attributes.NORMAL === undefined ? indices.length : vertexCount;
+  const vertexBytes = drawnVertices * VERTEX_STRIDE_FLOATS * 4;
+  if (vertexBytes > maxBytes) {
+    throw new RangeError(`glTF: ${label} needs a ${vertexBytes}-byte vertex buffer, past the ${maxBytes} this device can hold`);
   }
 
   let normals = attributes.NORMAL !== undefined
@@ -310,7 +328,9 @@ function buildPrimitive(json, buffers, primitive, label) {
 
   // Morph targets. Interleaved vertex-major by morph.js, which is what lets
   // the unweld below treat them as one more per-vertex attribute.
-  let morph = readMorphTargets(json, buffers, primitive.targets, vertexCount, label);
+  let morph = readMorphTargets(json, buffers, primitive.targets, vertexCount, label, {
+    drawnVertices, maxBytes,
+  });
 
   checkLength(normals, vertexCount, 3, 'NORMAL');
   checkLength(uvs, vertexCount, 2, 'TEXCOORD_0');
@@ -506,28 +526,52 @@ function computeBounds(positions) {
 
 // --------------------------------------------------------------- materials
 
+/**
+ * Numbers the file writes in its JSON, checked where they enter. JSON has no
+ * NaN, but 1e999 parses to Infinity and a string copies into a Float32Array
+ * as NaN -- and either one reaching a shader is spread by bloom until other
+ * models in the frame go black too.
+ */
+function finiteNumbers(values, length, what) {
+  if (!Array.isArray(values) || values.length !== length || !values.every(Number.isFinite)) {
+    throw new Error(`glTF: ${what} must be ${length} finite numbers, got [${values}]`);
+  }
+  return values;
+}
+
+function finiteNumber(value, fallback, what) {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value)) throw new Error(`glTF: ${what} must be a finite number, got ${value}`);
+  return value;
+}
+
 function readMaterials(json) {
   return (json.materials ?? []).map((material, i) => {
     const pbr = material.pbrMetallicRoughness ?? {};
+    const of = (field) => `material ${i} ${field}`;
     return {
       name: material.name ?? `material_${i}`,
-      baseColorFactor: Float32Array.from(pbr.baseColorFactor ?? [1, 1, 1, 1]),
-      metallic: pbr.metallicFactor ?? 1,
-      roughness: pbr.roughnessFactor ?? 1,
+      baseColorFactor: Float32Array.from(
+        pbr.baseColorFactor === undefined ? [1, 1, 1, 1] : finiteNumbers(pbr.baseColorFactor, 4, of('baseColorFactor')),
+      ),
+      metallic: finiteNumber(pbr.metallicFactor, 1, of('metallicFactor')),
+      roughness: finiteNumber(pbr.roughnessFactor, 1, of('roughnessFactor')),
       // KHR_materials_emissive_strength lifts the factor past 1, which the
       // core spec clamps it to. Blender writes it for any emission strength
       // above 1, so ignoring it dims every such glow with nothing reported.
       // Applied here, once: the shader already takes the factor as a float.
-      emissive: Float32Array.from(material.emissiveFactor ?? [0, 0, 0]).map(
+      emissive: Float32Array.from(
+        material.emissiveFactor === undefined ? [0, 0, 0] : finiteNumbers(material.emissiveFactor, 3, of('emissiveFactor')),
+      ).map(
         (v) => v * emissiveStrengthOf(material, i),
       ),
       alphaMode: material.alphaMode ?? 'OPAQUE',
-      alphaCutoff: material.alphaCutoff ?? 0.5,
+      alphaCutoff: finiteNumber(material.alphaCutoff, 0.5, of('alphaCutoff')),
       doubleSided: material.doubleSided === true,
-      normalScale: material.normalTexture?.scale ?? 1,
+      normalScale: finiteNumber(material.normalTexture?.scale, 1, of('normalTexture.scale')),
       // How much the occlusion map is allowed to darken ambient light. Lives on
       // the texture reference in glTF, not on the material.
-      occlusionStrength: material.occlusionTexture?.strength ?? 1,
+      occlusionStrength: finiteNumber(material.occlusionTexture?.strength, 1, of('occlusionTexture.strength')),
       // Texture INDICES, not images. Decoding and uploading belong to the
       // texture system; resolving them here would drag the RHI into a file that
       // has no other reason to know a GPU exists.
@@ -564,17 +608,14 @@ function readNodes(json) {
     if (node.matrix) {
       // glTF allows either form. TransformStore holds TRS, so a matrix node is
       // decomposed here -- once, at load -- rather than every frame.
-      if (node.matrix.length !== 16) {
-        throw new Error(`glTF: node ${i} has a matrix with ${node.matrix.length} entries`);
-      }
-      const m = Float32Array.from(node.matrix);
+      const m = Float32Array.from(finiteNumbers(node.matrix, 16, `node ${i} matrix`));
       if (!mat4Decompose(position, rotation, scale, m)) {
         throw new Error(`glTF: node ${i} has a degenerate matrix that cannot be decomposed`);
       }
     } else {
-      if (node.translation) position.set(node.translation);
-      if (node.rotation) rotation.set(node.rotation);
-      if (node.scale) scale.set(node.scale);
+      if (node.translation) position.set(finiteNumbers(node.translation, 3, `node ${i} translation`));
+      if (node.rotation) rotation.set(finiteNumbers(node.rotation, 4, `node ${i} rotation`));
+      if (node.scale) scale.set(finiteNumbers(node.scale, 3, `node ${i} scale`));
     }
 
     return {

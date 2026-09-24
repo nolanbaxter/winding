@@ -50,6 +50,28 @@ export const NOT_BATCHED = 0xffffffff;
 
 const WORKGROUP_SIZE = 64;
 
+/**
+ * What one queue.writeBuffer call costs, as the bytes it could have copied in
+ * the same time. MEASURED in Chrome: ~0.7 us per call against ~1.3 ns per
+ * byte, so about 512. Two runs of changed renderables separated by less than
+ * this are sent as one, gap included -- cheaper than a second call.
+ */
+const WRITE_CALL_BYTES = 512;
+
+/** Bytes one renderable adds to an upload: its draw data and its cull box. */
+const UPLOAD_ITEM_BYTES = DRAW_DATA_BYTES + 32;
+
+/**
+ * Add item `i` to `runs`, a flat [first, last, first, last, ...] list, in
+ * increasing order. It extends the last run when the gap to it is at most
+ * `mergeGap` items -- the gap is uploaded too, being cheaper than a call.
+ */
+export function addToRuns(runs, i, mergeGap) {
+  const last = runs.length - 1;
+  if (last > 0 && i - runs[last] - 1 <= mergeGap) runs[last] = i;
+  else runs.push(i, i);
+}
+
 
 const CULL_SHADER = /* wgsl */ `
 struct CullParams {
@@ -369,6 +391,8 @@ export class GpuDriven {
     /** Bumped by _grow. The renderer's draw bind group names batchBuffer. */
     this.buffersRevision = 0;
     this.stats = { batches: 0, items: 0, uploaded: 0, transparent: 0 };
+    /** This frame's changed runs, as [first, last, first, last, ...]; reused. */
+    this._runs = [];
   }
 
   async _init() {
@@ -695,17 +719,26 @@ export class GpuDriven {
     // hierarchy already worked out which ones those are, and rewriting all of
     // them throws that answer away.
     //
-    // The touched span is tracked rather than a per-object upload list: one
-    // writeBuffer over a range beats hundreds of small ones, and a scene where
-    // movers are scattered to both ends degrades to what this did before
-    // rather than to something worse.
+    // Uploaded as RUNS of changed renderables. It was one span from the first
+    // to the last, and two movers at opposite ends of 10,000 renderables sent
+    // all 10,000 -- 1.6 MB, measured at 3.9 ms a frame against 0.8 ms for the
+    // whole frame when still. Runs closer than one call's worth of bytes merge,
+    // so scattered movers cannot turn into thousands of calls either.
     const moved = scene.transforms.moved;
     const full = this._needsFullUpload;
-    let low = count;
-    let high = -1;
+    const runs = this._runs;
+    runs.length = 0;
+    const mergeGap = Math.floor(WRITE_CALL_BYTES / UPLOAD_ITEM_BYTES);
 
-    for (let i = 0; i < count; i++) {
-      if (!full && moved[scene.renderableMatrixSlot[i]] === 0) continue;
+    // Nothing moved and nothing deforms: there is nothing to rewrite, and the
+    // scan to find that out was 0.8 ms a frame at 100,000 renderables.
+    const scan = full || scene.transforms.movedPending || scene.skins.length > 0 || scene.morphs.length > 0;
+    for (let i = 0; scan && i < count; i++) {
+      // Skinned and morphed boxes come from joints and weights, which change
+      // without the mesh's own node moving -- the usual rig. Gated on the node
+      // alone, a character walked off its box and was culled where it stood.
+      if (!full && moved[scene.renderableMatrixSlot[i]] === 0
+        && scene.renderableSkin[i] < 0 && scene.renderableMorph[i] < 0) continue;
 
       const drawFloat = i * (DRAW_DATA_BYTES / 4);
       writeDrawData(this.drawData, drawFloat, scene, i);
@@ -734,11 +767,12 @@ export class GpuDriven {
       this.boundsData[b + 5] = scene.worldMax[o + 1];
       this.boundsData[b + 6] = scene.worldMax[o + 2];
 
-      if (i < low) low = i;
-      if (i > high) high = i;
+      addToRuns(runs, i, mergeGap);
     }
     this._needsFullUpload = false;
-    this.stats.uploaded = high >= low ? high - low + 1 : 0;
+    let uploaded = 0;
+    for (let r = 0; r < runs.length; r += 2) uploaded += runs[r + 1] - runs[r] + 1;
+    this.stats.uploaded = uploaded;
 
     // Draw arguments, with instanceCount zeroed, for BOTH phases. The cull
     // shader raises the count with atomicAdd, so resetting here is what makes
@@ -765,9 +799,10 @@ export class GpuDriven {
     this.cullParamsF32[planeFloats + 19] = hzb.height;
 
     const queue = this.rhi.queue;
-    if (high >= low) {
-      const span = high - low + 1;
-      const drawFloats = DRAW_DATA_BYTES / 4;
+    const drawFloats = DRAW_DATA_BYTES / 4;
+    for (let r = 0; r < runs.length; r += 2) {
+      const low = runs[r];
+      const span = runs[r + 1] - low + 1;
       queue.writeBuffer(
         this.drawDataBuffer, low * DRAW_DATA_BYTES,
         this.drawData, low * drawFloats, span * drawFloats,

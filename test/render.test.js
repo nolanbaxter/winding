@@ -1412,6 +1412,23 @@ test('a buffer past the device limit throws, rather than returning an invalid on
 console.log('\npipeline warming');
 
 await (async () => {
+  // Every wanted variant reaches warm(), known or not: one another load is
+  // still compiling has to be waited on, and only warm() knows which.
+  const handed = [];
+  const renderer = Object.assign(Object.create(Renderer.prototype), {
+    _pipelineByVariant: new Map(), _oitPipelineByVariant: new Map(),
+    pipelines: { warm: async (descs) => handed.push(descs.length) },
+    oit: true, pipelineLayout: {}, shader: {},
+  });
+  const BLEND = 2;
+  await renderer.ensureVariants([BLEND]);
+  await renderer.ensureVariants([BLEND]);
+  assert.deepEqual(handed, [4, 4, 4, 4], 'forward and OIT, both times');
+  passed++;
+  console.log('  ok  a second load hands warm() the variants the first already asked for');
+})();
+
+await (async () => {
   // Two loads at once. The second used to find the first one's variants
   // marked as handled and return before they were compiled.
   let release;

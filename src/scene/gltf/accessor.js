@@ -26,6 +26,89 @@ const TYPE_COMPONENT_COUNT = {
   SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT2: 4, MAT3: 9, MAT4: 16,
 };
 
+const whole = (n) => Number.isInteger(n) && n >= 0;
+const positive = (n) => Number.isInteger(n) && n >= 1;
+
+/**
+ * Check every accessor and bufferView against the rules that bound what a
+ * read will allocate, before anything is read at all.
+ *
+ * The per-read checks ran after the output array existed, and only for an
+ * accessor with a bufferView -- so a 150-byte file could name a count of
+ * thirty million, or a byteStride of 0, or a string where an offset belongs,
+ * and have gigabytes allocated before anything objected. A file from a
+ * stranger is exactly the case that matters.
+ *
+ * `maxBytes` is the largest buffer the device can make. Everything read here
+ * ends up in one or is smaller than one, so an accessor past it can never be
+ * drawn; refusing it up front is the derived bound on a legal zero-filled
+ * accessor, which has no bufferView to be checked against.
+ */
+export function checkAccessors(json, maxBytes = Infinity) {
+  (json.bufferViews ?? []).forEach((view, i) => {
+    if (!whole(view.byteOffset ?? 0) || !positive(view.byteLength)) {
+      throw new Error(`glTF: bufferView ${i} needs a whole byteOffset and byteLength`);
+    }
+    // glTF 3.6.1.1: 4 to 252, a multiple of 4. A stride of 0 made every
+    // element read the same bytes, which is how a tiny view claimed any count.
+    const stride = view.byteStride;
+    if (stride !== undefined && !(Number.isInteger(stride) && stride >= 4 && stride <= 252 && stride % 4 === 0)) {
+      throw new Error(`glTF: bufferView ${i} has byteStride ${JSON.stringify(stride)}; it must be 4 to 252, a multiple of 4`);
+    }
+  });
+
+  (json.accessors ?? []).forEach((accessor, i) => {
+    const comp = componentInfo(accessor.componentType);
+    const perElement = componentCountOf(accessor.type);
+    if (!positive(accessor.count)) {
+      throw new Error(`glTF: accessor ${i} has count ${JSON.stringify(accessor.count)}; it must be a whole number of at least 1`);
+    }
+    const offset = accessor.byteOffset ?? 0;
+    if (!whole(offset) || offset % comp.bytes !== 0) {
+      throw new Error(`glTF: accessor ${i} has byteOffset ${JSON.stringify(offset)}; it must be whole and aligned to its component`);
+    }
+    // Read out as 4-byte floats or integers, whatever the source width.
+    const bytes = accessor.count * perElement * 4;
+    if (bytes > maxBytes) {
+      throw new RangeError(`glTF: accessor ${i} reads out to ${bytes} bytes, past the ${maxBytes} this device can hold`);
+    }
+
+    if (accessor.bufferView !== undefined) {
+      const view = json.bufferViews?.[accessor.bufferView];
+      if (!view) throw new Error(`glTF: accessor ${i} names bufferView ${accessor.bufferView}, which does not exist`);
+      const elementBytes = comp.bytes * perElement;
+      if (view.byteStride !== undefined && view.byteStride < elementBytes) {
+        throw new Error(`glTF: accessor ${i} has ${elementBytes}-byte elements in a ${view.byteStride}-byte stride`);
+      }
+      const stride = view.byteStride ?? elementBytes;
+      if (offset + stride * (accessor.count - 1) + elementBytes > view.byteLength) {
+        throw new Error(`glTF: accessor ${i} reads past the end of bufferView ${accessor.bufferView}`);
+      }
+    }
+
+    if (accessor.sparse) {
+      const { count, indices, values } = accessor.sparse;
+      if (!positive(count) || count > accessor.count) {
+        throw new Error(`glTF: accessor ${i} has ${JSON.stringify(count)} sparse entries for ${accessor.count} elements`);
+      }
+      // Both are required by the spec; without them the overrides read zeros.
+      if (indices?.bufferView === undefined || values?.bufferView === undefined) {
+        throw new Error(`glTF: accessor ${i} is sparse without indices and values bufferViews`);
+      }
+      if (![5121, 5123, 5125].includes(indices.componentType)) {
+        throw new Error(`glTF: accessor ${i} has sparse indices of componentType ${indices.componentType}`);
+      }
+      for (const [part, width] of [[indices, COMPONENTS[indices.componentType].bytes], [values, comp.bytes * perElement]]) {
+        const view = json.bufferViews?.[part.bufferView];
+        const at = part.byteOffset ?? 0;
+        if (!view || !whole(at) || at + count * width > view.byteLength) {
+          throw new Error(`glTF: accessor ${i} has sparse data outside its bufferView`);
+        }
+      }
+    }
+  });
+}
+
 export function componentCountOf(type) {
   const n = TYPE_COMPONENT_COUNT[type];
   if (n === undefined) throw new Error(`glTF: unknown accessor type "${type}"`);
@@ -48,6 +131,18 @@ export function readAccessorAsFloat32(json, buffers, accessorIndex) {
 
   if (accessor.sparse) {
     applySparse(out, json, buffers, accessor, perElement, accessor.normalized === true);
+  }
+  // Every float the file supplies passes through here -- positions, normals,
+  // weights, keyframes, inverse binds, morph deltas -- so this one check is
+  // what keeps a NaN or an infinity out of all of them. One reaching a shader
+  // is spread across the frame by bloom, and blacks out other models too.
+  // Normalized integers cannot produce either, so only FLOAT is walked.
+  if (comp.name === 'FLOAT' || accessor.sparse) {
+    for (let k = 0; k < out.length; k++) {
+      if (!Number.isFinite(out[k])) {
+        throw new Error(`glTF: accessor ${accessorIndex} holds ${out[k]} at element ${Math.floor(k / perElement)}`);
+      }
+    }
   }
   return out;
 }

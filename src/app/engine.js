@@ -213,6 +213,11 @@ export class Winding {
    * instead of bounding boxes. Off by default: it costs 12 bytes per vertex
    * plus 4 per index on the JS heap for as long as the asset lives, and most
    * scenes never pick.
+   *
+   * `fetch` replaces the fetch used for the buffers and images a .gltf names.
+   * Those URLs come from the file, so an app loading files it did not write
+   * can use this to refuse, rewrite or restrict them -- same-origin only, say,
+   * or `credentials: 'omit'`. Bytes with no `baseURL` can reach no URL at all.
    */
   async load(source, options = {}) {
     const { retainGeometry = false } = options;
@@ -234,9 +239,17 @@ export class Winding {
       bytes = new Uint8Array(source);
     }
 
-    const model = await loadGLTF(bytes, { baseURL });
+    // What the file may ask for is bounded by what this device can hold, and
+    // what it may fetch by `options.fetch`, when the app supplies one: a
+    // .gltf names its own buffers and images, so loading one from a stranger
+    // requests URLs the stranger chose.
+    const { limits } = this.rhi;
+    const fetchImpl = options.fetch ?? globalThis.fetch;
+    const model = await loadGLTF(bytes, { baseURL, fetchImpl, maxBytes: limits.maxBufferSize });
     this._assertAlive('load');
-    const bitmaps = await decodeImages(model.source.json, model.source.buffers, { baseURL });
+    const bitmaps = await decodeImages(model.source.json, model.source.buffers, {
+      baseURL, fetchImpl, maxDimension: limits.maxTextureDimension2D,
+    });
     if (this._destroyed) {
       for (const bitmap of bitmaps) bitmap?.close?.();
       this._assertAlive('load');
