@@ -130,6 +130,11 @@ export class SkyboxPass {
     this.rhi.queue.writeBuffer(this.buffer, 0, this.data);
   }
 
+  /** The parameter buffer is the only GPU object this owns. */
+  destroy() {
+    this.buffer.destroy();
+  }
+
   draw(pass, environment) {
     pass.setPipeline(this.pipelines.get(this.descriptor));
     pass.setBindGroup(0, this._bindGroupFor(environment));

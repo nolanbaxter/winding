@@ -15,6 +15,12 @@ function test(name, fn) {
   console.log(`  ok  ${name}`);
 }
 
+async function atest(name, fn) {
+  await fn();
+  passed++;
+  console.log(`  ok  ${name}`);
+}
+
 /** Just enough engine: the two renderer fields a Benchmark touches. */
 function fakeEngine({ available = true } = {}) {
   return {
@@ -131,5 +137,48 @@ test('a frame is labelled by the largest of cpu, gpu and display wait', () => {
   assert.match(label(3, null, 4), /^CPU-bound/);
   assert.match(Benchmark.format({ frames: 1, cpu: cpuRow(1), gpu: null, gpuSamples: 0, wall: wall(4) }), /GPU or the display/);
 });
+
+await atest('starting twice, or starting and then running, still restores GPU timing', async () => {
+  // A second start used to save the "on" the first had set, so stop() put
+  // GPU timing back on for a renderer that had it off.
+  const engine = fakeEngine();
+  const bench = new Benchmark(engine);
+  bench.start();
+  bench.start();
+  bench.stop();
+  assert.equal(engine.renderer.gpuTiming.enabled, false, 'start twice');
+
+  const runnable = runnableEngine();
+  const other = new Benchmark(runnable);
+  other.start();
+  await other.run({}, {}, { frames: 3, warmup: 2 });
+  assert.equal(runnable.renderer.gpuTiming.enabled, false, 'start then run');
+});
+
+await atest('the warmup is measured attached, then forgotten', async () => {
+  // GPU timing's buffers are created on its first frames on, so it must be on
+  // for the warmup -- and those frames must not be in the report.
+  const engine = runnableEngine();
+  let enabledDuringWarmup = null;
+  engine.onFrame = (n) => { if (n === 0) enabledDuringWarmup = engine.renderer.gpuTiming.enabled; };
+  const report = await new Benchmark(engine).run({}, {}, { frames: 4, warmup: 3 });
+  assert.equal(enabledDuringWarmup, true);
+  assert.equal(report.frames, 4, 'only the recorded frames');
+});
+
+/** A stand-in engine whose renderFrame drives the profiler the way Renderer.render does. */
+function runnableEngine() {
+  const engine = fakeEngine();
+  let n = 0;
+  engine.rhi = { device: { queue: { onSubmittedWorkDone: async () => {} } } };
+  engine.renderFrame = () => {
+    engine.onFrame?.(n++);
+    const p = engine.renderer.profiler;
+    p?.frameStart();
+    p?.mark('work');
+    p?.frameEnd();
+  };
+  return engine;
+}
 
 console.log(`\n${passed} checks passed\n`);

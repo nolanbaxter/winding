@@ -871,4 +871,25 @@ test('destroy forgets the kept compile, whose textures it just destroyed', () =>
   assert.equal(rhi.counts.created, 4, 'fresh textures, not the destroyed ones');
 });
 
+test('a clear with no clear value still gets one when executed', () => {
+  // The release-build fallback for an attachment nothing wrote used to write
+  // its zero into the declaration's clear field, which the next addPass
+  // resets -- so a reused compile kept loadOp 'clear' with no value, which
+  // WebGPU rejects. execute() now supplies the value.
+  const graph = new RenderGraph(countingRhi());
+  graph.begin();
+  const target = graph.importTexture('target', {});
+  const depth = graph.createTexture('depth', { ...COLOR, format: 'depth32float' });
+  graph.addPass({ name: 'draw', color: [{ resource: target, clear: 0 }], depth: { resource: depth, clear: 0 }, execute() {} });
+  graph.compile();
+  // What the fallback leaves behind on a reused frame: 'clear', and no value.
+  const pass = graph._passes[0];
+  pass.color[0].clear = undefined;
+  pass.depth.clear = undefined;
+  const { ran, encoder } = recorder();
+  graph.execute(encoder);
+  assert.deepEqual(ran[0].colorAttachments[0].clearValue, { r: 0, g: 0, b: 0, a: 0 });
+  assert.equal(ran[0].depthStencilAttachment.depthClearValue, 0);
+});
+
 console.log(`\n${passed} checks passed\n`);

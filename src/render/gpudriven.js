@@ -188,7 +188,8 @@ fn emit(batch : u32, item : u32) {
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn cull(@builtin(global_invocation_id) id : vec3<u32>) {
-  let item = id.x;
+  // y carries the workgroups past the 65,535 a dimension may hold; see _dispatch.
+  let item = id.y * (65535u * ${WORKGROUP_SIZE}u) + id.x;
   if (item >= params.count) { return; }
 
   let boxMin = bounds[item].minPoint.xyz;
@@ -808,7 +809,11 @@ export class GpuDriven {
   _dispatch(pass, phase) {
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroups[phase]);
-    pass.dispatchWorkgroups(Math.ceil(this.itemCount / WORKGROUP_SIZE));
+    // WebGPU guarantees 65,535 workgroups per dimension, which at 64 items a
+    // workgroup is 4.2 million renderables. Past that, y takes the rest -- the
+    // draw capacity has no ceiling, so neither may this.
+    const groups = Math.ceil(this.itemCount / WORKGROUP_SIZE);
+    pass.dispatchWorkgroups(Math.min(groups, 65535), Math.ceil(groups / 65535));
   }
 
   /** Dynamic offset for the zero-base slot the ordered draws bind. */
@@ -842,7 +847,7 @@ export class GpuDriven {
     for (const buffer of [
       this.drawDataBuffer, this.boundsBuffer, this.itemBatchBuffer, this.batchFirstBuffer,
       this.indirectBuffer, this.visibleBuffer, this.batchOrderBuffer, this.batchBuffer,
-      this.cullParamsBuffer,
+      this.cullParamsBuffer, this.visibleFlagsBuffer,
     ]) buffer.destroy();
   }
 }

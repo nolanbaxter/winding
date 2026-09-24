@@ -97,6 +97,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns a unit rotation for a sheared matrix; an empty box transforms to
   an empty box instead of NaN; quatFromTo no longer snaps turns up to 0.08
   degrees short of opposite onto an exact half turn.
+- **Resource and tool hygiene.** Renderer.destroy() now releases the skin
+  palette, morph buffers, skybox buffer and the cull pass's visibility
+  flags, which it left behind. The OIT resolve keeps one bind group rather
+  than a map that grew with every resize. The GPU cull dispatch folds past
+  WebGPU's 65,535 workgroups per dimension, as light assignment already
+  did. The release-build fallback for an attachment nothing wrote survives
+  a reused graph compile. The benchmark restores GPU timing however it was
+  started, and runs its warmup attached so first-use costs stay out of the
+  recorded frames.
 - **A non-looping clip played backwards never finished.** It clamped at 0
   and reported itself playing forever.
 - **Lights without a range were cut off at 40% of their visible reach.** The

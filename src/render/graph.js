@@ -48,6 +48,9 @@
 import { DEBUG, assert } from '../core/assert.js';
 import { growArray } from '../core/grow.js';
 
+/** What an attachment declared without a clear value, but cleared, clears to. */
+const TRANSPARENT_BLACK = Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
+
 export class RenderGraph {
   constructor(rhi, { profiler = null } = {}) {
     this.rhi = rhi;
@@ -740,8 +743,11 @@ export class RenderGraph {
       if (DEBUG) {
         assert(false, `${passName}: attachment "${resource.name}" has no clear value and nothing wrote it earlier`);
       }
+      // Cleared rather than loaded, in a release build. Not written into
+      // `attachment.clear`: that is this frame's declaration, reset by the next
+      // addPass, and a reused compile would then keep 'clear' with nothing to
+      // clear to -- which WebGPU rejects. execute() supplies the zero.
       attachment.loadOp = 'clear';
-      attachment.clear = 0;
     }
 
     attachment.storeOp = (resource.external || resource.lastUse > step) ? 'store' : 'discard';
@@ -788,7 +794,7 @@ export class RenderGraph {
           view: attachment.view ?? this._resources[attachment.resource].view,
           loadOp: attachment.loadOp,
           storeOp: attachment.storeOp,
-          clearValue: attachment.clear ?? undefined,
+          clearValue: attachment.clear ?? (attachment.loadOp === 'clear' ? TRANSPARENT_BLACK : undefined),
         });
       }
 
@@ -798,7 +804,7 @@ export class RenderGraph {
           view: pass.depth.view ?? this._resources[pass.depth.resource].view,
           depthLoadOp: pass.depth.loadOp,
           depthStoreOp: pass.depth.storeOp,
-          depthClearValue: pass.depth.clear ?? undefined,
+          depthClearValue: pass.depth.clear ?? (pass.depth.loadOp === 'clear' ? 0 : undefined),
         };
       }
 

@@ -43,24 +43,34 @@ export class Benchmark {
     this._running = false;
   }
 
-  /** Begin recording every frame the engine renders, however it is driven. */
+  /**
+   * Begin recording every frame the engine renders, however it is driven.
+   * Starting again while running starts the recording over; it does not
+   * forget what GPU timing was set to before the first start, which a second
+   * start used to overwrite with the "on" the first one had set -- so stop()
+   * restored "on".
+   */
   start() {
     const attached = this.renderer.profiler;
     if (attached && attached !== this) {
       throw new Error('Benchmark: another benchmark is already attached to this renderer');
     }
+    const gpu = this.renderer.gpuTiming;
+    if (!this._running) {
+      this._gpuWasEnabled = gpu.enabled;
+      gpu.enabled = true;
+      this.renderer.profiler = this;
+      this._running = true;
+    }
+    this._clear();
+    return this;
+  }
+
+  _clear() {
     this._spans.clear();
     this._wall.length = 0;
     this.frames = 0;
-
-    const gpu = this.renderer.gpuTiming;
-    this._gpuWasEnabled = gpu.enabled;
-    gpu.enabled = true;
-    gpu.resetAverages();
-
-    this.renderer.profiler = this;
-    this._running = true;
-    return this;
+    this.renderer.gpuTiming.resetAverages();
   }
 
   /** Stop recording, put the renderer back exactly as it was, and report. */
@@ -89,14 +99,19 @@ export class Benchmark {
     const engine = this.engine;
     const queue = engine.rhi.device.queue;
 
-    for (let i = 0; i < warmup; i++) {
-      update?.(i - warmup);
-      engine.renderFrame(scene, camera);
-      await queue.onSubmittedWorkDone();
-    }
-
+    // Attached for the warmup too, so everything that only happens the first
+    // time something is measured -- GPU timing's query set and staging
+    // buffers are created on its first frames on -- happens in the warmup
+    // rather than inside the recorded spans. The warmup is then forgotten.
     this.start();
     try {
+      for (let i = 0; i < warmup; i++) {
+        update?.(i - warmup);
+        engine.renderFrame(scene, camera);
+        await queue.onSubmittedWorkDone();
+      }
+      this._clear();
+
       for (let i = 0; i < frames; i++) {
         update?.(i);
         const t = now();

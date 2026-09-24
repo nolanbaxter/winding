@@ -808,6 +808,9 @@ export class Renderer {
     this.post.destroy();
     this.frameBuffer.destroy();
     this.directionalBuffer.destroy();
+    this.skinPalette.destroy();
+    this.morph.destroy();
+    this.skybox.destroy();
   }
 
   /**
@@ -1056,15 +1059,23 @@ export class Renderer {
       }],
     };
     await this.pipelines.warm([this.oitResolveDescriptor]);
-    this._oitBindGroups = new Map();
+    this._oitKey = '';
+    this._oitBindGroup = null;
   }
 
-  /** Bind group per (accum, reveal) view pair, which the graph pool keeps stable. */
+  /**
+   * The resolve's bind group for this (accum, reveal) view pair, which the
+   * graph pool keeps stable from frame to frame.
+   *
+   * ONE, not a cache of them. A frame resolves one pair, so the only question
+   * is whether it is still the last one. This was a map that nothing evicted
+   * -- every resize with OIT on added an entry naming views the pool had
+   * since destroyed.
+   */
   _oitBindGroupFor(accumView, revealView) {
     const key = `${viewKey(accumView)}:${viewKey(revealView)}`;
-    let bindGroup = this._oitBindGroups.get(key);
-    if (!bindGroup) {
-      bindGroup = this.rhi.device.createBindGroup({
+    if (key !== this._oitKey) {
+      this._oitBindGroup = this.rhi.device.createBindGroup({
         label: 'oit-resolve',
         layout: this.oitLayout,
         entries: [
@@ -1072,9 +1083,9 @@ export class Renderer {
           { binding: 1, resource: revealView },
         ],
       });
-      this._oitBindGroups.set(key, bindGroup);
+      this._oitKey = key;
     }
-    return bindGroup;
+    return this._oitBindGroup;
   }
 
   _encodeOitResolve(pass, accumView, revealView) {
