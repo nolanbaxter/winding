@@ -1,6 +1,6 @@
 {
   "name": "winding-engine",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "A WebGPU rendering engine for the browser. No dependencies, no build step.",
   "license": "MIT",
   "author": "Nolan Baxter",

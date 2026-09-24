@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-24
+
+**An audit, fixed.** Five parallel audits -- scene, render, glTF import, math
+correctness and math performance -- found 44 things; every finding was
+re-run before it counted, and all but two marginal ones are fixed, each
+with a test that fails on the old code. The largest: nothing standing on a
+floor cast a sun shadow.
+
+Minor rather than patch because the glTF importer is stricter: a file that
+breaks a rule of the spec or its extensions is now refused, by name, where
+it used to half-load. No function signatures changed.
+
 ### Changed
 
 - **Faster math where it runs per object, same answers.** Each replacement
@@ -1350,7 +1362,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/nolanbaxter/winding/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/nolanbaxter/winding/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/nolanbaxter/winding/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/nolanbaxter/winding/compare/v0.7.3...v0.8.0
