@@ -819,13 +819,13 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       // front of it, turned away from the sun so the shadow pass (which culls
       // front faces) keeps it. The camera looks at the floor's centre from the
       // side, past the blocker, where its shadow falls.
-      const shadowed = async (withBlocker) => {
+      const shadowed = async (withBlocker, blocker = { baseColorFactor: [0.8, 0.8, 0.8, 1] }) => {
         const scene = probe.createScene();
         scene.sun.setDirection(0, 0, -1);
         scene.sun.setLight({ intensity: 3 });
         scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] })));
         if (withBlocker) {
-          scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], nodeScale: [0.25, 0.25, 1] })))
+          scene.add(await probe.load(buildFeatureGLB({ ...blocker, nodeScale: [0.25, 0.25, 1] })))
             .setPosition(0, 0, 0.8).setRotationAxisAngle([0, 1, 0], Math.PI);
         }
         const cam = new Camera({ fovY: 0.9, near: 0.05 });
@@ -844,6 +844,21 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         throw new Error(`a caster above the floor cast no shadow: ${show(open)} -> ${show(shaded)}`);
       }
       results.push('a caster on the sun side of the origin casts a shadow');
+
+      // ALPHA SHAPES THE SHADOW. A masked caster whose alpha is under its
+      // cutoff is invisible, and cast a full shadow anyway: the shadow pass had
+      // no fragment stage to test alpha with. A blended one cast none at all.
+      const sum = (c) => c[0] + c[1] + c[2];
+      const cutAway = await shadowed(true, { baseColorFactor: [0.8, 0.8, 0.8, 0.2], alphaMode: 'MASK', alphaCutoff: 0.5 });
+      if (!(sum(cutAway) > sum(open) * 0.95)) {
+        throw new Error(`a caster masked away still cast a shadow: ${show(open)} -> ${show(cutAway)}`);
+      }
+      results.push('a masked-away caster casts no shadow');
+      const glass = await shadowed(true, { baseColorFactor: [0.8, 0.8, 0.8, 0.5], alphaMode: 'BLEND' });
+      if (!(sum(glass) < sum(open) * 0.9 && sum(glass) > sum(shaded) * 1.1)) {
+        throw new Error(`a half-transparent caster should cast a partial shadow: open ${show(open)}, glass ${show(glass)}, solid ${show(shaded)}`);
+      }
+      results.push('a half-transparent caster casts a partial shadow');
 
       // A SMOOTHER SURFACE HAS A BRIGHTER HIGHLIGHT. GGX's divisor floor used to
       // sit above what a smooth lobe divides by, which inverted exactly this:

@@ -188,11 +188,68 @@ export function sampleClip(clip, time, transforms, entityOf, entities, weightsOf
 }
 
 /**
+ * Add one clip's pose at `time`, scaled by `weight`, into an accumulator.
+ *
+ * The blending half of sampleClip: the same channels and the same sampling,
+ * summed rather than written. Rotations are summed with their signs aligned to
+ * the first one added -- q and -q are one rotation, and adding opposite signs
+ * would cancel it -- and normalized when the sum is applied, which is nlerp.
+ */
+function accumulateClip(clip, time, weight, acc, entityOf, entities, weightsOf) {
+  for (const channel of clip.channels) {
+    if (!entities.alive(entityOf[channel.node])) continue;
+    const components = sampleChannel(channel, time);
+    if (components === 0) continue;
+    const n = channel.node;
+
+    switch (channel.path) {
+      case 'translation':
+      case 'scale': {
+        const sum = channel.path === 'translation' ? acc.position : acc.scale;
+        for (let c = 0; c < 3; c++) sum[n * 3 + c] += SAMPLE[c] * weight;
+        (channel.path === 'translation' ? acc.positionWeight : acc.scaleWeight)[n] += weight;
+        break;
+      }
+      case 'rotation': {
+        const o = n * 4;
+        const r = acc.rotation;
+        const sign = acc.rotationWeight[n] > 0
+          && r[o] * SAMPLE[0] + r[o + 1] * SAMPLE[1] + r[o + 2] * SAMPLE[2] + r[o + 3] * SAMPLE[3] < 0 ? -1 : 1;
+        for (let c = 0; c < 4; c++) r[o + c] += SAMPLE[c] * weight * sign;
+        acc.rotationWeight[n] += weight;
+        break;
+      }
+      case 'weights': {
+        const target = weightsOf === null ? undefined : weightsOf[n];
+        if (target === undefined) break;
+        let sum = acc.morph[n];
+        if (sum === undefined || sum.length !== target.length) sum = acc.morph[n] = new Float32Array(target.length);
+        const count = Math.min(components, target.length);
+        for (let c = 0; c < count; c++) sum[c] += SAMPLE[c] * weight;
+        acc.morphWeight[n] += weight;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+}
+
+/**
  * Playback state for one instance of an asset.
  *
- * One clip at a time. Blending between two clips needs a weight per channel and
- * somewhere to accumulate partial results, which is a different data structure
- * than this -- doing it badly here would be worse than not doing it.
+ * One clip plays at a time, or several blend while one fades into another.
+ * play() with a `fade` ramps the new clip's weight up and every playing one's
+ * down over that many seconds; without one, the new clip simply replaces the
+ * rest. A single clip is sampled straight into the transforms, exactly as it
+ * always was -- the blending path costs nothing until a fade is under way.
+ *
+ * A node only some of the blending clips animate takes the value of those that
+ * do, normalized by their weight. It does not blend toward its rest pose: the
+ * clip that leaves it alone has not said where it should be.
+ *
+ * `clip`, `time`, `speed`, `loop` and `finished` describe the clip last
+ * played, which is the one a fade is heading to.
  */
 export class AnimationPlayer {
   constructor(clips, entityOf, entities, weightsOf = null) {
@@ -201,68 +258,158 @@ export class AnimationPlayer {
     this.entities = entities;
     /** Node index -> that instance's morph weights. Null when it has none. */
     this.weightsOf = weightsOf;
-    this.clip = null;
-    this.time = 0;
-    this.speed = 1;
-    this.loop = true;
-    /** True once a non-looping clip has reached its end. */
-    this.finished = false;
+    /** Playing clips, the newest last, each with its own time and weight. */
+    this.tracks = [];
+    this._acc = null;
   }
 
   get names() {
     return this.clips.map((clip) => clip.name);
   }
 
+  get _current() { return this.tracks[this.tracks.length - 1] ?? null; }
+  get clip() { return this._current?.clip ?? null; }
+  get time() { return this._current?.time ?? 0; }
+  set time(value) { if (this._current) this._current.time = value; }
+  get speed() { return this._current?.speed ?? 1; }
+  set speed(value) { if (this._current) this._current.speed = value; }
+  get loop() { return this._current?.loop ?? true; }
+  set loop(value) { if (this._current) this._current.loop = value; }
+  /** True once a non-looping clip has reached its end. */
+  get finished() { return this._current?.finished ?? false; }
+
   /**
    * Start a clip by name or index. Returns false if there is no such clip.
    *
-   * Sets state only. The pose does not change until the next advance(), so a
-   * player left at speed 0 holds whatever pose the asset loaded in.
+   * `fade`, in seconds, cross-fades from whatever is playing. Sets state only:
+   * the pose does not change until the next advance(), so a player left at
+   * speed 0 holds whatever pose the asset loaded in.
    */
-  play(nameOrIndex, { loop = true, speed = 1, time = 0 } = {}) {
+  play(nameOrIndex, { loop = true, speed = 1, time = 0, fade = 0 } = {}) {
     const clip = typeof nameOrIndex === 'number'
       ? this.clips[nameOrIndex]
       : this.clips.find((c) => c.name === nameOrIndex);
     if (!clip) return false;
 
-    this.clip = clip;
-    this.time = time;
-    this.loop = loop;
-    this.speed = speed;
-    this.finished = false;
+    const track = { clip, time, loop, speed, finished: false, weight: 1, target: 1, rate: 0 };
+    if (fade > 0 && this.tracks.length > 0) {
+      // Every playing clip heads to zero at the pace that gets it there in
+      // `fade` from wherever it is now, and the new one rises to one.
+      for (const old of this.tracks) {
+        old.target = 0;
+        old.rate = old.weight / fade;
+      }
+      track.weight = 0;
+      track.rate = 1 / fade;
+      this.tracks.push(track);
+    } else {
+      this.tracks = [track];
+    }
     return true;
   }
 
   /** Stop, leaving the pose where it is. */
   stop() {
-    this.clip = null;
+    this.tracks = [];
     return this;
   }
 
   advance(dt, transforms) {
-    const clip = this.clip;
-    if (!clip || this.finished) return false;
+    const tracks = this.tracks;
+    if (tracks.length === 0) return false;
+    if (tracks.length === 1 && tracks[0].finished) return false;
 
-    this.time += dt * this.speed;
-
-    const duration = clip.duration;
-    if (duration > 0) {
-      if (this.loop) {
-        // Modulo rather than subtraction, so a large dt or a high speed cannot
-        // leave the time outside the clip.
-        this.time %= duration;
-        if (this.time < 0) this.time += duration;
-      } else if (this.time >= duration) {
-        this.time = duration;
-        this.finished = true;
-      } else if (this.time < 0) {
-        // Backwards, the end is the start.
-        this.time = 0;
-        this.finished = true;
+    // Time and weight for every track; then drop the ones faded to nothing.
+    let kept = 0;
+    for (const track of tracks) {
+      if (!track.finished) advanceTrack(track, dt);
+      if (track.weight !== track.target) {
+        const step = track.rate * dt;
+        track.weight = track.weight < track.target
+          ? Math.min(track.target, track.weight + step)
+          : Math.max(track.target, track.weight - step);
       }
+      if (!(track.target === 0 && track.weight <= 0)) tracks[kept++] = track;
+    }
+    tracks.length = kept;
+    if (kept === 0) return false;
+
+    if (kept === 1) {
+      const track = tracks[0];
+      sampleClip(track.clip, track.time, transforms, this.entityOf, this.entities, this.weightsOf);
+      return true;
     }
 
-    sampleClip(clip, this.time, transforms, this.entityOf, this.entities, this.weightsOf);
+    const acc = this._accumulator();
+    for (const track of tracks) {
+      if (track.weight > 0) {
+        accumulateClip(track.clip, track.time, track.weight, acc, this.entityOf, this.entities, this.weightsOf);
+      }
+    }
+    this._apply(acc, transforms);
     return true;
+  }
+
+  /** Per-node sums, allocated once for this instance and cleared per use. */
+  _accumulator() {
+    const n = this.entityOf.length;
+    let acc = this._acc;
+    if (acc === null) {
+      acc = this._acc = {
+        position: new Float32Array(n * 3), positionWeight: new Float32Array(n),
+        rotation: new Float32Array(n * 4), rotationWeight: new Float32Array(n),
+        scale: new Float32Array(n * 3), scaleWeight: new Float32Array(n),
+        morph: new Array(n), morphWeight: new Float32Array(n),
+      };
+    } else {
+      acc.position.fill(0); acc.positionWeight.fill(0);
+      acc.rotation.fill(0); acc.rotationWeight.fill(0);
+      acc.scale.fill(0); acc.scaleWeight.fill(0);
+      acc.morphWeight.fill(0);
+      for (const sum of acc.morph) sum?.fill(0);
+    }
+    return acc;
+  }
+
+  _apply(acc, transforms) {
+    for (let n = 0; n < this.entityOf.length; n++) {
+      const entity = this.entityOf[n];
+      if (!this.entities.alive(entity)) continue;
+      let w = acc.positionWeight[n];
+      if (w > 0) transforms.setPosition(entity, acc.position[n * 3] / w, acc.position[n * 3 + 1] / w, acc.position[n * 3 + 2] / w);
+      w = acc.scaleWeight[n];
+      if (w > 0) transforms.setScale(entity, acc.scale[n * 3] / w, acc.scale[n * 3 + 1] / w, acc.scale[n * 3 + 2] / w);
+      if (acc.rotationWeight[n] > 0) {
+        const q = acc.rotation.subarray(n * 4, n * 4 + 4);
+        transforms.setRotation(entity, quatNormalize(QUAT_A, q));
+      }
+      w = acc.morphWeight[n];
+      if (w > 0) {
+        const target = this.weightsOf[n];
+        const sum = acc.morph[n];
+        for (let c = 0; c < target.length; c++) target[c] = sum[c] / w;
+      }
+    }
+  }
+}
+
+/** One track's clock: loop, clamp at an end, or finish. */
+function advanceTrack(track, dt) {
+  track.time += dt * track.speed;
+  const duration = track.clip.duration;
+  if (duration > 0) {
+    if (track.loop) {
+      // Modulo rather than subtraction, so a large dt or a high speed cannot
+      // leave the time outside the clip.
+      track.time %= duration;
+      if (track.time < 0) track.time += duration;
+    } else if (track.time >= duration) {
+      track.time = duration;
+      track.finished = true;
+    } else if (track.time < 0) {
+      // Backwards, the end is the start.
+      track.time = 0;
+      track.finished = true;
+    }
   }
 }

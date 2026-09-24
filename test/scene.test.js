@@ -686,6 +686,24 @@ test('a morphed renderable is picked at its box, not at its triangles', () => {
   close(hit.distance, 4.5, EPS, 'distance is to the box face');
 });
 
+test('with its deltas retained, a morphed mesh is picked where the weights put it', () => {
+  // Target 0 slides every vertex +0.5 in x; weight 1 applies it. The authored
+  // quad spans x -0.2..0.2, the morphed one 0.3..0.7.
+  const asset = morphAsset({ retain: true, weights: [1, 0] });
+  const primitive = asset.meshes[0].primitives[0];
+  primitive.morphCountStride = 2 | (3 << 16);
+  primitive.morphDeltas = new Float32Array(4 * 2 * 3);
+  for (let v = 0; v < 4; v++) primitive.morphDeltas[(v * 2 + 0) * 3] = 0.5;
+  const scene = new Scene({ capacity: 16 });
+  scene.add(asset);
+
+  const hit = scene.raycast(vec3Create(0.5, 0, 0), vec3Create(0, 0, -1));
+  assert.ok(hit, 'where the vertices are now');
+  close(hit.distance, 5, EPS);
+  assert.equal(scene.raycast(vec3Create(0, 0, 0), vec3Create(0, 0, -1)), null,
+    'and not where they were authored');
+});
+
 test('a skinned and morphed renderable gets both corrections', () => {
   // applySkinBounds builds a world box from where the joints are, so there is
   // no local box left to pad -- the padding goes straight onto the world box,

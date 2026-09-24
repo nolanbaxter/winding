@@ -20,7 +20,7 @@ import {
 import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
 import { hypot3, vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
-import { mat4Create, mat4Copy, mat4Invert } from '../core/math/mat4.js';
+import { mat4Create, mat4Copy, mat4Invert, mat4Multiply } from '../core/math/mat4.js';
 import { quatCreate, quatLookAlong } from '../core/math/quat.js';
 import { grownCapacity, growArray } from '../core/grow.js';
 
@@ -889,28 +889,26 @@ export class Scene {
       if (candidate.distance >= bestDistance) break;
 
       const primitive = this.renderablePrimitive[candidate.renderable];
-      // A skinned renderable is answered at its box even when its geometry was
-      // retained. The triangles are the BIND POSE, and the narrow phase reaches
-      // them by inverting the mesh node's matrix -- which a skinned mesh's
-      // vertices do not follow at all. Testing them would not merely be
-      // approximate, it would miss, and a posed character with retainGeometry
-      // would become unpickable while its box said otherwise. Skinning the
-      // triangles here would cost a palette blend per vertex per click.
-      // Morphed geometry is answered at its box for the same reason, one step
-      // removed: the retained triangles are the UNDEFORMED mesh, so a ray that
-      // hit them would report where the vertex was authored rather than where
-      // the weights have put it. Unconditional, not "when some weight is
-      // nonzero" -- precision that switches on and off as a clip plays is a
-      // worse contract than precision that is honestly coarse.
-      const deformed = this.renderableSkin[candidate.renderable] >= 0
-        || this.renderableMorph[candidate.renderable] >= 0;
-      if (deformed || primitive.positions === undefined || primitive.indices === undefined) {
-        best = candidate.renderable;
+      // Skinned and morphed renderables are tested against their triangles AS
+      // DEFORMED, the way the vertex shader deforms them. That is work per
+      // vertex per click -- and only for the few whose boxes the ray already
+      // hit. Without the retained data the box is the answer, as for anything
+      // loaded without retainGeometry.
+      const renderable = candidate.renderable;
+      const skinned = this.renderableSkin[renderable] >= 0;
+      const morphed = this.renderableMorph[renderable] >= 0;
+      const retained = primitive.positions !== undefined && primitive.indices !== undefined
+        && (!skinned || primitive.jointIndices !== undefined)
+        && (!morphed || primitive.morphDeltas !== undefined);
+      if (!retained) {
+        best = renderable;
         bestDistance = candidate.distance;
         continue;
       }
 
-      const distance = this._triangleDistance(candidate.renderable, primitive, origin, direction);
+      const distance = skinned || morphed
+        ? this._deformedDistance(renderable, primitive, origin, direction)
+        : this._triangleDistance(renderable, primitive, origin, direction);
       if (distance < 0 || distance >= bestDistance) continue;
       bestDistance = distance;
       best = candidate.renderable;
@@ -1012,6 +1010,81 @@ export class Scene {
   }
 
   /**
+   * The nearest triangle of a skinned or morphed renderable, in world space.
+   *
+   * The same deformation the vertex shader makes, in the same order: morph
+   * targets first, against the bind pose, then either the joint palette --
+   * jointWorld * inverseBind, with the mesh node's own matrix ignored, as
+   * glTF says -- or, unskinned, the model matrix. Each vertex is deformed once
+   * and shared by the triangles that use it.
+   */
+  _deformedDistance(renderable, primitive, origin, direction) {
+    const { positions, indices } = primitive;
+    const vertexCount = positions.length / 3;
+    if (DEFORMED.length < positions.length) {
+      DEFORMED = new Float32Array(grownCapacity(DEFORMED.length, positions.length));
+    }
+    const out = DEFORMED;
+
+    const m = this.renderableMorph[renderable];
+    const weights = m >= 0 ? this.morphs[m].weights : null;
+    const targets = primitive.morphCountStride & 0xffff;
+    const stride = primitive.morphCountStride >>> 16;
+    const deltas = primitive.morphDeltas;
+
+    const s = this.renderableSkin[renderable];
+    const world = this.transforms.world;
+    let palette = null;
+    if (s >= 0) {
+      const { joints, inverseBind } = this.skins[s];
+      if (PALETTE.length < joints.length * 16) {
+        PALETTE = new Float32Array(grownCapacity(PALETTE.length, joints.length * 16));
+      }
+      palette = PALETTE;
+      for (let j = 0; j < joints.length; j++) {
+        mat4Multiply(palette, world, inverseBind, j * 16, handleIndex(joints[j]) * 16, j * 16);
+      }
+    }
+    const model = this.renderableMatrixSlot[renderable] * 16;
+
+    for (let v = 0; v < vertexCount; v++) {
+      let x = positions[v * 3], y = positions[v * 3 + 1], z = positions[v * 3 + 2];
+      if (weights !== null) {
+        for (let t = 0; t < targets; t++) {
+          const w = weights[t];
+          if (w === 0) continue;
+          const o = (v * targets + t) * stride;
+          x += w * deltas[o];
+          y += w * deltas[o + 1];
+          z += w * deltas[o + 2];
+        }
+      }
+      // Skinned: the weighted palette. Otherwise: the model matrix.
+      const matrices = palette ?? world;
+      let wx = 0, wy = 0, wz = 0;
+      for (let k = 0; k < (palette === null ? 1 : 4); k++) {
+        const w = palette === null ? 1 : primitive.jointWeights[v * 4 + k];
+        if (w === 0) continue;
+        const p = palette === null ? model : primitive.jointIndices[v * 4 + k] * 16;
+        wx += w * (matrices[p] * x + matrices[p + 4] * y + matrices[p + 8] * z + matrices[p + 12]);
+        wy += w * (matrices[p + 1] * x + matrices[p + 5] * y + matrices[p + 9] * z + matrices[p + 13]);
+        wz += w * (matrices[p + 2] * x + matrices[p + 6] * y + matrices[p + 10] * z + matrices[p + 14]);
+      }
+      out[v * 3] = wx; out[v * 3 + 1] = wy; out[v * 3 + 2] = wz;
+    }
+
+    let nearest = -1;
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+      const distance = rayTriangleDistance(
+        origin, direction, out, indices[i] * 3, indices[i + 1] * 3, indices[i + 2] * 3,
+      );
+      if (distance < 0) continue;
+      if (nearest < 0 || distance < nearest) nearest = distance;
+    }
+    return nearest;
+  }
+
+  /**
    * The nearest renderable under a point on the canvas.
    *
    * `x`/`y` are CSS pixels from the canvas's top-left, and `width`/`height` its
@@ -1034,6 +1107,9 @@ const PICK_DIRECTION = vec3Create();
 
 /** Scratch for the narrow phase: the ray, pushed into one renderable's local space. */
 const PICK_WORLD = mat4Create();
+/** Scratch for the deformed narrow phase: one renderable's world positions, and its palette. */
+let DEFORMED = new Float32Array(0);
+let PALETTE = new Float32Array(0);
 const PICK_INVERSE = mat4Create();
 const LOCAL_ORIGIN = vec3Create();
 const LOCAL_DIRECTION = vec3Create();

@@ -210,8 +210,10 @@ export class Winding {
    *
    * `retainGeometry` keeps each primitive's positions and indices on the CPU
    * after upload, which is what Scene.raycast needs to answer with triangles
-   * instead of bounding boxes. Off by default: it costs 12 bytes per vertex
-   * plus 4 per index on the JS heap for as long as the asset lives, and most
+   * instead of bounding boxes -- and, for a skinned or morphed mesh, its joint
+   * influences and morph deltas, so it is picked as posed. Off by default: it
+   * costs 12 bytes per vertex plus 4 per index on the JS heap (32 more per
+   * skinned vertex, and the deltas) for as long as the asset lives, and most
    * scenes never pick.
    *
    * `fetch` replaces the fetch used for the buffers and images a .gltf names.
@@ -322,6 +324,11 @@ export class Winding {
             // flag buys precision with memory and nothing else changes.
             positions: retainGeometry ? primitive.positions : undefined,
             indices: retainGeometry ? primitive.indices : undefined,
+            // And what deforms them, so a skinned or morphed mesh is picked at
+            // its posed triangles rather than its box.
+            jointIndices: retainGeometry && primitive.jointIndices ? primitive.jointIndices : undefined,
+            jointWeights: retainGeometry && primitive.jointIndices ? primitive.jointWeights : undefined,
+            morphDeltas: retainGeometry && primitive.morph ? primitive.morph.deltas : undefined,
             materialId: primitive.material >= 0
               ? asset.materialIds[primitive.material]
               : this._defaultMaterial(),

@@ -85,7 +85,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.11.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.12.0/src/winding.js';
 </script>
 ```
 
@@ -105,8 +105,8 @@ import { Winding, Camera } from 'winding-engine';
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.11.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.11.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.12.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.12.0/src/"
   }
 }
 </script>
@@ -163,7 +163,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 588 checks, Node, no browser
+npm test          # 593 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 25 checks on a real device
 ```
 
@@ -243,7 +243,9 @@ being better -- sorting is exact for separated convex objects, OIT is approximat
 does not care what order anything arrives in.
 
 **Cascaded shadow maps.** Sphere-fitted cascades (rotation invariant, so they don't shimmer when the
-camera turns), texel snapping, normal-offset bias, front-face culling.
+camera turns), texel snapping, normal-offset bias, front-face culling. Alpha shapes the shadow:
+masked cutouts cast the shape of their texture, and blended surfaces cast a hashed-alpha shadow as
+dark as they are opaque.
 
 **PBR + IBL.** Cook-Torrance GGX with Smith height-correlated visibility and Schlick Fresnel. Ambient
 light is split-sum, baked at startup into irradiance and prefiltered cubemaps; the BRDF term is an
@@ -265,7 +267,12 @@ clip at different times:
 ```js
 const model = scene.add(asset);
 model.play('Walk', { loop: true, speed: 1 });
+model.play('Run', { fade: 0.3 });   // cross-fade over 0.3 s
 ```
+
+A fade blends every playing clip into the new one: positions, scales and morph weights by weighted
+average, rotations by a sign-aligned, normalized quaternion sum. A single clip takes the same path
+it always did and pays nothing for it.
 
 `engine.run` advances every clip before composition, so there is no tick to wire up. Sampling writes
 through the same setters a user would, which is what makes an animated node dirty its transform and
@@ -289,7 +296,9 @@ absolute value because glTF does not bound weights to [0,1].
 point on the canvas. By default it tests the world bounding boxes the culler already maintains, so
 it costs no extra memory. Load an asset with `{ retainGeometry: true }` and the same call answers
 with triangles instead: the boxes become a broad phase that sorts candidates by entry distance and
-stops as soon as the next one starts further away than the best hit. Either way it composes
+stops as soon as the next one starts further away than the best hit. Skinned and morphed meshes
+are tested as posed: the few candidates the ray reaches are deformed on the click exactly as the
+vertex shader deforms them. Either way it composes
 transforms and refreshes bounds itself, so the answer never depends on whether you happened to
 render since the last move.
 
@@ -318,15 +327,9 @@ giving up the rest of the frame. There is never a wall, only a floor.
 
 These are real and currently unaddressed.
 
-- **Deforming geometry is picked at its bounding box.** Skinned and morphed meshes answer at the
-  box even with `retainGeometry`, because the retained triangles are the undeformed mesh. Exact
-  picking would mean deforming them per click.
-- **One clip at a time per instance.** Cross-fading needs a weight per channel and somewhere to
-  accumulate partial poses, which is a different data structure than the player has.
 - **No transparency path is exact per fragment.** Sorting is exact for separated convex objects and
   wrong for interpenetrating ones; OIT needs no order and is approximate everywhere. Being exact
   means depth peeling, which is a pass per layer.
-- **Blended geometry casts no shadow**, on either path.
 - **Exactly coincident surfaces flicker instead of z-fighting in a fixed pattern.** GPU culling
   hands out draw slots with an atomic, so the order objects draw in within a batch can change
   from frame to frame, and two different objects at *exactly* the same depth swap which one wins.

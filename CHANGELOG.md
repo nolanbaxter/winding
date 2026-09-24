@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-24
+
+**Three limitations, gone.** The rest of the list is either how real-time
+rendering works or a trade we measured and chose.
+
+### Added
+
+- **Animation cross-fades.** `play(name, { fade })` blends every playing clip
+  into the new one over `fade` seconds:
+  - positions, scales and morph weights by weighted average;
+  - rotations by a sign-aligned, normalized quaternion sum, so q and -q blend
+    the short way round.
+
+  A node only some clips animate takes their value; it doesn't blend toward
+  the rest pose. A single clip is sampled exactly as before, at no cost.
+- **Skinned and morphed meshes are picked as posed.** With `retainGeometry`, the
+  joint influences and morph deltas are kept too. The few candidates a ray
+  reaches are deformed on the click, the way the vertex shader deforms them.
+  They used to answer at their bounding box, which was right there even where
+  the character wasn't.
+
+### Fixed
+
+- **Alpha shapes the shadow.** The shadow pass had no fragment stage, which
+  caused two problems:
+  - Masked cutouts cast their whole quad, so foliage cast rectangles, and a
+    caster masked away entirely still cast a full shadow.
+  - Blended geometry cast nothing at all.
+
+  Now masked casters are alpha-tested against their own cutoff. Blended ones
+  cast a hashed-alpha shadow as dark as they are opaque: at 50% alpha, a
+  measured partial shadow. Opaque casters keep the depth-only path. Both new
+  variants cull nothing, since alpha-shaped geometry is leaves, panes and
+  cards, where front-face culling would drop the whole shadow.
+
 ## [0.11.0] - 2026-09-24
 
 **Limits, lifetimes, strangers' files, and still scenes.** Six audits:
@@ -1519,7 +1554,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/nolanbaxter/winding/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/nolanbaxter/winding/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/nolanbaxter/winding/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/nolanbaxter/winding/compare/v0.9.1...v0.10.0

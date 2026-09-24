@@ -111,7 +111,10 @@ function gpuDescriptor(desc) {
     // No colour targets means no fragment stage at all. A shadow pass writes
     // only depth, and giving it an empty fragment stage is a validation error
     // rather than a no-op -- the stage has to be absent, not empty.
-    fragment: (desc.targets?.length ?? 0) === 0 ? undefined : {
+    // A descriptor that NAMES a fragment entry keeps its stage with no
+    // targets: that is a depth-only pass that discards, which is how an
+    // alpha-tested caster gets a shadow the shape of its texture.
+    fragment: (desc.targets?.length ?? 0) === 0 && desc.fragmentEntry === undefined ? undefined : {
       module: fragmentShader.module,
       entryPoint: desc.fragmentEntry ?? 'fs',
       targets: desc.targets,

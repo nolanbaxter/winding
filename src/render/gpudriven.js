@@ -383,6 +383,10 @@ export class GpuDriven {
     // Blended renderables, which never enter a batch. See rebuildBatches.
     this.transparentItems = new Uint32Array(capacity);
     this.transparentCount = 0;
+    /** Per blended item, in transparentItems order: what the shadow pass binds. */
+    this.blendedCasters = [];
+    /** Per blended item, in transparentItems order: what the shadow pass binds. */
+    this.blendedCasters = [];
     /** Slots [0, opaqueCount) of the visible list belong to the cull shader. */
     this.opaqueCount = 0;
 
@@ -599,6 +603,8 @@ export class GpuDriven {
     this.batchPrimitive.length = 0;
     this.batchCount = 0;
     this.transparentCount = 0;
+    this.blendedCasters.length = 0;
+    this.blendedCasters.length = 0;
 
     for (let i = 0; i < count; i++) {
       const material = scene.renderableMaterial[i];
@@ -613,6 +619,9 @@ export class GpuDriven {
       if (this.materials.isTransparent(material)) {
         this.itemBatch[i] = NOT_BATCHED;
         this.transparentItems[this.transparentCount++] = i;
+        this.blendedCasters.push({
+          primitive: scene.renderablePrimitive[i], material, skinned: scene.renderableSkin[i] >= 0,
+        });
         continue;
       }
 
@@ -655,15 +664,19 @@ export class GpuDriven {
     }
     this.opaqueCount = running;
 
-    // Static draw order for the shadow pass, which culls nothing. Blended
-    // geometry is absent from it, so it casts no shadow -- the honest result
-    // for glass, and the alternative is an opaque silhouette that is wrong in
-    // a more visible way.
+    // Static draw order for the shadow pass, which culls nothing: every batch's
+    // slice, then every blended caster, in the tail the batches leave free.
+    // Blended geometry casts a hashed-alpha shadow -- see shadows.js -- where it
+    // used to cast none, which was right for clear glass and wrong for smoke,
+    // tinted glass and every leaf drawn with BLEND.
     const cursor = new Uint32Array(Math.max(this.batchCount, 1));
     for (let i = 0; i < count; i++) {
       const batch = this.itemBatch[i];
       if (batch === NOT_BATCHED) continue;
       this.batchOrder[this.batchFirst[batch] + cursor[batch]++] = i;
+    }
+    for (let k = 0; k < this.transparentCount; k++) {
+      this.batchOrder[this.opaqueCount + k] = this.transparentItems[k];
     }
 
     // Per-batch uniform holding that slice's base index, once per phase. The
@@ -685,7 +698,7 @@ export class GpuDriven {
     const queue = this.rhi.queue;
     queue.writeBuffer(this.itemBatchBuffer, 0, this.itemBatch, 0, count);
     queue.writeBuffer(this.batchFirstBuffer, 0, this.batchFirst, 0, Math.max(this.batchCount, 1));
-    queue.writeBuffer(this.batchOrderBuffer, 0, this.batchOrder, 0, Math.max(this.opaqueCount, 1));
+    queue.writeBuffer(this.batchOrderBuffer, 0, this.batchOrder, 0, Math.max(this.opaqueCount + this.transparentCount, 1));
     queue.writeBuffer(this.batchBuffer, 0, this.batchStaging);
     // Item indices have just been reassigned, so last frame's flags describe
     // whatever used to occupy those slots. Starting from zero costs one frame

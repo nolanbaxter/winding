@@ -590,6 +590,7 @@ function growableGpu(materials) {
   gpu.indirectData = new Uint32Array(gpu.batchCapacity * 2 * 5);
   gpu.batchStaging = new ArrayBuffer(gpu.alignment * (gpu.batchCapacity * 2 + 1));
   gpu.batchPrimitive = [];
+  gpu.blendedCasters = [];
   gpu.buffersRevision = 0;
   gpu.stats = {};
   for (const k of ['itemBatchBuffer', 'batchFirstBuffer', 'batchOrderBuffer',
@@ -637,6 +638,7 @@ function batchesFor(scene) {
   gpu.batchSkinned = new Uint8Array(16);
   gpu.batchSize = new Uint32Array(16);
   gpu.batchPrimitive = [];
+  gpu.blendedCasters = [];
   gpu.transparentItems = new Uint32Array(16);
   gpu.alignment = 256;
   gpu.batchStaging = new ArrayBuffer(256 * 33);
@@ -1163,22 +1165,25 @@ test('picking sees the posed box, not the authored one', () => {
   const hit = rig.scene.raycast(vec3Create(0, 31, 10), vec3Create(0, 0, -1));
   assert.ok(hit, 'a ray through the raised geometry must hit it');
 });
-test('a skinned mesh is picked at its box, not at bind-pose triangles', () => {
-  // Combining two features made a gap: step 3 gave skinned renderables a POSED
-  // box, while the narrow phase still reaches its triangles by inverting the
-  // mesh node's matrix -- which skinned vertices do not follow. Left alone
-  // that is not approximate, it misses, so a posed character with retained
-  // geometry became unpickable while its box said it was right there.
+test('a skinned mesh is picked at its posed triangles, not its box or its bind pose', () => {
+  // The bind-pose triangles reached through the mesh node's matrix miss a
+  // posed character outright, and its box answers for empty space. The
+  // triangles are skinned on the click instead, the way the shader skins them.
   const rig = riggedScene();
-  // Retain geometry, which is what turns the narrow phase on.
+  // Retain geometry -- the fixture already carries the joint influences.
   rig.scene.renderablePrimitive[0].positions = rig.positions;
   rig.scene.renderablePrimitive[0].indices = Uint32Array.from([0, 1, 2, 2, 1, 3]);
 
+  // Shear the top edge far up and to the side: the quad becomes a thin
+  // parallelogram, and its box is mostly empty.
   const joint = rig.scene.skins[0].joints[1];
-  rig.scene.transforms.setPosition(joint, 0, 30, 0);
+  rig.scene.transforms.setPosition(joint, 10, 30, 0);
 
-  const hit = rig.scene.raycast(vec3Create(0, 31, 10), vec3Create(0, 0, -1));
-  assert.ok(hit, 'the posed geometry must still be pickable with retainGeometry on');
+  const hit = rig.scene.raycast(vec3Create(9.5, 31, 10), vec3Create(0, 0, -1));
+  assert.ok(hit, 'a ray through the posed geometry hits it');
+  close(hit.distance, 10, EPS, 'at the triangle, not the front of a box');
+  assert.equal(rig.scene.raycast(vec3Create(-0.5, 31, 10), vec3Create(0, 0, -1)), null,
+    'and a ray through the empty corner of its box misses');
 });
 
 test('an unskinned mesh still gets the triangle test', () => {

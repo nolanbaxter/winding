@@ -262,6 +262,74 @@ test('a non-looping clip that lands exactly on its end is finished', () => {
   assert.equal(player.finished, true);
 });
 
+test('a fade blends from one clip to the next, then leaves only the new one', () => {
+  const player = new AnimationPlayer([
+    clip('translation', [0, 1], [0, 0, 0, 0, 0, 0], 'LINEAR', 'idle'),
+    clip('translation', [0, 1], [10, 0, 0, 10, 0, 0], 'LINEAR', 'walk'),
+  ], ENTITY_OF, ENTITIES);
+  const t = recorder();
+  player.play('idle');
+  player.advance(0.1, t);
+  player.play('walk', { fade: 1 });
+
+  player.advance(0.5, t);
+  close(t.position[0], 5, EPS, 'halfway through the fade');
+  assert.equal(player.tracks.length, 2);
+  assert.equal(player.clip.name, 'walk', 'the player reports the clip it is heading to');
+
+  player.advance(0.5, t);
+  close(t.position[0], 10, EPS, 'all the way');
+  assert.equal(player.tracks.length, 1, 'the faded clip is dropped');
+});
+
+test('rotations blend along the short way, whatever sign a clip stores', () => {
+  // q and -q are one rotation. Summed as stored, a quarter turn given as -q
+  // would pull the blend the long way round.
+  const s = Math.sin(Math.PI / 4), c = Math.cos(Math.PI / 4);
+  const player = new AnimationPlayer([
+    clip('rotation', [0, 1], [0, 0, 0, 1, 0, 0, 0, 1], 'LINEAR', 'a'),
+    clip('rotation', [0, 1], [0, -s, 0, -c, 0, -s, 0, -c], 'LINEAR', 'b'),
+  ], ENTITY_OF, ENTITIES);
+  const t = recorder();
+  player.play('a');
+  player.advance(0, t);
+  player.play('b', { fade: 1 });
+  player.advance(0.5, t);
+  // Halfway between none and a quarter turn about Y is an eighth of a turn.
+  const [x, y, z, w] = t.rotation;
+  close(Math.abs(y), Math.sin(Math.PI / 8), 1e-5, 'y');
+  close(Math.abs(w), Math.cos(Math.PI / 8), 1e-5, 'w');
+  close(x, 0, EPS); close(z, 0, EPS);
+});
+
+test('a node only the new clip animates takes its value during a fade', () => {
+  // Blending toward the rest pose would be inventing an opinion the clip
+  // that leaves this node alone never gave.
+  const scaleOnly = clip('scale', [0, 1], [2, 2, 2, 2, 2, 2], 'LINEAR', 'grow');
+  const player = new AnimationPlayer([
+    clip('translation', [0, 1], [0, 0, 0, 0, 0, 0], 'LINEAR', 'still'), scaleOnly,
+  ], ENTITY_OF, ENTITIES);
+  const t = recorder();
+  player.play('still');
+  player.advance(0, t);
+  player.play('grow', { fade: 1 });
+  player.advance(0.25, t);
+  assert.deepEqual(t.scale, [2, 2, 2]);
+});
+
+test('without a fade, play replaces whatever was playing', () => {
+  const player = new AnimationPlayer([
+    clip('translation', [0, 1], [0, 0, 0, 0, 0, 0], 'LINEAR', 'a'),
+    clip('translation', [0, 1], [4, 0, 0, 4, 0, 0], 'LINEAR', 'b'),
+  ], ENTITY_OF, ENTITIES);
+  const t = recorder();
+  player.play('a');
+  player.play('b');
+  assert.equal(player.tracks.length, 1);
+  player.advance(0.1, t);
+  close(t.position[0], 4);
+});
+
 test('speed scales time, and a negative speed wraps backwards', () => {
   const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], ENTITY_OF, ENTITIES);
   const t = recorder();

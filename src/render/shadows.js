@@ -30,13 +30,17 @@ import {
 } from '../core/math/mat4.js';
 import { vec3Create, vec3Normalize } from '../core/math/vec3.js';
 import { compileShader } from '../rhi/shader.js';
-import { createPipelineLayout, GROUP_FRAME, GROUP_DRAW } from '../rhi/bindgroups.js';
+import { createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW } from '../rhi/bindgroups.js';
+import { ALPHA_MASK } from './material.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
 import { VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 
 export const MAX_CASCADES = 4;
 
-/** Depth-only. No fragment stage at all -- half the work of the forward pass. */
+/**
+ * Depth-only for everything opaque: no fragment stage at all, half the work of
+ * the forward pass. Casters shaped by alpha get the fragment stage they need.
+ */
 export const SHADOW_SHADER = /* wgsl */ `
 struct Cascade {
   viewProjection : mat4x4<f32>,
@@ -73,8 +77,23 @@ struct Batch {
 @group(0) @binding(5) var<storage, read> morphWeights : array<f32>;
 @group(3) @binding(0) var<uniform> batch : Batch;
 
-// Positions only. The shadow pass has no fragment stage, so the normal and
-// tangent deltas the forward pass reads would be fetched and discarded.
+// The material, for the casters whose shape comes from alpha. Only the fields
+// alpha needs are read, but the struct is the forward pass's, byte for byte.
+struct Material {
+  baseColor         : vec4<f32>,
+  emissive          : vec4<f32>,
+  roughness         : f32,
+  normalScale       : f32,
+  alphaCutoff       : f32,
+  occlusionStrength : f32,
+  uvSets            : f32,
+};
+@group(2) @binding(0) var<uniform> material     : Material;
+@group(2) @binding(1) var          baseColorMap : texture_2d<f32>;
+@group(2) @binding(6) var          surfSampler  : sampler;
+
+// Positions only. Nothing here shades, so the normal and tangent deltas the
+// forward pass reads would be fetched and discarded.
 fn morphPosition(draw : DrawData, vertex : u32, position : vec3<f32>) -> vec3<f32> {
   let count = draw.morphCount & 0xffffu;
   if (count == 0u) { return position; }
@@ -102,6 +121,78 @@ fn vs(
   let draw = drawData[order[batch.firstVisible + instance]];
   let moved = morphPosition(draw, vertex, position);
   return cascade.viewProjection * draw.model * vec4<f32>(moved, 1.0);
+}
+
+struct AlphaOut {
+  @builtin(position) clip  : vec4<f32>,
+  @location(0)       uv    : vec2<f32>,
+  @location(1)       uv1   : vec2<f32>,
+  @location(2)       alpha : f32,
+};
+
+@vertex
+fn vsAlpha(
+  @builtin(instance_index) instance : u32,
+  @builtin(vertex_index)   vertex   : u32,
+  @location(0) position : vec3<f32>,
+  @location(2) uv       : vec2<f32>,
+  @location(4) uv1      : vec2<f32>,
+  @location(5) color    : vec4<f32>,
+) -> AlphaOut {
+  let draw = drawData[order[batch.firstVisible + instance]];
+  var out : AlphaOut;
+  out.clip = cascade.viewProjection * draw.model * vec4<f32>(morphPosition(draw, vertex, position), 1.0);
+  out.uv = uv;
+  out.uv1 = uv1;
+  out.alpha = color.a;
+  return out;
+}
+
+@vertex
+fn vsSkinnedAlpha(
+  @builtin(instance_index) instance : u32,
+  @builtin(vertex_index)   vertex   : u32,
+  @location(0) position : vec3<f32>,
+  @location(2) uv       : vec2<f32>,
+  @location(4) uv1      : vec2<f32>,
+  @location(5) color    : vec4<f32>,
+  @location(6) joints   : vec4<u32>,
+  @location(7) weights  : vec4<f32>,
+) -> AlphaOut {
+  let draw = drawData[order[batch.firstVisible + instance]];
+  let base = draw.paletteOffset;
+  let skin = palette[base + joints.x] * weights.x
+           + palette[base + joints.y] * weights.y
+           + palette[base + joints.z] * weights.z
+           + palette[base + joints.w] * weights.w;
+  var out : AlphaOut;
+  out.clip = cascade.viewProjection * skin * vec4<f32>(morphPosition(draw, vertex, position), 1.0);
+  out.uv = uv;
+  out.uv1 = uv1;
+  out.alpha = color.a;
+  return out;
+}
+
+/** The forward pass's alpha, from the same three factors in the same UV set. */
+fn surfaceAlpha(v : AlphaOut) -> f32 {
+  let uv = select(v.uv, v.uv1, (u32(material.uvSets) & 1u) != 0u);
+  return textureSample(baseColorMap, surfSampler, uv).a * material.baseColor.a * v.alpha;
+}
+
+// MASK: the forward pass's own cutoff, so the shadow has the texture's shape.
+@fragment
+fn fsMask(v : AlphaOut) {
+  if (surfaceAlpha(v) < material.alphaCutoff) { discard; }
+}
+
+// BLEND: a texel is covered with probability alpha, against a fixed dither
+// per shadow-map texel (interleaved gradient noise). The filtered lookup then
+// averages neighbouring texels into a shadow as dark as the surface is opaque.
+// Fixed to the texel, so a still light and a still caster give a still shadow.
+@fragment
+fn fsHashed(v : AlphaOut) {
+  let threshold = fract(52.9829189 * fract(dot(v.clip.xy, vec2<f32>(0.06711056, 0.00583715))));
+  if (surfaceAlpha(v) <= threshold) { discard; }
 }
 
 // The same skinning and morphing the forward pass does, for the same reason
@@ -243,9 +334,9 @@ export function stableShadowDistance(reach, floor) {
 }
 
 export class ShadowMaps {
-  static async create(rhi, pipelines, drawLayout, options = {}) {
+  static async create(rhi, pipelines, drawLayout, options = {}, materialLayout = null) {
     const maps = new ShadowMaps(rhi, options);
-    await maps._init(pipelines, drawLayout);
+    await maps._init(pipelines, drawLayout, materialLayout);
     return maps;
   }
 
@@ -336,7 +427,7 @@ export class ShadowMaps {
     this._up = vec3Create();
   }
 
-  async _init(pipelines, drawLayout) {
+  async _init(pipelines, drawLayout, materialLayout = null) {
     const rhi = this.rhi;
     this.shader = await compileShader(rhi.device, SHADOW_SHADER, 'shadow.wgsl');
 
@@ -438,7 +529,36 @@ export class ShadowMaps {
       this.descriptor, mirror(this.descriptor),
       this.skinnedDescriptor, mirror(this.skinnedDescriptor),
     ];
-    await pipelines.warm(this.descriptors);
+
+    // Casters whose shape comes from alpha: MASK batches, tested against the
+    // material's cutoff, and blended items, hashed. Both need the material, so
+    // they have their own layout, and a fragment stage that writes nothing.
+    // Culling nothing: alpha-shaped geometry is leaves, panes and cards -- open
+    // surfaces, where front-face culling would drop whichever side faces the
+    // light, and with it the whole shadow. Winding is then moot, so there is
+    // no mirrored copy either. Indexed by hashed * 2 + skinned.
+    this.alphaDescriptors = [];
+    if (materialLayout !== null) {
+      const alphaLayout = createPipelineLayout(rhi.device, {
+        [GROUP_FRAME]: this.cascadeLayout,
+        [GROUP_MATERIAL]: materialLayout,
+        [GROUP_DRAW]: drawLayout,
+      }, 'shadow-alpha');
+      for (const hashed of [false, true]) {
+        for (const skinned of [false, true]) {
+          this.alphaDescriptors.push({
+            ...this.descriptor,
+            label: `shadow-${hashed ? 'hashed' : 'mask'}${skinned ? '-skinned' : ''}`,
+            layout: alphaLayout,
+            vertexEntry: skinned ? 'vsSkinnedAlpha' : 'vsAlpha',
+            fragmentEntry: hashed ? 'fsHashed' : 'fsMask',
+            buffers: skinned ? [VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT] : [VERTEX_BUFFER_LAYOUT],
+            primitive: { ...this.descriptor.primitive, cullMode: 'none' },
+          });
+        }
+      }
+    }
+    await pipelines.warm([...this.descriptors, ...this.alphaDescriptors]);
 
     // One bound executor per cascade, built once. The graph stores a function
     // per pass, and building them per frame would allocate MAX_CASCADES
@@ -614,7 +734,12 @@ export class ShadowMaps {
     // the cull compute once per cascade against its own ortho box, which needs
     // a six-plane frustum -- the extraction in frustum.js assumes a perspective
     // matrix and produces five.
+    // Depth-only casters first. The alpha ones bind a material in group 2,
+    // where these pipelines expect the empty group, so they come after.
+    const materials = gpu.materials;
+    const alpha = this.alphaDescriptors.length > 0;
     for (let b = 0; b < gpu.batchCount; b++) {
+      if (alpha && materials.alphaModes[gpu.batchMaterial[b]] === ALPHA_MASK) continue;
       const primitive = gpu.batchPrimitive[b];
       const skinned = gpu.batchSkinned[b];
       const variant = skinned * 2 + gpu.batchMirrored[b];
@@ -627,6 +752,49 @@ export class ShadowMaps {
       if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
       pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
       pass.drawIndexed(primitive.indexCount, gpu.batchSize[b]);
+    }
+    if (alpha) this._encodeAlphaCasters(pass, gpu, materials);
+  }
+
+  /** MASK batches, then blended items, each shaped by its material's alpha. */
+  _encodeAlphaCasters(pass, gpu, materials) {
+    let bound = null;
+    let boundMaterial = -1;
+    const draw = (hashed, skinned, material, primitive) => {
+      const pipeline = this._pipelines.get(this.alphaDescriptors[(hashed ? 2 : 0) + (skinned ? 1 : 0)]);
+      if (pipeline !== bound) { pass.setPipeline(pipeline); bound = pipeline; }
+      if (material !== boundMaterial) {
+        pass.setBindGroup(GROUP_MATERIAL, materials.bindGroup(material));
+        boundMaterial = material;
+      }
+      pass.setVertexBuffer(0, primitive.vertexBuffer);
+      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
+      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
+    };
+
+    for (let b = 0; b < gpu.batchCount; b++) {
+      const material = gpu.batchMaterial[b];
+      if (materials.alphaModes[material] !== ALPHA_MASK) continue;
+      const primitive = gpu.batchPrimitive[b];
+      draw(false, gpu.batchSkinned[b] === 1, material, primitive);
+      pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
+      pass.drawIndexed(primitive.indexCount, gpu.batchSize[b]);
+    }
+
+    // Blended casters sit after the batches in the static order, and are drawn
+    // through firstInstance against a batch base of zero -- the slot the
+    // transparent pass uses. Neighbours that bind alike share one call.
+    const casters = gpu.blendedCasters;
+    if (casters.length === 0) return;
+    pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.transparentBatchOffset()]);
+    for (let k = 0; k < casters.length;) {
+      const { primitive, material, skinned } = casters[k];
+      let run = 1;
+      while (k + run < casters.length && casters[k + run].primitive === primitive
+        && casters[k + run].material === material && casters[k + run].skinned === skinned) run++;
+      draw(true, skinned, material, primitive);
+      pass.drawIndexed(primitive.indexCount, run, 0, 0, gpu.opaqueCount + k);
+      k += run;
     }
   }
 

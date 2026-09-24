@@ -260,7 +260,7 @@ export class Renderer {
     this.shader = await compileShader(this.rhi.device, PBR_SHADER, 'pbr.wgsl');
     if (this.oit) await this._initOit();
     this.shadows = await ShadowMaps.create(
-      this.rhi, this.pipelines, this.drawLayout, this.shadowOptions,
+      this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout,
     );
     this.skybox = await SkyboxPass.create(this.rhi, this.pipelines);
     /**
