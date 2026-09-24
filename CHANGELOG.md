@@ -17,9 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descriptor -- and reuses the last result when it matches. Nothing is
   cached by remembering to invalidate: the signature is everything compile
   reads, so a resize, a toggle or a new pass cannot match. Measured on the
-  demo scene with the benchmark, three runs each: compile 0.095-0.105ms ->
-  0.020-0.025ms a frame, CPU frame 1.21-1.44ms -> 1.10-1.35ms, and 989 of
-  990 frames reused.
+  demo scene with the benchmark, cache on and off in alternating 100-frame
+  blocks of one page, eight each: graph build 0.28ms -> 0.20ms with no
+  overlap between the blocks, CPU frame 1.06ms -> 0.97ms. 989 of 990 frames
+  reused the compile.
 
 ## [0.9.0] - 2026-09-24
 
