@@ -139,6 +139,10 @@ export class OrbitController {
 
   /** @param dt seconds since the last frame; 0 snaps straight to the target */
   update(dt) {
+    // A camera riding a node belongs to the node (Camera.follow). Writing the
+    // pose here as well would make the two fight every frame.
+    if (this.camera.following) return;
+
     // Frame-rate independent exponential decay. The naive `x += (target - x) *
     // k` eases faster on a fast display, which makes the feel change with the
     // monitor. This does not.

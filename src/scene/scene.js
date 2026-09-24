@@ -13,6 +13,7 @@ import { assertFinite } from '../core/assert.js';
 import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
 import { TransformStore } from './transform.js';
 import { Node } from './node.js';
+import { Camera } from './camera.js';
 import {
   updateWorldBounds, unionWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds,
 } from './bounds.js';
@@ -119,6 +120,13 @@ export class Scene {
     this._morphOf = new Map();   // entity -> index into this.morphs
     /** Root entity -> AnimationPlayer, for asset instances that have clips. */
     this._players = new Map();
+
+    /**
+     * Cameras that came in with assets, in the order they were added. Each
+     * already follows its node, so an animated camera plays with the clip.
+     * Hand one to engine.run as the camera, or ignore them.
+     */
+    this.cameras = [];
   }
 
   /**
@@ -201,6 +209,15 @@ export class Scene {
           this._addRenderable(entity, primitive, skinned, morphed);
         }
       }
+
+      // A light or camera on a node is the node's, exactly as in glTF: where
+      // it is and which way it points are the node's transform. Directional
+      // lights arrive as null and are skipped; see gltf/parse.js.
+      const light = node.light >= 0 ? asset.lights?.[node.light] : null;
+      if (light) this._attachLight(entity, light);
+
+      const spec = node.camera >= 0 ? asset.cameras?.[node.camera] : null;
+      if (spec) this.cameras.push(cameraFor(spec).follow(new Node(this, entity)));
 
       const childEntities = [];
       for (const child of node.children) childEntities.push(visit(child, entity));
@@ -377,6 +394,13 @@ export class Scene {
         this.renderableMatrixSlot[i] = this.renderableMatrixSlot[last];
         this.renderableMaterial[i] = this.renderableMaterial[last];
         this.renderablePrimitive[i] = this.renderablePrimitive[last];
+        // Skin and morph move with their renderable. They were left behind,
+        // so the survivor took the deleted object's skin palette and morph
+        // weights: remove one character and another starts wearing its pose.
+        this.renderableSkin[i] = this.renderableSkin[last];
+        this.renderableMorph[i] = this.renderableMorph[last];
+        this.renderableMorphExtent[i] = this.renderableMorphExtent[last];
+        this.renderableMorphPad[i] = this.renderableMorphPad[last];
         this.localMin.copyWithin(i * 3, last * 3, last * 3 + 3);
         this.localMax.copyWithin(i * 3, last * 3, last * 3 + 3);
         // World bounds move with their renderable too. Without this the
@@ -387,7 +411,14 @@ export class Scene {
         this.worldMax.copyWithin(i * 3, last * 3, last * 3 + 3);
       }
       this.renderablePrimitive[last] = undefined;
+      this.renderableMorphExtent[last] = null;
       this.revision++;
+    }
+
+    // Imported cameras on a doomed node go with it. A camera the caller made
+    // and pointed at the node just stops following on its next update.
+    if (this.cameras.length > 0) {
+      this.cameras = this.cameras.filter((camera) => !dying.has(camera.following?.entity));
     }
 
     // Lights on any doomed entity go too. Before the entities are freed, so
@@ -443,13 +474,6 @@ export class Scene {
     outerAngle = 0.5,
     parent = null,
   } = {}) {
-    if (this.lightCount >= this.lightCapacity) {
-      const capacity = grownCapacity(this.lightCapacity, this.lightCount + 1);
-      this.lights = growArray(this.lights, capacity, LIGHT_FLOATS);
-      this.lightEntity = growArray(this.lightEntity, capacity);
-      this.lightCapacity = capacity;
-    }
-
     // Aim a spot by rotating its node: -Z onto the requested direction.
     let rotation;
     if (direction) {
@@ -465,11 +489,7 @@ export class Scene {
       rotation,
       parent: parent ? parent.entity : NULL_HANDLE,
     });
-
-    const index = this.lightCount++;
-    this.lightEntity[index] = entity;
-    this._lightOf.set(entity, index);
-    this._writeLightProperties(index, {
+    this._attachLight(entity, {
       color, intensity, radius, spot: direction !== null, innerAngle, outerAngle,
     });
 
@@ -537,6 +557,23 @@ export class Scene {
         light[o + 10] = z * inv;
       }
     }
+  }
+
+  /**
+   * Make an existing entity a light. addLight makes the entity first; an
+   * imported glTF node already is one.
+   */
+  _attachLight(entity, properties) {
+    if (this.lightCount >= this.lightCapacity) {
+      const capacity = grownCapacity(this.lightCapacity, this.lightCount + 1);
+      this.lights = growArray(this.lights, capacity, LIGHT_FLOATS);
+      this.lightEntity = growArray(this.lightEntity, capacity);
+      this.lightCapacity = capacity;
+    }
+    const index = this.lightCount++;
+    this.lightEntity[index] = entity;
+    this._lightOf.set(entity, index);
+    this._writeLightProperties(index, properties);
   }
 
   /**
@@ -844,3 +881,16 @@ export const LIGHT_SPOT = 1;
 
 /** The axis a spot shines along, in its own space: -Z, as in glTF. */
 const LIGHT_FORWARD = Object.freeze([0, 0, -1]);
+
+/** A Camera for an imported glTF camera, before it is pointed at its node. */
+function cameraFor(spec) {
+  if (!spec.orthographic) return new Camera({ fovY: spec.fovY, near: spec.near });
+
+  // An orthographic Camera shows 2 d tan(fovY / 2) at distance d from its
+  // target, and following keeps that distance. So the file's half height,
+  // ymag, is set by placing the target at d = ymag / tan(fovY / 2).
+  const camera = new Camera({ near: spec.near, far: spec.far, orthographic: true });
+  camera.target.set([0, 0, 0]);
+  camera.position.set([0, 0, spec.halfHeight / Math.tan(camera.fovY * 0.5)]);
+  return camera;
+}

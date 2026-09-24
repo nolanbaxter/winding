@@ -202,6 +202,8 @@ editor pane or an ultrawide rather than only at 16:9.
 headlamp on a moving car, a torch in an animated hand. A spot aims down its node's -Z, as glTF's
 `KHR_lights_punctual` defines it, so it turns with whatever it is attached to. Colour, intensity,
 radius and cone change through `light.setLight({ ... })`; position and aim are the node's.
+`camera.follow(node)` does the same for a camera: parent a node to a car and the camera rides it,
+looking down the node's -Z.
 
 **Two transparency paths.** Blended geometry is culled and sorted back-to-front on the CPU, then
 drawn after every opaque batch. `{ oit: true }` swaps that for weighted-blended order-independent
@@ -218,8 +220,10 @@ analytic polynomial rather than a lookup texture, which removes a texture and a 
 
 **glTF 2.0 import.** Geometry, materials, images, skins, morph targets and animations, including
 byte-strided and normalized accessors, sparse accessors, generated tangents, both UV sets with
-per-texture `texCoord`, and vertex colours. Not cameras or KHR extensions -- a document that
-*requires* an extension is refused rather than loaded into geometry that is quietly wrong.
+per-texture `texCoord`, and vertex colours. Point and spot lights (`KHR_lights_punctual`) and cameras
+come in on their nodes, so a lamp or a camera animated in Blender plays with the clip; imported
+cameras are in `scene.cameras`. Directional lights are left to the scene's sun. Any other extension
+a document *requires* is refused rather than loaded into geometry that is quietly wrong.
 
 **Animation.** All three glTF interpolation modes — LINEAR, STEP and CUBICSPLINE — with rotations
 slerped rather than lerped. Playback state is per instance, so two copies of one asset play the same

@@ -679,6 +679,18 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       }
       results.push('an off-centre light lights an orthographic view');
 
+      // A lamp that came IN THE FILE. The CPU suites prove the importer reads
+      // it and the scene attaches it, each against hand-built data; this is
+      // the one place engine.load's asset is what reaches scene.add.
+      const fileLit = await shootWith({
+        baseColorFactor: [0.6, 0.6, 0.6, 1],
+        lamp: { translation: [0, 0, 0.2], light: { type: 'point', intensity: 6, range: 0.5 } },
+      }, null);
+      if (!(fileLit[0] > unlit[0] + 20)) {
+        throw new Error(`a light imported from glTF did not reach the surface: ${show(unlit)} -> ${show(fileLit)}`);
+      }
+      results.push('a light imported from glTF lights the surface');
+
       // Emissive with no texture. The default map was black, so this factor
       // used to be multiplied away entirely.
       const dim = await shoot({ baseColorFactor: [0.05, 0.05, 0.05, 1] });

@@ -108,6 +108,65 @@ export class Camera {
      */
     this.inverseProjection = mat4Create();
     this.aspect = 1;
+
+    /** The node this camera rides, or null. See follow(). */
+    this.following = null;
+  }
+
+  /**
+   * Ride a node: every update() takes position and aim from its world
+   * transform. `null` stops, leaving the camera where it last was.
+   *
+   *   const mount = scene.createNode({ parent: car });   // behind and above
+   *   mount.setPosition(0, 2, 6);
+   *   camera.follow(mount);                              // a chase camera
+   *
+   * The same move lights made: a camera on a moving thing used to mean
+   * copying its position every frame. Now it is parented like anything else,
+   * and it is what a glTF camera is -- the scene makes one of these for each.
+   *
+   * THE NODE'S -Z IS THE VIEW DIRECTION and its +Y is up, the glTF camera
+   * convention and the same -Z a spot light shines down. Scale is ignored.
+   *
+   * THE NODE IS IN CHARGE. position, target and up are overwritten on every
+   * update, and an OrbitController on this camera stands aside while it
+   * follows -- two owners of one pose would fight every frame. To hand control
+   * back: follow(null), then controller.syncFromCamera().
+   *
+   * DISTANCE TO TARGET IS KEPT, which only matters orthographically: that is
+   * where an orthographic camera's view height comes from. Whatever it was
+   * when following began, it still is.
+   *
+   * A node that is destroyed ends the follow; the camera stays put.
+   */
+  follow(node) {
+    this.following = node;
+    return this;
+  }
+
+  /** Take the followed node's world pose. Called by update(). */
+  _takePoseFromNode(node) {
+    if (!node.alive) {
+      this.following = null;
+      return;
+    }
+    const m = FOLLOW_MATRIX;
+    node.scene.transforms.worldMatrixInto(m, node.entity);
+
+    const distance = Math.hypot(
+      this.position[0] - this.target[0],
+      this.position[1] - this.target[1],
+      this.position[2] - this.target[2],
+    ) || 1;
+    // Columns of the world matrix are the node's axes, scaled. Normalizing
+    // drops the scale, which has no meaning for a viewpoint.
+    const forward = Math.hypot(m[8], m[9], m[10]) || 1;
+    const up = Math.hypot(m[4], m[5], m[6]) || 1;
+    for (let i = 0; i < 3; i++) {
+      this.position[i] = m[12 + i];
+      this.target[i] = m[12 + i] - (m[8 + i] / forward) * distance;
+      this.up[i] = m[4 + i] / up;
+    }
   }
 
   /**
@@ -195,6 +254,7 @@ export class Camera {
   /** Recompute from the current position/target/fov. Call once per frame. */
   update(aspect) {
     this.aspect = aspect;
+    if (this.following !== null) this._takePoseFromNode(this.following);
     mat4LookAt(this.view, this.position, this.target, this.up);
     if (this.orthographic) {
       const halfHeight = this.orthographicHalfHeight();
@@ -286,3 +346,6 @@ export class Camera {
 const FORWARD = vec3Create();
 const RIGHT = vec3Create();
 const UP = vec3Create();
+
+/** Scratch for follow. */
+const FOLLOW_MATRIX = mat4Create();

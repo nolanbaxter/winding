@@ -8,7 +8,10 @@
 //   const model = await loadGLTF(bytes);
 //   instantiate(model, entities, transforms);   // becomes entities
 //
-// Not handled: cameras, KHR extensions.
+// Lights (KHR_lights_punctual) and cameras come through as data on the nodes
+// that carry them; the scene makes them live. Directional lights do not: the
+// scene has one sun, and an asset that silently replaced yours on add() would
+// be worse than one that leaves it alone. No other extension is handled.
 //
 // Skins and morph targets both come through whole -- the joint list, the
 // inverse bind matrices and the per-vertex influences (skin.js); the per-target
@@ -81,12 +84,12 @@ export async function loadGLTF(source, options = {}) {
     throw new Error(`glTF: version ${version} is not supported (this reads 2.x)`);
   }
 
-  const required = json.extensionsRequired ?? [];
-  if (required.length > 0) {
+  const unsupported = (json.extensionsRequired ?? []).filter((e) => !SUPPORTED_EXTENSIONS.has(e));
+  if (unsupported.length > 0) {
     // Loading anyway would produce geometry that is wrong in a way nothing
     // reports -- Draco-compressed buffers read as noise, quantized meshes come
     // out the wrong size. Say so.
-    throw new Error(`glTF: requires unsupported extensions: ${required.join(', ')}`);
+    throw new Error(`glTF: requires unsupported extensions: ${unsupported.join(', ')}`);
   }
 
   const buffers = await resolveBuffers(json, binary, options);
@@ -178,6 +181,8 @@ function buildModel(json, buffers) {
     meshes,
     materials,
     skins,
+    lights: readLights(json),
+    cameras: readCameras(json),
     animations: readAnimations(json, buffers, meshes),
     roots: findRoots(json, nodes),
     // The raw document, for subsystems that need what this view deliberately
@@ -545,6 +550,100 @@ function readNodes(json) {
       // checked against the mesh, and which mesh that is may be a node this
       // loop has not reached. buildModel resolves them.
       weights: node.weights ?? null,
+      // Indices into model.lights / model.cameras, or -1. A light is data on
+      // a node in glTF, exactly as it is in the scene: the node is where it
+      // is and which way it points.
+      light: node.extensions?.KHR_lights_punctual?.light ?? -1,
+      camera: node.camera ?? -1,
+    };
+  });
+}
+
+// ------------------------------------------------------- lights and cameras
+
+/** Extensions this importer understands well enough to accept as required. */
+const SUPPORTED_EXTENSIONS = new Set(['KHR_lights_punctual']);
+
+/**
+ * KHR_lights_punctual, in the terms scene.addLight uses.
+ *
+ * Almost nothing to translate, because the engine's lights were built to this
+ * spec: intensity is candela for both, a spot's angles are half-angles from its
+ * axis for both, it shines down its node's -Z for both, and the falloff the
+ * spec recommends -- inverse-square times clamp(1 - (d/range)^4)^2 -- is the
+ * shader's, term for term. So `range` IS the radius.
+ *
+ * Directional lights come back as null; see the header.
+ */
+function readLights(json) {
+  const lights = json.extensions?.KHR_lights_punctual?.lights ?? [];
+  return lights.map((light) => {
+    if (light.type !== 'point' && light.type !== 'spot') return null;
+    const color = light.color ?? [1, 1, 1];
+    const intensity = light.intensity ?? 1;
+    return {
+      name: light.name ?? '',
+      color,
+      intensity,
+      radius: light.range ?? unboundedLightRadius(intensity, color),
+      spot: light.type === 'spot',
+      innerAngle: light.spot?.innerConeAngle ?? 0,
+      outerAngle: light.spot?.outerConeAngle ?? Math.PI / 4,
+    };
+  });
+}
+
+/**
+ * How far a light with no `range` reaches.
+ *
+ * The spec says an absent range means infinite, and clustering cannot use one
+ * -- a light that reaches everywhere is tested against every cell. So the
+ * radius is where it stops mattering: a white surface facing the light gets
+ * irradiance I / d^2 and reflects radiance I / (pi d^2), and past the distance
+ * where that falls below 1/256 it is under one 8-bit step at exposure 1.
+ * Solving for d gives sqrt(256 I / pi). Derived from the display, not picked.
+ */
+export function unboundedLightRadius(intensity, color) {
+  const brightest = intensity * Math.max(color[0], color[1], color[2]);
+  return brightest > 0 ? Math.sqrt((256 * brightest) / Math.PI) : 0;
+}
+
+/**
+ * glTF cameras, in the terms the Camera constructor takes.
+ *
+ * Perspective drops two fields on purpose. `zfar`: the engine's perspective
+ * projection has no far plane, so geometry past it is drawn rather than cut.
+ * `aspectRatio`: the canvas decides the aspect, as it does for every camera
+ * -- the spec lets a runtime do that, and stretching to a ratio the viewport
+ * does not have would be the other option.
+ *
+ * Orthographic keeps `ymag` (half the view height) because an orthographic
+ * Camera derives its height from distance; the scene places it at the distance
+ * that shows exactly that.
+ */
+function readCameras(json) {
+  return (json.cameras ?? []).map((camera, i) => {
+    const name = camera.name ?? `camera_${i}`;
+    if (camera.type === 'orthographic') {
+      const o = camera.orthographic ?? {};
+      const far = o.zfar ?? 100;
+      return {
+        name,
+        orthographic: true,
+        // A zero znear is legal for orthographic glTF, and harmless to linear
+        // depth -- but the light clusters are sliced logarithmically from the
+        // near plane, and log(0) has no slices. A sliver of the box is free.
+        near: o.znear > 0 ? o.znear : far * 1e-4,
+        far,
+        halfHeight: o.ymag ?? 1,
+      };
+    }
+    const p = camera.perspective ?? {};
+    return {
+      name,
+      orthographic: false,
+      fovY: p.yfov ?? Math.PI / 3,
+      near: p.znear ?? 0.1,
     };
   });
 }

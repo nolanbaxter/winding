@@ -9,6 +9,7 @@ import { parseContainer } from '../src/scene/gltf/glb.js';
 import { readAccessorAsFloat32, readAccessorAsUint32 } from '../src/scene/gltf/accessor.js';
 import {
   loadGLTF, instantiate, VERTEX_STRIDE_FLOATS, VERTEX_STRIDE_BYTES, VERTEX_BUFFER_LAYOUT,
+  unboundedLightRadius,
   VERTEX_COLOR_INDEX,
 } from '../src/scene/gltf/parse.js';
 import { HandleAllocator, handleIndex } from '../src/core/handle.js';
@@ -776,6 +777,116 @@ await atest('an unsupported primitive mode names the mode', async () => {
 await atest('a required extension we cannot honor is refused up front', async () => {
   const json = { asset: { version: '2.0' }, extensionsRequired: ['KHR_draco_mesh_compression'] };
   await assert.rejects(() => loadGLTF(makeGLB(json, null)), /KHR_draco/);
+});
+
+// ------------------------------------------------ lights and cameras
+
+/** A document with no geometry: just nodes carrying lights and cameras. */
+function sceneryGLB({ lights = [], cameras, nodes, required } = {}) {
+  const json = {
+    asset: { version: '2.0' },
+    extensionsUsed: ['KHR_lights_punctual'],
+    extensions: { KHR_lights_punctual: { lights } },
+    nodes,
+    scenes: [{ nodes: nodes.map((_, i) => i) }],
+    scene: 0,
+  };
+  if (cameras) json.cameras = cameras;
+  if (required) json.extensionsRequired = required;
+  return makeGLB(json, null);
+}
+
+await atest('punctual lights import onto their nodes, in the engine\'s own terms', async () => {
+  const model = await loadGLTF(sceneryGLB({
+    lights: [
+      { type: 'point', color: [1, 0.5, 0.25], intensity: 30, range: 7 },
+      { type: 'spot', spot: { innerConeAngle: 0.1, outerConeAngle: 0.4 } },
+    ],
+    nodes: [
+      { name: 'bulb', extensions: { KHR_lights_punctual: { light: 0 } } },
+      { name: 'torch', extensions: { KHR_lights_punctual: { light: 1 } } },
+      { name: 'plain' },
+    ],
+  }));
+
+  assert.deepEqual(model.nodes.map((n) => n.light), [0, 1, -1]);
+  const [bulb, torch] = model.lights;
+  assert.deepEqual(bulb.color, [1, 0.5, 0.25]);
+  assert.equal(bulb.intensity, 30);
+  assert.equal(bulb.radius, 7, 'range is the radius: the spec\'s falloff is the shader\'s');
+  assert.equal(bulb.spot, false);
+
+  assert.equal(torch.spot, true);
+  assert.equal(torch.intensity, 1, 'spec default');
+  close(torch.innerAngle, 0.1);
+  close(torch.outerAngle, 0.4);
+});
+
+await atest('spot cone defaults are the spec\'s', async () => {
+  const model = await loadGLTF(sceneryGLB({
+    lights: [{ type: 'spot', range: 1 }],
+    nodes: [{ extensions: { KHR_lights_punctual: { light: 0 } } }],
+  }));
+  assert.equal(model.lights[0].innerAngle, 0);
+  close(model.lights[0].outerAngle, Math.PI / 4);
+});
+
+await atest('a light with no range reaches where it stops being visible', async () => {
+  // Absent range means infinite in the spec, which clustering cannot use. The
+  // derived radius is where a white surface drops below 1/256 radiance.
+  const model = await loadGLTF(sceneryGLB({
+    lights: [{ type: 'point', intensity: 20, color: [0.5, 1, 0.5] }],
+    nodes: [{ extensions: { KHR_lights_punctual: { light: 0 } } }],
+  }));
+  const radius = model.lights[0].radius;
+  close(radius, Math.sqrt((256 * 20) / Math.PI), 1e-6, 'sqrt(256 I / pi), brightest channel');
+  close(20 / (Math.PI * radius * radius), 1 / 256, 1e-9, 'radiance at the edge is one 8-bit step');
+  assert.equal(unboundedLightRadius(0, [1, 1, 1]), 0, 'a dark light reaches nowhere');
+});
+
+await atest('directional lights are left to the scene\'s sun', async () => {
+  const model = await loadGLTF(sceneryGLB({
+    lights: [{ type: 'directional', intensity: 3 }],
+    nodes: [{ extensions: { KHR_lights_punctual: { light: 0 } } }],
+  }));
+  assert.equal(model.lights[0], null);
+});
+
+await atest('KHR_lights_punctual is accepted as a required extension', async () => {
+  // Before lights were importable, requiring them refused the file outright.
+  const model = await loadGLTF(sceneryGLB({
+    lights: [{ type: 'point', range: 2 }],
+    nodes: [{ extensions: { KHR_lights_punctual: { light: 0 } } }],
+    required: ['KHR_lights_punctual'],
+  }));
+  assert.equal(model.lights.length, 1);
+  await assert.rejects(
+    () => loadGLTF(sceneryGLB({ nodes: [{}], required: ['KHR_lights_punctual', 'EXT_meshopt_compression'] })),
+    (error) => /EXT_meshopt/.test(error.message) && !/KHR_lights/.test(error.message),
+    'only the extension it cannot honour is named',
+  );
+});
+
+await atest('cameras import, perspective and orthographic', async () => {
+  const model = await loadGLTF(sceneryGLB({
+    cameras: [
+      { type: 'perspective', perspective: { yfov: 0.8, znear: 0.05, zfar: 500, aspectRatio: 2 } },
+      { type: 'orthographic', orthographic: { xmag: 4, ymag: 3, znear: 0, zfar: 50 } },
+    ],
+    nodes: [{ camera: 0 }, { camera: 1 }, {}],
+  }));
+  assert.deepEqual(model.nodes.map((n) => n.camera), [0, 1, -1]);
+
+  const [perspective, ortho] = model.cameras;
+  assert.equal(perspective.orthographic, false);
+  assert.equal(perspective.fovY, 0.8);
+  assert.equal(perspective.near, 0.05);
+  assert.equal('far' in perspective, false, 'perspective has no far plane here either');
+
+  assert.equal(ortho.orthographic, true);
+  assert.equal(ortho.halfHeight, 3);
+  assert.equal(ortho.far, 50);
+  assert.ok(ortho.near > 0, `a zero znear becomes a sliver, not a log(0): ${ortho.near}`);
 });
 
 await atest('an out-of-range index is caught at load, not at draw', async () => {

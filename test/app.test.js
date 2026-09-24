@@ -661,4 +661,193 @@ test('a camera sitting on its own target keeps the angles it had', () => {
   controller.detach();
 });
 
+test('a survivor keeps its own skin and morph when another renderable is removed', () => {
+  // Removal swap-compacts the renderable columns. It moved entity, material
+  // and bounds down but left skin and morph behind, so the survivor took the
+  // deleted object's palette and weights: remove one character and another
+  // starts wearing its pose.
+  const scene = new Scene({ capacity: 16 });
+  const primitive = fakeAsset().meshes[0].primitives[0];
+  const doomed = scene.createNode();
+  const survivor = scene.createNode();
+  scene._addRenderable(doomed.entity, primitive, 0, 0);
+  scene._addRenderable(survivor.entity, primitive, 1, 1);
+
+  doomed.destroy();
+
+  assert.equal(scene.renderableEntity[0], survivor.entity, 'it moved into slot 0');
+  assert.equal(scene.renderableSkin[0], 1, 'with its own skin');
+  assert.equal(scene.renderableMorph[0], 1, 'and its own weights');
+});
+
+// ------------------------------------------------ imported lights and cameras
+
+console.log('\nimported lights and cameras');
+
+/** A child node under a root, carrying whatever `extra` says. */
+function carrierAsset(extra, assetExtra) {
+  return {
+    ...fakeAsset({
+      nodes: [node('root', { children: [1] }), node('carrier', { position: [0, 1, 0], ...extra })],
+      roots: [0],
+    }),
+    ...assetExtra,
+  };
+}
+
+test('an imported light is its node, and follows the asset', () => {
+  const scene = new Scene({ capacity: 16 });
+  const root = scene.add(carrierAsset({ light: 0 }, {
+    lights: [{ color: [1, 0.5, 0.25], intensity: 9, radius: 4, spot: false, innerAngle: 0, outerAngle: 0.7 }],
+  }));
+  root.setPosition(5, 0, 0);
+  scene.update();
+  scene.refreshLights();
+
+  assert.equal(scene.lightCount, 1);
+  vecClose([...scene.lights.subarray(0, 4)], [5, 1, 0, 4], EPS, 'asset offset + node offset, radius');
+  vecClose([...scene.lights.subarray(4, 8)], [1, 0.5, 0.25, 9], EPS, 'colour + intensity');
+});
+
+test('an imported spot turns with the asset', () => {
+  const scene = new Scene({ capacity: 16 });
+  const root = scene.add(carrierAsset({ light: 0 }, {
+    lights: [{ color: [1, 1, 1], intensity: 1, radius: 4, spot: true, innerAngle: 0.1, outerAngle: 0.5 }],
+  }));
+  root.setRotationAxisAngle([0, 1, 0], Math.PI / 2);   // quarter turn about +Y
+  scene.update();
+  scene.refreshLights();
+  vecClose([...scene.lights.subarray(8, 11)], [-1, 0, 0], 1e-5, '-Z swung onto -X');
+});
+
+test('a directional light in an asset is skipped, not misread', () => {
+  const scene = new Scene({ capacity: 16 });
+  scene.add(carrierAsset({ light: 0 }, { lights: [null] }));
+  assert.equal(scene.lightCount, 0);
+});
+
+test('removing an asset removes its lights and its cameras', () => {
+  const scene = new Scene({ capacity: 16 });
+  const kept = scene.add(carrierAsset({ camera: 0 }, { cameras: [{ orthographic: false, fovY: 1, near: 0.1 }] }));
+  const doomed = scene.add(carrierAsset({ light: 0, camera: 0 }, {
+    lights: [{ color: [1, 1, 1], intensity: 1, radius: 4, spot: false }],
+    cameras: [{ orthographic: false, fovY: 1, near: 0.1 }],
+  }));
+  assert.equal(scene.cameras.length, 2);
+
+  doomed.destroy();
+  assert.equal(scene.lightCount, 0);
+  assert.equal(scene.cameras.length, 1, 'only the doomed asset\'s camera went');
+  assert.ok(scene.cameras[0].following.alive, 'and the one left still has a live node');
+  assert.ok(kept.alive);
+});
+
+test('an imported camera sits on its node and looks down its -Z', () => {
+  const scene = new Scene({ capacity: 16 });
+  const root = scene.add(carrierAsset({ camera: 0 }, {
+    cameras: [{ orthographic: false, fovY: 0.8, near: 0.05 }],
+  }));
+  root.setPosition(0, 0, 10);
+  scene.update();
+
+  const [camera] = scene.cameras;
+  assert.equal(camera.fovY, 0.8);
+  assert.equal(camera.near, 0.05);
+  camera.update(1);
+  vecClose(camera.position, [0, 1, 10], EPS, 'on the node');
+  const dz = camera.target[2] - camera.position[2];
+  assert.ok(dz < 0 && Math.abs(camera.target[0]) < EPS, 'looking down -Z');
+});
+
+test('an imported orthographic camera shows the height the file asked for', () => {
+  // Orthographic height comes from distance to target, and following keeps
+  // that distance. The scene places it so the view is exactly 2 * ymag tall.
+  const scene = new Scene({ capacity: 16 });
+  scene.add(carrierAsset({ camera: 0 }, {
+    cameras: [{ orthographic: true, near: 0.01, far: 40, halfHeight: 3 }],
+  }));
+  scene.update();
+  const [camera] = scene.cameras;
+  camera.update(1);
+  close(camera.orthographicHalfHeight(), 3, 1e-5, 'ymag');
+  assert.equal(camera.far, 40);
+});
+
+// --------------------------------------------------------------- follow
+
+console.log('\ncamera follow');
+
+test('a following camera goes where its node goes, and points where it points', () => {
+  const scene = new Scene({ capacity: 16 });
+  const car = scene.createNode();
+  const mount = scene.createNode({ parent: car });
+  mount.setPosition(0, 2, 6);
+  const camera = new Camera().follow(mount);
+
+  car.setPosition(10, 0, 0);
+  car.setRotationAxisAngle([0, 1, 0], Math.PI / 2);   // car turns to face -X
+  scene.update();
+  camera.update(1);
+
+  // The mount's offset (0, 2, 6) turned a quarter about +Y is (6, 2, 0), and
+  // its -Z now points down -X: behind the car, looking the way it faces.
+  vecClose(camera.position, [16, 2, 0], 1e-5, 'behind the car');
+  const forward = [0, 1, 2].map((i) => camera.target[i] - camera.position[i]);
+  const length = Math.hypot(...forward);
+  vecClose(forward.map((v) => v / length), [-1, 0, 0], 1e-5, 'facing where the car faces');
+  vecClose(camera.up, [0, 1, 0], 1e-5, 'up is the node\'s +Y');
+});
+
+test('scale on the node does not leak into the view', () => {
+  const scene = new Scene({ capacity: 16 });
+  const mount = scene.createNode();
+  mount.setScale(3);
+  const camera = new Camera().follow(mount);
+  const before = Math.hypot(...[0, 1, 2].map((i) => camera.position[i] - camera.target[i]));
+  scene.update();
+  camera.update(1);
+  const after = Math.hypot(...[0, 1, 2].map((i) => camera.position[i] - camera.target[i]));
+  close(after, before, 1e-5, 'distance to target is kept, not scaled');
+  close(Math.hypot(...camera.up), 1, 1e-6, 'up stays unit');
+});
+
+test('a destroyed node ends the follow and leaves the camera where it was', () => {
+  const scene = new Scene({ capacity: 16 });
+  const mount = scene.createNode();
+  mount.setPosition(1, 2, 3);
+  const camera = new Camera().follow(mount);
+  scene.update();
+  camera.update(1);
+
+  mount.destroy();
+  camera.update(1);
+  assert.equal(camera.following, null);
+  vecClose(camera.position, [1, 2, 3], EPS, 'stayed put');
+});
+
+test('an orbit controller stands aside while its camera follows, and takes back over', () => {
+  const scene = new Scene({ capacity: 16 });
+  const mount = scene.createNode();
+  mount.setPosition(0, 0, 4);
+  const camera = new Camera();
+  const element = stubElement();
+  const controller = new OrbitController(camera, element, { distance: 10, pitch: 0, yaw: 0 });
+
+  camera.follow(mount);
+  scene.update();
+  camera.update(1);
+  drag(element, 400, 300, 500, 300);
+  controller.update(0);
+  // Checked BEFORE the camera's own update, which would paper over a write:
+  // picking reads camera.position directly, so a controller that moved it
+  // would aim the pick ray from the drag's pose rather than the node's.
+  vecClose(camera.position, [0, 0, 4], EPS, 'the node is in charge, not the drag');
+
+  // Handing back is the documented two steps, and nothing jumps.
+  camera.follow(null);
+  controller.syncFromCamera();
+  controller.update(0);
+  vecClose(camera.position, [0, 0, 4], 1e-5, 'the controller adopted the pose');
+});
+
 console.log(`\n${passed} checks passed\n`);

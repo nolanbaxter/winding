@@ -278,6 +278,7 @@ export class Winding {
     return {
       nodes: model.nodes, meshes, roots: model.roots, materialIds,
       animations: model.animations, skins: model.skins, source: model.source,
+      lights: model.lights, cameras: model.cameras,
     };
   }
 

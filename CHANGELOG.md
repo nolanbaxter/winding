@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Lights you attach, and a camera without perspective.**
+**Lights and cameras you attach -- from code or from the file -- and a camera without perspective.**
 
 Breaking: `addLight` returns a node, and the index-based light calls are
 gone. A light index was never stable -- removal swap-compacts the array -- so
@@ -37,8 +37,31 @@ anything holding one could end up pointing at a different light.
   camera still has no `far` at all.
 - `quatFromTo(out, from, to)`, the shortest rotation between two
   directions.
+- **`camera.follow(node)`.** The camera rides a node: position and aim come
+  from its world transform, looking down -Z with +Y up. A chase camera is a
+  node parented to the car; first person is one parented to the head. The
+  node is in charge -- an `OrbitController` on the camera stands aside while
+  it follows; `follow(null)` and `syncFromCamera()` hand control back. A
+  destroyed node ends the follow and leaves the camera where it was.
+- **glTF lights.** `KHR_lights_punctual` point and spot lights import onto
+  their nodes, so a lamp animated in Blender plays with the clip. The
+  engine's lights already matched the spec -- candela, half-angle cones, -Z,
+  and the same windowed falloff -- so `range` is the radius. An absent range
+  (infinite, per the spec) becomes the distance where the light falls below
+  one 8-bit step on a white surface: `sqrt(256 I / pi)`. Directional lights
+  are skipped rather than overwriting the scene's sun. A file that lists the
+  extension as required now loads.
+- **glTF cameras.** Perspective and orthographic cameras import as
+  `scene.cameras`, each already following its node. `zfar` is dropped for
+  perspective (there is no far plane) and the canvas decides the aspect;
+  orthographic `ymag` is honoured exactly.
 
 ### Fixed
+
+- **Removing a renderable handed its skin and morph to another one.** The
+  swap-remove moved entity, material and bounds down into the gap but left
+  the skin and morph columns behind, so the survivor wore the deleted object's
+  skin palette and morph weights.
 
 Each of these was invisible under perspective and would have broken the
 orthographic camera on arrival.

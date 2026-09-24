@@ -446,6 +446,8 @@ export function buildMorphedGLB() {
  * default both shipped.
  */
 export function buildFeatureGLB({
+  // A KHR_lights_punctual light on its own node: { translation, light }.
+  lamp = null,
   baseColorFactor = [0.9, 0.15, 0.1, 1],
   alphaMode,
   alphaCutoff,
@@ -536,6 +538,12 @@ export function buildFeatureGLB({
     scenes: [{ nodes: [0] }],
     scene: 0,
   };
+  if (lamp) {
+    json.extensionsUsed = ['KHR_lights_punctual'];
+    json.extensions = { KHR_lights_punctual: { lights: [lamp.light] } };
+    json.nodes.push({ name: 'lamp', translation: lamp.translation, extensions: { KHR_lights_punctual: { light: 0 } } });
+    json.scenes[0].nodes.push(1);
+  }
   const uris = [imageURI, normalImageURI].filter(Boolean);
   if (uris.length > 0) {
     json.images = uris.map((uri) => ({ uri }));
