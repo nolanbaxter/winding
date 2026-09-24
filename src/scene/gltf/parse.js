@@ -9,10 +9,15 @@
 //   instantiate(model, entities, transforms);   // becomes entities
 //
 // Lights (KHR_lights_punctual) and cameras come through as data on the nodes
-// that carry them; the scene makes them live, and a directional light becomes
-// the scene's sun for as long as the asset is in it (see Scene.sun).
-// KHR_materials_emissive_strength scales the emissive factor. No other
-// extension is handled.
+// that carry them, and the scene makes them live. A directional light joins
+// the scene's others; whether it casts the shadow is Scene.sun's call -- the
+// brightest does. KHR_materials_emissive_strength scales the emissive factor.
+// No other extension is handled.
+//
+// A MALFORMED FILE IS REFUSED, with the rule it broke, rather than loaded into
+// something quietly wrong: a NaN in a light colour spreads through bloom, an
+// index into nothing drops a light without a word, a bufferView longer than
+// its buffer reads whatever bytes come next as vertices.
 //
 // Skins and morph targets both come through whole -- the joint list, the
 // inverse bind matrices and the per-vertex influences (skin.js); the per-target
@@ -128,6 +133,16 @@ function buildModel(json, buffers) {
     };
   });
   const nodes = readNodes(json);
+  const lights = readLights(json);
+  const cameras = readCameras(json);
+  for (const node of nodes) {
+    if (node.light !== -1 && !isIndex(node.light, lights.length)) {
+      throw new Error(`glTF: node "${node.name}" names light ${JSON.stringify(node.light)}, which does not exist`);
+    }
+    if (node.camera !== -1 && !isIndex(node.camera, cameras.length)) {
+      throw new Error(`glTF: node "${node.name}" names camera ${JSON.stringify(node.camera)}, which does not exist`);
+    }
+  }
   const skins = readSkins(json, buffers);
 
   // Joint indices are only meaningful against a particular skin, and which
@@ -182,8 +197,8 @@ function buildModel(json, buffers) {
     meshes,
     materials,
     skins,
-    lights: readLights(json),
-    cameras: readCameras(json),
+    lights,
+    cameras,
     animations: readAnimations(json, buffers, meshes),
     roots: findRoots(json, nodes),
     // The raw document, for subsystems that need what this view deliberately
@@ -213,9 +228,19 @@ function buildPrimitive(json, buffers, primitive, label) {
   let positions = readAccessorAsFloat32(json, buffers, attributes.POSITION);
   let vertexCount = positions.length / 3;
 
+  if (primitive.material !== undefined && !isIndex(primitive.material, json.materials?.length ?? 0)) {
+    throw new Error(`glTF: ${label} names material ${primitive.material}, which does not exist`);
+  }
+
   let indices = primitive.indices !== undefined
     ? readAccessorAsUint32(json, buffers, primitive.indices)
     : sequentialIndices(vertexCount);
+
+  // A triangle list is three indices a triangle. A leftover one or two used to
+  // pass, and the tangent pass then wrote NaN into the vertex they named.
+  if (indices.length % 3 !== 0) {
+    throw new Error(`glTF: ${label} has ${indices.length} indices, which is not a whole number of triangles`);
+  }
 
   let normals = attributes.NORMAL !== undefined
     ? readAccessorAsFloat32(json, buffers, attributes.NORMAL) : null;
@@ -236,6 +261,9 @@ function buildPrimitive(json, buffers, primitive, label) {
   if (attributes.COLOR_0 !== undefined) {
     const raw = readAccessorAsFloat32(json, buffers, attributes.COLOR_0);
     const components = componentCountOf(json.accessors[attributes.COLOR_0].type);
+    // The one attribute checkLength below did not cover: reads past the end
+    // came back undefined and packed as transparent black.
+    checkLength(raw, vertexCount, components, 'COLOR_0');
     colors = new Float32Array(vertexCount * 4);
     for (let v = 0; v < vertexCount; v++) {
       const s = v * components;
@@ -485,7 +513,7 @@ function readMaterials(json) {
       // above 1, so ignoring it dims every such glow with nothing reported.
       // Applied here, once: the shader already takes the factor as a float.
       emissive: Float32Array.from(material.emissiveFactor ?? [0, 0, 0]).map(
-        (v) => v * (material.extensions?.KHR_materials_emissive_strength?.emissiveStrength ?? 1),
+        (v) => v * emissiveStrengthOf(material, i),
       ),
       alphaMode: material.alphaMode ?? 'OPAQUE',
       alphaCutoff: material.alphaCutoff ?? 0.5,
@@ -581,28 +609,68 @@ const SUPPORTED_EXTENSIONS = new Set(['KHR_lights_punctual', 'KHR_materials_emis
  * shader's, term for term. So `range` IS the radius.
  *
  * A directional light has no position and no reach, just a direction (its
- * node's -Z) and a colour at an intensity (lux, as the sun's is). An unknown
- * type comes back as null and is skipped.
+ * node's -Z) and a colour at an intensity (lux, as the sun's is).
+ *
+ * Every rule the extension states is checked here, because each one broken
+ * used to become something wrong on screen: a two-number colour put NaN in
+ * the light buffers, an inner cone past the outer one a hard edge, a negative
+ * range a light that never shone.
  */
 function readLights(json) {
-  const lights = json.extensions?.KHR_lights_punctual?.lights ?? [];
-  return lights.map((light) => {
+  const block = json.extensions?.KHR_lights_punctual;
+  if (block === undefined) return [];
+  if (!Array.isArray(block.lights)) {
+    throw new Error('glTF: KHR_lights_punctual has no lights array');
+  }
+  return block.lights.map((light, i) => {
+    const where = `glTF: light ${i}`;
+    if (light === null || typeof light !== 'object') throw new Error(`${where} is not an object`);
+    if (light.type !== 'point' && light.type !== 'spot' && light.type !== 'directional') {
+      throw new Error(`${where} has type ${JSON.stringify(light.type)}; KHR_lights_punctual defines point, spot and directional`);
+    }
     const color = light.color ?? [1, 1, 1];
+    if (!Array.isArray(color) || color.length !== 3 || !color.every((c) => Number.isFinite(c) && c >= 0)) {
+      throw new Error(`${where} color must be three non-negative numbers, got ${JSON.stringify(color)}`);
+    }
     const intensity = light.intensity ?? 1;
+    if (!(Number.isFinite(intensity) && intensity >= 0)) {
+      throw new Error(`${where} intensity must be a non-negative number, got ${intensity}`);
+    }
     if (light.type === 'directional') {
       return { name: light.name ?? '', type: 'directional', color, intensity };
     }
-    if (light.type !== 'point' && light.type !== 'spot') return null;
+    if (light.range !== undefined && !(Number.isFinite(light.range) && light.range > 0)) {
+      throw new Error(`${where} range must be a positive number, got ${light.range}`);
+    }
+    const innerAngle = light.spot?.innerConeAngle ?? 0;
+    const outerAngle = light.spot?.outerConeAngle ?? Math.PI / 4;
+    if (light.type === 'spot' && !(innerAngle >= 0 && innerAngle < outerAngle && outerAngle <= Math.PI / 2)) {
+      throw new Error(`${where} cone needs 0 <= inner < outer <= pi/2, got inner ${innerAngle} outer ${outerAngle}`);
+    }
     return {
       name: light.name ?? '',
       type: light.type,
       color,
       intensity,
       radius: light.range ?? unboundedLightRadius(intensity, color),
-      innerAngle: light.spot?.innerConeAngle ?? 0,
-      outerAngle: light.spot?.outerConeAngle ?? Math.PI / 4,
+      innerAngle,
+      outerAngle,
     };
   });
+}
+
+/** A whole number that indexes into an array of `count`. */
+function isIndex(value, count) {
+  return Number.isInteger(value) && value >= 0 && value < count;
+}
+
+/** KHR_materials_emissive_strength's factor for a material, checked. */
+function emissiveStrengthOf(material, i) {
+  const strength = material.extensions?.KHR_materials_emissive_strength?.emissiveStrength ?? 1;
+  if (!(Number.isFinite(strength) && strength >= 0)) {
+    throw new Error(`glTF: material ${i} emissiveStrength must be a non-negative number, got ${strength}`);
+  }
+  return strength;
 }
 
 /**
@@ -617,8 +685,44 @@ function readLights(json) {
  */
 export function unboundedLightRadius(intensity, color) {
   const brightest = intensity * Math.max(color[0], color[1], color[2]);
-  return brightest > 0 ? Math.sqrt((256 * brightest) / Math.PI) : 0;
+  return brightest > 0
+    ? TOE_STEEPENING * Math.sqrt((WINDOW_WORST * brightest) / (Math.PI * HALF_STEP_RADIANCE))
+    : 0;
 }
+
+/**
+ * The slopes below are the curves' slopes AT black. Just above it ACES
+ * steepens -- its x^2 term is seventeen times its linear one there -- so at
+ * the radius those slopes give, the worst pixel still moves 0.536 of a step,
+ * not 0.5. Bisection against the real curves needs 1.0335 more reach, and
+ * needs it at every intensity: a pixel depends only on I / d^2, so the
+ * intensity scales out and one factor serves them all. Rounded up to 1.034,
+ * because 1.0335 is the bisection's own bound and lands exactly on the half
+ * step. The gltf test re-derives it against the curves, so a change to the
+ * tonemap fails there.
+ */
+const TOE_STEEPENING = 1.034;
+
+/**
+ * The smallest radiance the display can show: half an 8-bit step, traced back
+ * through the output pipeline at exposure 1. Near black the ACES curve in
+ * render/post.js has slope b/e = 0.03/0.14 and the sRGB encode has slope
+ * 12.92 (core/color.js), so half a step out, (0.5 / 255), is this much in.
+ *
+ * This used to be taken as 1/256 of radiance directly, as if the output were
+ * linear. It is not: sRGB brightens the darks by 12.92x before ACES dims them
+ * by 0.21x, so a light cut at that radiance still showed as byte 3.6.
+ */
+const HALF_STEP_RADIANCE = (0.5 / 255) / (12.92 * (0.03 / 0.14));
+
+/**
+ * How far the window pulls a light below plain inverse-square, at worst,
+ * relative to the radiance at the radius: max over x = d/r of
+ * (1 - (1 - x^4)^2) / x^2 = 2x^2 - x^6, reached at x^4 = 2/3, which is
+ * (4/3) sqrt(2/3). A radius chosen so THIS stays under half a step makes the
+ * cutoff invisible everywhere inside it, not just at the edge.
+ */
+const WINDOW_WORST = (4 / 3) * Math.sqrt(2 / 3);
 
 /**
  * glTF cameras, in the terms the Camera constructor takes.
@@ -636,9 +740,18 @@ export function unboundedLightRadius(intensity, color) {
 function readCameras(json) {
   return (json.cameras ?? []).map((camera, i) => {
     const name = camera.name ?? `camera_${i}`;
+    const where = `glTF: camera ${i}`;
     if (camera.type === 'orthographic') {
       const o = camera.orthographic ?? {};
-      const far = o.zfar ?? 100;
+      // All four are required, and a box that ends before it starts has
+      // nothing in it -- it used to load and then fail on every frame.
+      if (!(Number.isFinite(o.xmag) && o.xmag !== 0 && Number.isFinite(o.ymag) && o.ymag !== 0)) {
+        throw new Error(`${where} xmag and ymag must be non-zero numbers`);
+      }
+      if (!(Number.isFinite(o.znear) && o.znear >= 0 && Number.isFinite(o.zfar) && o.zfar > o.znear)) {
+        throw new Error(`${where} needs 0 <= znear < zfar, got znear ${o.znear} zfar ${o.zfar}`);
+      }
+      const far = o.zfar;
       return {
         name,
         orthographic: true,
@@ -647,15 +760,24 @@ function readCameras(json) {
         // near plane, and log(0) has no slices. A sliver of the box is free.
         near: o.znear > 0 ? o.znear : far * 1e-4,
         far,
-        halfHeight: o.ymag ?? 1,
+        halfHeight: Math.abs(o.ymag),
       };
     }
+    if (camera.type !== 'perspective') {
+      throw new Error(`${where} has type ${JSON.stringify(camera.type)}; glTF defines perspective and orthographic`);
+    }
     const p = camera.perspective ?? {};
+    if (!(Number.isFinite(p.yfov) && p.yfov > 0 && p.yfov < Math.PI)) {
+      throw new Error(`${where} yfov must be between 0 and pi, got ${p.yfov}`);
+    }
+    if (!(Number.isFinite(p.znear) && p.znear > 0)) {
+      throw new Error(`${where} znear must be a positive number, got ${p.znear}`);
+    }
     return {
       name,
       orthographic: false,
-      fovY: p.yfov ?? Math.PI / 3,
-      near: p.znear ?? 0.1,
+      fovY: p.yfov,
+      near: p.znear,
     };
   });
 }

@@ -25,6 +25,8 @@ function targetCountOf(json, meshes, nodeIndex) {
   return meshes[mesh]?.targetCount ?? 0;
 }
 
+const INTERPOLATIONS = new Set(['LINEAR', 'STEP', 'CUBICSPLINE']);
+
 export function readAnimations(json, buffers, meshes = []) {
   return (json.animations ?? []).map((animation, a) => {
     const channels = [];
@@ -33,8 +35,13 @@ export function readAnimations(json, buffers, meshes = []) {
     for (const channel of animation.channels ?? []) {
       const path = channel.target?.path;
       const node = channel.target?.node;
-      // A channel with no node is legal and targets nothing.
+      // A channel with no node is legal and targets nothing. One naming a node
+      // that does not exist is not: it used to be kept, and the player skipped
+      // it forever without a word.
       if (node === undefined) continue;
+      if (!(Number.isInteger(node) && node >= 0 && node < (json.nodes?.length ?? 0))) {
+        throw new Error(`glTF: animation ${a} targets node ${node}, which does not exist`);
+      }
 
       const morph = path === 'weights';
       // A weights channel on a node whose mesh has no targets drives nothing.
@@ -48,6 +55,16 @@ export function readAnimations(json, buffers, meshes = []) {
       const times = readAccessorAsFloat32(json, buffers, sampler.input);
       const values = readAccessorAsFloat32(json, buffers, sampler.output);
       const interpolation = sampler.interpolation ?? 'LINEAR';
+      if (!INTERPOLATIONS.has(interpolation)) {
+        throw new Error(`glTF: animation ${a} uses interpolation ${JSON.stringify(interpolation)}; glTF defines LINEAR, STEP and CUBICSPLINE`);
+      }
+      // Keyframe times must strictly increase. The binary search that samples
+      // them assumes it, and the clip's length is read off the last one.
+      for (let k = 1; k < times.length; k++) {
+        if (!(times[k] > times[k - 1])) {
+          throw new Error(`glTF: animation ${a} keyframe times do not strictly increase (${times[k - 1]} then ${times[k]})`);
+        }
+      }
 
       // The output accessor's own type has to agree with the property being
       // driven, or the sampling below would read whatever happens to be next in

@@ -9,6 +9,8 @@
 // split means image decode can move to a worker later without the uploader
 // knowing.
 
+import { checkViewInBuffer } from './accessor.js';
+
 /**
  * Two flags on createImageBitmap that are wrong by default for textures.
  *
@@ -51,6 +53,8 @@ async function imageBlob(image, json, buffers, { baseURL, fetchImpl, index }) {
     if (!view) throw new Error(`bufferView ${image.bufferView} does not exist`);
 
     const buffer = buffers[view.buffer];
+    if (!buffer) throw new Error(`buffer ${view.buffer} was not resolved`);
+    checkViewInBuffer(view, buffer, image.bufferView);
     const start = buffer.byteOffset + (view.byteOffset ?? 0);
     const bytes = new Uint8Array(buffer.buffer, start, view.byteLength);
 

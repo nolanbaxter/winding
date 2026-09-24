@@ -831,29 +831,45 @@ await atest('spot cone defaults are the spec\'s', async () => {
   close(model.lights[0].outerAngle, Math.PI / 4);
 });
 
-await atest('a light with no range reaches where it stops being visible', async () => {
+await atest('a light with no range fades out where no pixel can tell', async () => {
   // Absent range means infinite in the spec, which clustering cannot use. The
-  // derived radius is where a white surface drops below 1/256 radiance.
+  // radius is chosen so the window that ends the light never moves a pixel by
+  // half an 8-bit step, through the output the engine really has: ACES (the
+  // constants in render/post.js), then the sRGB encode, at exposure 1. It used
+  // to treat radiance as if it went to the display linearly, which cut lights
+  // at 40% of this distance while still showing as byte 3.6.
   const model = await loadGLTF(sceneryGLB({
     lights: [{ type: 'point', intensity: 20, color: [0.5, 1, 0.5] }],
     nodes: [{ extensions: { KHR_lights_punctual: { light: 0 } } }],
   }));
   const radius = model.lights[0].radius;
-  close(radius, Math.sqrt((256 * 20) / Math.PI), 1e-6, 'sqrt(256 I / pi), brightest channel');
-  close(20 / (Math.PI * radius * radius), 1 / 256, 1e-9, 'radiance at the edge is one 8-bit step');
+  close(radius, unboundedLightRadius(20, [0.5, 1, 0.5]), 1e-9, 'the brightest channel decides');
+
+  const aces = (x) => Math.min(Math.max((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0), 1);
+  const srgb = (x) => (x <= 0.0031308 ? 12.92 * x : 1.055 * x ** (1 / 2.4) - 0.055);
+  const byte = (radiance) => 255 * srgb(aces(radiance));
+  let worst = 0;
+  for (let k = 1; k < 2000; k++) {
+    const d = (radius * k) / 2000;
+    const plain = 20 / (Math.PI * d * d);
+    const window = (1 - (d / radius) ** 4) ** 2;
+    worst = Math.max(worst, byte(plain) - byte(plain * window));
+  }
+  assert.ok(worst <= 0.5, `the window moves a pixel by ${worst.toFixed(3)} of a step`);
+  assert.ok(worst > 0.3, `and the radius is not wastefully far: worst ${worst.toFixed(3)}`);
   assert.equal(unboundedLightRadius(0, [1, 1, 1]), 0, 'a dark light reaches nowhere');
 });
 
 await atest('a directional light imports as a sun: colour and intensity, no reach', async () => {
   const model = await loadGLTF(sceneryGLB({
-    lights: [{ type: 'directional', intensity: 3, color: [1, 0.9, 0.8] }, { type: 'area' }],
+    lights: [{ type: 'directional', intensity: 3, color: [1, 0.9, 0.8] }],
     nodes: [{ extensions: { KHR_lights_punctual: { light: 0 } } }],
   }));
   assert.equal(model.lights[0].type, 'directional');
   assert.equal(model.lights[0].intensity, 3);
   assert.deepEqual(model.lights[0].color, [1, 0.9, 0.8]);
   assert.equal('radius' in model.lights[0], false, 'a sun reaches everywhere');
-  assert.equal(model.lights[1], null, 'a type the spec does not define is skipped');
+
 });
 
 await atest('emissive strength lifts the emissive factor past 1', async () => {
@@ -873,6 +889,94 @@ await atest('emissive strength lifts the emissive factor past 1', async () => {
 
   json.extensionsRequired = ['KHR_materials_emissive_strength'];
   await loadGLTF(makeGLB(json, null));   // accepted when required, too
+});
+
+await atest('a malformed light, camera or index is refused by name', async () => {
+  // Each of these used to load: into NaN, a silently dropped light or camera,
+  // a hard-edged or never-shining light, or a camera that failed every frame.
+  const onNode = (lights, extra = {}) => sceneryGLB({
+    lights, nodes: [{ extensions: { KHR_lights_punctual: { light: 0 } }, ...extra }],
+  });
+  const refused = [
+    [onNode([{ type: 'point', color: [1, 0.5], range: 5 }]), /color must be three/],
+    [onNode([{ type: 'point', intensity: -5 }]), /intensity must be/],
+    [onNode([{ type: 'point', range: -2 }]), /range must be a positive/],
+    [onNode([{ type: 'spot', spot: { innerConeAngle: 1, outerConeAngle: 0.5 } }]), /inner < outer/],
+    [onNode([{ type: 'spot', spot: { outerConeAngle: 3 } }]), /outer <= pi\/2/],
+    [onNode([{ type: 'area' }]), /defines point, spot and directional/],
+    [onNode([null]), /is not an object/],
+    [sceneryGLB({ lights: [{ type: 'point' }], nodes: [{ extensions: { KHR_lights_punctual: { light: 5 } } }] }), /names light 5/],
+    [sceneryGLB({ lights: [{ type: 'point' }], nodes: [{ extensions: { KHR_lights_punctual: { light: 0.5 } } }] }), /names light 0.5/],
+    [sceneryGLB({ nodes: [{ camera: 3 }] }), /names camera 3/],
+    [sceneryGLB({ cameras: [{ type: 'perspective', perspective: { yfov: 1, znear: 0 } }], nodes: [{ camera: 0 }] }), /znear must be/],
+    [sceneryGLB({ cameras: [{ type: 'perspective', perspective: { yfov: 0, znear: 0.1 } }], nodes: [{ camera: 0 }] }), /yfov must be/],
+    [sceneryGLB({ cameras: [{ type: 'orthographic', orthographic: { xmag: 1, ymag: 1, znear: 10, zfar: 5 } }], nodes: [{ camera: 0 }] }), /znear < zfar/],
+  ];
+  for (const [doc, why] of refused) await assert.rejects(() => loadGLTF(doc), why);
+
+  const malformedBlock = makeGLB({
+    asset: { version: '2.0' }, extensions: { KHR_lights_punctual: { lights: {} } }, nodes: [{}],
+  }, null);
+  await assert.rejects(() => loadGLTF(malformedBlock), /no lights array/);
+});
+
+/** The quad, rebuilt with one thing wrong: a material index, a short COLOR_0, or its own index list. */
+function rebuiltQuad({ material, colorsFor, indices = [0, 1, 2, 0, 2, 3] } = {}) {
+  const arrays = [QUAD.positions, Uint16Array.from(indices)];
+  if (colorsFor) arrays.push(new Float32Array(colorsFor * 4));
+  const { bytes, views } = packBuffer(arrays);
+  const accessors = [
+    { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+    { bufferView: 1, componentType: 5123, count: indices.length, type: 'SCALAR' },
+  ];
+  const attributes = { POSITION: 0 };
+  if (colorsFor) {
+    accessors.push({ bufferView: 2, componentType: 5126, count: colorsFor, type: 'VEC4' });
+    attributes.COLOR_0 = 2;
+  }
+  const prim = { attributes, indices: 1 };
+  if (material !== undefined) prim.material = material;
+  return makeGLB({
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors,
+    meshes: [{ primitives: [prim] }],
+    nodes: [{ mesh: 0 }],
+  }, bytes);
+}
+
+await atest('bad material, emissive strength, colour count or triangle count is refused', async () => {
+  const withMaterials = (materials) => makeGLB({ asset: { version: '2.0' }, materials }, null);
+  await assert.rejects(
+    () => loadGLTF(withMaterials([{ extensions: { KHR_materials_emissive_strength: { emissiveStrength: -3 } } }])),
+    /emissiveStrength must be/,
+  );
+  // A primitive naming a material that does not exist used to draw with
+  // whatever material the renderer registered first.
+  await assert.rejects(() => loadGLTF(rebuiltQuad({ material: 7 })), /names material 7/);
+  await assert.rejects(() => loadGLTF(rebuiltQuad({ colorsFor: 1 })), /COLOR_0 has 1 entries/);
+  await assert.rejects(() => loadGLTF(rebuiltQuad({ indices: [0, 1, 2, 0] })), /not a whole number of triangles/);
+});
+
+await atest('a bufferView that runs past its buffer is refused', async () => {
+  // It used to read on into the next GLB chunk and call it vertex data.
+  const { bytes } = packBuffer([Float32Array.from([1, 2, 3])]);   // a 12-byte buffer
+  const json = {
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: 12 }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: 48 }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+    nodes: [{ mesh: 0 }],
+  };
+  await assert.rejects(() => loadGLTF(makeGLB(json, bytes)), /bufferView 0 spans bytes 0..48 of a 12-byte buffer/);
+});
+
+await atest('an animation with a bad target, interpolation or clock is refused', async () => {
+  const base = { values: Float32Array.from([0, 0, 0, 1, 1, 1]), times: [0, 1] };
+  await assert.rejects(() => loadGLTF(animatedGLB({ ...base, interpolation: 'BOUNCY' }).glb), /interpolation "BOUNCY"/);
+  await assert.rejects(() => loadGLTF(animatedGLB({ ...base, times: [1, 0.5] }).glb), /do not strictly increase/);
 });
 
 await atest('KHR_lights_punctual is accepted as a required extension', async () => {
@@ -929,13 +1033,14 @@ await atest('an out-of-range index is caught at load, not at draw', async () => 
 });
 
 await atest('a mismatched attribute count is refused', async () => {
-  const { bytes, views } = packBuffer([QUAD.positions, Float32Array.from([0, 0, 1])]);
+  // One triangle's worth of positions, so the only thing wrong is NORMAL.
+  const { bytes, views } = packBuffer([QUAD.positions.slice(0, 9), Float32Array.from([0, 0, 1])]);
   const json = {
     asset: { version: '2.0' },
     buffers: [{ byteLength: bytes.length }],
     bufferViews: views.map((v) => ({ buffer: 0, ...v })),
     accessors: [
-      { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3' },
+      { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3' },
       { bufferView: 1, componentType: 5126, count: 1, type: 'VEC3' },
     ],
     meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 } }] }],

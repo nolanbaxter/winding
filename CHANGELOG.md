@@ -56,6 +56,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Removed assets kept their skin palettes and morph weights**, which were
   still multiplied and uploaded every frame -- a hundred add/remove cycles,
   a hundred palettes. Each is now owned by its node and removed with it.
+- **The glTF importer trusted what it was given.** It now refuses, naming the
+  rule broken, what used to load into something quietly wrong:
+  - light colours that are not three numbers (they put NaN in the light
+    buffers), negative intensity or range, spot cones outside
+    0 <= inner < outer <= pi/2, unknown light types, a malformed
+    KHR_lights_punctual block;
+  - node light or camera indices, and primitive material indices, that name
+    nothing (lights and cameras vanished; a material fell back to whatever
+    was registered first);
+  - cameras whose near and far planes cannot make a view (they loaded, then
+    failed every frame);
+  - a negative or non-numeric emission strength;
+  - a bufferView longer than its buffer (it read on into the next chunk as
+    vertex data), in both the accessor and the image readers;
+  - a COLOR_0 shorter than POSITION, and an index count that is not a whole
+    number of triangles (tangents wrote NaN into the leftover vertex);
+  - animation channels targeting a node that does not exist, unknown
+    interpolation, and keyframe times that do not strictly increase.
+- **Lights without a range were cut off at 40% of their visible reach.** The
+  radius assumed radiance reaches the display linearly; through sRGB and the
+  ACES tonemap the cut still showed. It is now derived from both curves, so
+  the fade that ends a light never moves a pixel by half an 8-bit step.
 
 ## [0.9.1] - 2026-09-24
 

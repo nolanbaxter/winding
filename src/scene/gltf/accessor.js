@@ -112,6 +112,22 @@ function componentInfo(componentType) {
  * An accessor with no bufferView is legal and means "all zeros" -- that form
  * exists precisely so a sparse accessor can describe a mostly-empty array.
  */
+/**
+ * A bufferView must lie inside its buffer. The accessor was checked against
+ * the view, but the view was never checked against the buffer, and both
+ * readers address the buffer's whole underlying ArrayBuffer -- so a view
+ * claiming more than its buffer has read straight on into whatever followed
+ * it in the file, a GLB's next chunk included, and called it vertex data.
+ */
+export function checkViewInBuffer(view, buffer, index) {
+  const end = (view.byteOffset ?? 0) + view.byteLength;
+  if (!(view.byteLength >= 0) || end > buffer.byteLength) {
+    throw new Error(
+      `glTF: bufferView ${index} spans bytes ${view.byteOffset ?? 0}..${end} of a ${buffer.byteLength}-byte buffer`,
+    );
+  }
+}
+
 function readInto(out, json, buffers, accessor, comp, perElement, normalized) {
   if (accessor.bufferView === undefined) return out;   // zeros, possibly + sparse
 
@@ -120,6 +136,7 @@ function readInto(out, json, buffers, accessor, comp, perElement, normalized) {
 
   const buffer = buffers[view.buffer];
   if (!buffer) throw new Error(`glTF: buffer ${view.buffer} was not resolved`);
+  checkViewInBuffer(view, buffer, accessor.bufferView);
 
   // MAT2 and MAT3 pad each COLUMN to four bytes when the component is
   // smaller than that, so their elements are not `bytes * count` long and the
