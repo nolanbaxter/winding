@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-24
+
+**Faster, measured.** No API changes. Every number below comes from the
+opt-in benchmark, with old and new alternating in one page -- runs a minute
+apart differ by more than most of these changes.
+
 ### Changed
 
 - **Lights find their clusters, instead of every cluster testing every
@@ -1225,7 +1231,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/nolanbaxter/winding/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/nolanbaxter/winding/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/nolanbaxter/winding/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/nolanbaxter/winding/compare/v0.7.2...v0.7.3
