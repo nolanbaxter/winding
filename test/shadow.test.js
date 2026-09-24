@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 import { mat4Create, mat4OrthographicReverseZ } from '../src/core/math/mat4.js';
 import { Camera } from '../src/scene/camera.js';
-import { cascadeSplits, frustumSliceSphere, MAX_CASCADES } from '../src/render/shadows.js';
+import { cascadeSplits, frustumSliceSphere, MAX_CASCADES, ShadowMaps } from '../src/render/shadows.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -243,6 +243,69 @@ test('snapping quantizes the box origin to whole texels', () => {
   // One texel of camera movement moves the box exactly one texel.
   for (const v of samples) {
     close(snap(v + texelSize) - snap(v), texelSize, 1e-9, 'a whole texel step');
+  }
+});
+
+// ------------------------------------------------- casters in the depth range
+
+console.log('\ncasters in the depth range');
+
+/** A ShadowMaps with just enough device to fit cascades in Node. */
+function nodeShadowMaps() {
+  globalThis.GPUTextureUsage ??= { RENDER_ATTACHMENT: 16, TEXTURE_BINDING: 4, COPY_DST: 2, COPY_SRC: 1, STORAGE_BINDING: 8 };
+  globalThis.GPUBufferUsage ??= { UNIFORM: 64, COPY_DST: 8, STORAGE: 128, COPY_SRC: 4 };
+  globalThis.GPUShaderStage ??= { VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 };
+  const rhi = {
+    device: { createTexture: () => ({ createView: () => ({}) }), createSampler: () => ({}) },
+    queue: { writeBuffer() {} },
+  };
+  const maps = new ShadowMaps(rhi, {});
+  maps.alignment = 256;
+  maps.cascadeStaging = new ArrayBuffer(256 * MAX_CASCADES);
+  return maps;
+}
+
+/** Light-clip depth of a world point in one cascade. */
+function cascadeDepth(maps, cascade, [x, y, z]) {
+  const m = maps.matrices;
+  const o = cascade * 16;
+  return (m[o + 2] * x + m[o + 6] * y + m[o + 10] * z + m[o + 14])
+    / (m[o + 3] * x + m[o + 7] * y + m[o + 11] * z + m[o + 15]);
+}
+
+test('a caster above the floor lands inside every cascade it is in', () => {
+  // The ordinary scene: a floor at y = 0, objects on it, sun overhead. The
+  // cascade's near plane used to be clamped to 0.01 in front of a light eye
+  // at the world origin, so everything on the sun's side of that eye -- every
+  // object standing on the floor -- was clipped out of the map and cast no
+  // shadow. Depth outside [0, 1] is exactly what WebGPU clips.
+  const maps = nodeShadowMaps();
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.position.set([0, 3, 8]);
+  camera.target.set([0, 0.5, 0]);
+  camera.update(16 / 9);
+  maps.update(camera, [-0.4, -1, -0.3]);
+
+  for (const point of [[0, 1, 0], [0, 2, 0], [1, 0, 1], [0, 0.01, 0]]) {
+    for (let c = 0; c < maps.activeCascades; c++) {
+      const z = cascadeDepth(maps, c, point);
+      assert.ok(z >= 0 && z <= 1, `[${point}] in cascade ${c} has depth ${z.toFixed(3)}, outside [0, 1]`);
+    }
+  }
+});
+
+test('where the scene sits does not decide whether it has shadows', () => {
+  // The same camera and geometry, 100 units lower, always worked -- it was
+  // entirely on the far side of the origin. Both must fit now.
+  const maps = nodeShadowMaps();
+  for (const lift of [0, -100, 100]) {
+    const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    camera.position.set([0, 3 + lift, 8]);
+    camera.target.set([0, 0.5 + lift, 0]);
+    camera.update(16 / 9);
+    maps.update(camera, [0, -1, 0]);
+    const z = cascadeDepth(maps, 0, [0, 1 + lift, 0]);
+    assert.ok(z >= 0 && z <= 1, `lifted by ${lift}: depth ${z.toFixed(3)}`);
   }
 });
 

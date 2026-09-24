@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Nothing standing on a floor cast a sun shadow.** Each cascade's light
+  view has its eye at the world origin, and its near plane was clamped to at
+  least 0.01 in front of it -- a perspective habit an orthographic box does
+  not need. Everything on the sun's side of the origin was clipped out of
+  the map, which for a floor at y = 0 under an overhead sun is every object
+  on it. Shadows appeared only for geometry below the origin, so whether a
+  scene had them depended on where it sat. No test checked that a shadow is
+  ever cast; one does now, on the GPU, and a Node check covers the depth
+  range. Found by two audits independently.
+
 ## [0.9.1] - 2026-09-24
 
 **Faster, measured.** No API changes. Every number below comes from the

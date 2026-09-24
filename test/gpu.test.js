@@ -804,6 +804,39 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       }
       results.push('a directional light without the shadow still lights');
 
+      // A SHADOW IS CAST -- nothing checked this, and for as long as the
+      // cascade near plane was clamped in front of a light eye at the world
+      // origin, nothing on the sun's side of that origin cast one. The floor
+      // is the feature quad at the origin; the blocker is a small quad in
+      // front of it, turned away from the sun so the shadow pass (which culls
+      // front faces) keeps it. The camera looks at the floor's centre from the
+      // side, past the blocker, where its shadow falls.
+      const shadowed = async (withBlocker) => {
+        const scene = probe.createScene();
+        scene.sun.setDirection(0, 0, -1);
+        scene.sun.setLight({ intensity: 3 });
+        scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] })));
+        if (withBlocker) {
+          scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], nodeScale: [0.25, 0.25, 1] })))
+            .setPosition(0, 0, 0.8).setRotationAxisAngle([0, 1, 0], Math.PI);
+        }
+        const cam = new Camera({ fovY: 0.9, near: 0.05 });
+        cam.position.set([2.5, 0.3, 2.5]);
+        cam.target.set([0, 0, 0]);
+        for (let i = 0; i < 3; i++) { probe.renderFrame(scene, cam); await probe.rhi.device.queue.onSubmittedWorkDone(); }
+        probe.renderFrame(scene, cam);
+        const pixels = await probe.rhi.readPixels();
+        const { width, height } = probe.rhi;
+        const i = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
+        return [pixels[i], pixels[i + 1], pixels[i + 2]];
+      };
+      const open = await shadowed(false);
+      const shaded = await shadowed(true);
+      if (!(shaded[0] + shaded[1] + shaded[2] < (open[0] + open[1] + open[2]) * 0.8)) {
+        throw new Error(`a caster above the floor cast no shadow: ${show(open)} -> ${show(shaded)}`);
+      }
+      results.push('a caster on the sun side of the origin casts a shadow');
+
       // Emissive with no texture. The default map was black, so this factor
       // used to be multiplied away entirely.
       const dim = await shoot({ baseColorFactor: [0.05, 0.05, 0.05, 1] });

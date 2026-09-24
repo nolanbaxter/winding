@@ -463,7 +463,14 @@ export class ShadowMaps {
     const snappedY = Math.floor(cy / texelSize) * texelSize;
 
     // The light looks down -Z, so a point at light-space z has distance -z.
-    const nearDistance = Math.max(-(cz + radius) - radius * this.casterExtent, 0.01);
+    //
+    // NEGATIVE IS FINE, and usually right. The eye sits at the world origin,
+    // so for a scene standing on a floor at y = 0 under an overhead sun, every
+    // caster is on the sun's side of the eye: behind it, at a negative
+    // distance. This used to be clamped to at least 0.01, a perspective habit
+    // an orthographic box has no use for -- and that clamp cut every one of
+    // those casters out of the map. Nothing above the floor cast a shadow.
+    const nearDistance = -(cz + radius) - radius * this.casterExtent;
     const farDistance = -(cz - radius);
 
     mat4OrthographicReverseZ(
