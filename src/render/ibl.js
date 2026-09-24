@@ -251,6 +251,13 @@ export class Environment {
     size = 128, irradianceSize = 32, prefilterMips = 6, label = 'env', sky = null,
   } = {}) {
     this.rhi = rhi;
+    const max = rhi.limits.maxTextureDimension2D;
+    if (size > max || irradianceSize > max) {
+      throw new RangeError(`Environment: size ${Math.max(size, irradianceSize)} is past this device's ${max}`);
+    }
+    // No more levels than the cube has. Asking for more made an invalid
+    // texture -- size 16 has five -- and every frame after it was black.
+    prefilterMips = Math.min(prefilterMips, mipLevelCountFor(size, size));
     this.prefilterMips = prefilterMips;
     /** What this environment was baked from. See DEFAULT_SKY. */
     this.sky = { ...DEFAULT_SKY, ...(sky ?? {}) };

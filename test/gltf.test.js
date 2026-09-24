@@ -1706,6 +1706,16 @@ await atest('a float JOINTS_0 accessor is refused too', async () => {
   );
 });
 
+await atest('an UNSIGNED_INT JOINTS_0 is refused rather than narrowed to 16 bits', async () => {
+  const glb = skinnedGLB();
+  const { json, binary } = parseContainer(glb);
+  // Same bytes, read as half as many 32-bit indices: the count halves too,
+  // so the stride still fits the view and only the type rule can object.
+  json.accessors[4].componentType = 5125;
+  json.accessors[4].count /= 2;
+  await assert.rejects(() => loadGLTF(makeGLB(json, binary)), /UNSIGNED_INT/);
+});
+
 await atest('a MAT3 of bytes is refused rather than read at the wrong stride', async () => {
   // glTF pads each COLUMN of a MAT2/MAT3 to four bytes when the component is
   // smaller, so the element is not bytes * count long and every matrix after

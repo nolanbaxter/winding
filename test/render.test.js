@@ -17,6 +17,9 @@ import { Scene } from '../src/scene/scene.js';
 import { GpuDriven, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
 import { SkinPalette } from '../src/render/skin.js';
 import { MorphStore } from '../src/render/morph.js';
+import { PipelineCache } from '../src/rhi/pipeline.js';
+import { createBuffer, storageCapacity } from '../src/rhi/buffer.js';
+import { grownCapacity } from '../src/core/grow.js';
 import { PBR_SHADER } from '../src/render/shaders/pbr.js';
 import { SHADOW_SHADER } from '../src/render/shadows.js';
 import { OIT_RESOLVE_SHADER } from '../src/render/shaders/oit.js';
@@ -1377,5 +1380,69 @@ test('freed morph ranges are reused, merged, and shrink the arena from the end',
   assert.equal(store.deltaCount, 0, 'freeing the tail gives back every hole touching it');
   assert.equal(store._holes.length, 0);
 });
+
+console.log('\ndevice limits');
+
+test('growth stops at what the device can hold, and says so', () => {
+  assert.equal(grownCapacity(1024, 1500), 2048, 'no ceiling: plain doubling');
+  assert.equal(grownCapacity(1024, 1500, 1800), 1800, 'a ceiling below the double is taken instead');
+  assert.throws(() => grownCapacity(1024, 1900, 1800, 'lights'), /1900 lights is past the 1800/);
+});
+
+test('a storage array holds what its binding AND its buffer allow, whichever is less', () => {
+  const rhi = { limits: { maxStorageBufferBindingSize: 128 << 20, maxBufferSize: 256 << 20 } };
+  assert.equal(storageCapacity(rhi, 128), (128 << 20) / 128, 'the binding limit decides');
+  rhi.limits.maxBufferSize = 64 << 20;
+  assert.equal(storageCapacity(rhi, 128), (64 << 20) / 128, 'and the buffer limit when it is lower');
+});
+
+test('a buffer past the device limit throws, rather than returning an invalid one', () => {
+  let created = 0;
+  const rhi = {
+    limits: { maxBufferSize: 1024 },
+    device: { createBuffer: () => { created++; return {}; } },
+  };
+  assert.throws(
+    () => createBuffer(rhi, { label: 'mesh.vertices', data: new Float32Array(300), usage: 0 }),
+    /mesh.vertices is 1200 bytes, past this device's 1024/,
+  );
+  assert.equal(created, 0, 'nothing was asked of the device');
+});
+
+console.log('\npipeline warming');
+
+await (async () => {
+  // Two loads at once. The second used to find the first one's variants
+  // marked as handled and return before they were compiled.
+  let release;
+  let compiles = 0;
+  const device = {
+    createRenderPipelineAsync: () => {
+      compiles++;
+      return new Promise((resolve) => { release = () => resolve({}); });
+    },
+  };
+  const cache = new PipelineCache(device);
+  const desc = { label: 'x', layout: 'auto', shader: { module: {}, id: 1 }, targets: [{ format: 'rgba16float' }] };
+
+  const first = cache.warm([desc]);
+  let secondDone = false;
+  const second = cache.warm([desc]).then(() => { secondDone = true; });
+  await Promise.resolve();
+  assert.equal(compiles, 1, 'one compile for one pipeline');
+  assert.equal(secondDone, false, 'the second warm waits for it rather than returning');
+  release();
+  await Promise.all([first, second]);
+  assert.equal(cache.pipelines.size, 1);
+  passed++;
+  console.log('  ok  a warm() that finds a compile in flight waits for it');
+
+  // A failed compile is not remembered as done.
+  const failing = new PipelineCache({ createRenderPipelineAsync: () => Promise.reject(new Error('bad')) });
+  await assert.rejects(() => failing.warm([desc]), /bad/);
+  assert.equal(failing._compiling.size, 0, 'and it is forgotten, so the next warm() tries again');
+  passed++;
+  console.log('  ok  a failed compile is retried, not cached');
+})();
 
 console.log(`\n${passed} checks passed\n`);

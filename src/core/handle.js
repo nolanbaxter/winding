@@ -107,12 +107,15 @@ export class HandleAllocator {
       throw new Error(`HandleAllocator: free of dead or invalid handle ${h >>> 0}`);
     }
     const index = h >>> GEN_BITS;
-    // Wrap past 255 back to 1, never to 0 -- generation 0 must stay reserved.
-    // ponytail: after 255 reuses of one slot a very old handle can alias a live
-    // one. Widen to 16 generation bits if that ever stops being theoretical.
-    const nextGen = (this.generations[index] + 1) & GEN_MASK;
-    this.generations[index] = nextGen === 0 ? 1 : nextGen;
-    this.freeList[this.freeCount++] = index;
     this.liveCount--;
+    // A slot out of generations is retired, never reused. It used to wrap back
+    // to 1, and the free list is a stack, so one spawn and despawn a frame
+    // cycled the same slot 255 times in four seconds -- after which a Node
+    // kept from the first spawn passed alive() and moved whatever owned the
+    // slot now. Retiring costs one index per 255 reuses of a slot; generation
+    // 0 already means "no handle", so nothing can match it.
+    const nextGen = (this.generations[index] + 1) & GEN_MASK;
+    this.generations[index] = nextGen;
+    if (nextGen !== 0) this.freeList[this.freeCount++] = index;
   }
 }

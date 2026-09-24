@@ -653,10 +653,19 @@ struct OitOut {
  * rgba16float, whose largest finite value is 65504, so the budget is that
  * divided by the depth complexity this stays well-behaved at. Past that the
  * sum saturates and the nearest layers stop dominating.
+ *
+ * That budget is per fragment, and the colour is HDR -- up to 65504 itself,
+ * a sun glint on smooth glass -- so the weight is also capped to keep
+ * colour * alpha * w inside it. It assumed colour <= 1, and one glint filled
+ * the target on its own: too dim where the store saturates, infinity spread
+ * by bloom as NaN where it does not. For colour <= 1 the cap never engages,
+ * and scaling w leaves a fragment's own accum.rgb / accum.a exact.
  */
-fn oitWeight(alpha : f32, depth : f32) -> f32 {
-  let maxWeight = 65504.0 / ${OIT_LAYER_BUDGET}.0;
-  return alpha * clamp(depth * depth * depth * maxWeight, 1.0, maxWeight);
+fn oitWeight(colour : vec4<f32>, depth : f32) -> f32 {
+  let budget = 65504.0 / ${OIT_LAYER_BUDGET}.0;
+  let w = colour.a * clamp(depth * depth * depth * budget, 1.0, budget);
+  let largest = max(max(colour.r, max(colour.g, colour.b)) * colour.a, colour.a);
+  return min(w, budget / max(largest, 1e-6));
 }
 
 @fragment
@@ -665,7 +674,7 @@ fn fsOIT(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> OitOut {
   // builtin(position).z in a fragment is already the value that would go to the
   // depth buffer, so under reverse-Z it is 1 at the near plane and falls
   // toward 0. No division and no unprojection.
-  let w = oitWeight(colour.a, clamp(v.clip.z, 0.0, 1.0));
+  let w = oitWeight(colour, clamp(v.clip.z, 0.0, 1.0));
 
   var out : OitOut;
   out.accum = vec4<f32>(colour.rgb * colour.a, colour.a) * w;

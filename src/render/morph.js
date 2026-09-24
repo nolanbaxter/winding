@@ -21,6 +21,7 @@
 // face rig is tens of megabytes. copyBufferToBuffer is what COPY_SRC is for.
 
 import { grownCapacity } from '../core/grow.js';
+import { storageCapacity } from '../rhi/buffer.js';
 
 /** Bytes per stored float, in both buffers. */
 export const MORPH_FLOAT_BYTES = 4;
@@ -106,7 +107,10 @@ export class MorphStore {
     const needed = base + deltas.length;
 
     if (needed > this.deltaCapacity) {
-      const capacity = grownCapacity(this.deltaCapacity, needed);
+      // Two high-end face rigs are enough to pass the default binding limit.
+      const capacity = grownCapacity(
+        this.deltaCapacity, needed, storageCapacity(this.rhi, MORPH_FLOAT_BYTES), 'morph delta floats',
+      );
       const grown = this._createDeltaBuffer(capacity);
 
       // Only the part that has been written. Copying the whole old buffer
@@ -195,7 +199,9 @@ export class MorphStore {
   }
 
   _growWeights(needed) {
-    const capacity = grownCapacity(this.weightCapacity, needed);
+    const capacity = grownCapacity(
+      this.weightCapacity, needed, storageCapacity(this.rhi, MORPH_FLOAT_BYTES), 'morph weights',
+    );
     this.weightData = new Float32Array(capacity);
     this.weightBuffer.destroy();
     this.weightBuffer = this._createWeightBuffer(capacity);

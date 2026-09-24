@@ -292,6 +292,12 @@ function buildPrimitive(json, buffers, primitive, label) {
       );
     }
     jointIndices = readAccessorAsUint32(json, buffers, attributes.JOINTS_0, 'VEC4');
+    // glTF 3.7.3.3: joints are unsigned byte or unsigned short, and the skin
+    // buffer packs them as uint16x4 on that promise. An unsigned int accessor
+    // is not valid glTF, and it would have been narrowed there without a word.
+    if (json.accessors[attributes.JOINTS_0].componentType === 5125) {
+      throw new Error('glTF: JOINTS_0 stores UNSIGNED_INT; joints are unsigned byte or unsigned short');
+    }
     jointWeights = readAccessorAsFloat32(json, buffers, attributes.WEIGHTS_0);
     checkLength(jointWeights, vertexCount, 4, 'WEIGHTS_0');
     if (jointIndices.length !== vertexCount * 4) {

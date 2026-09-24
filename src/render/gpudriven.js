@@ -28,6 +28,7 @@
 import { DEBUG, assert } from '../core/assert.js';
 import { compileShader } from '../rhi/shader.js';
 import { grownCapacity, growArray } from '../core/grow.js';
+import { storageCapacity } from '../rhi/buffer.js';
 import { FRUSTUM_PLANE_COUNT } from '../core/math/frustum.js';
 
 /**
@@ -446,7 +447,10 @@ export class GpuDriven {
   }
 
   _grow(needed) {
-    const capacity = grownCapacity(this.capacity, needed);
+    // Draw data is the widest per-object buffer, so it sets the ceiling.
+    const capacity = grownCapacity(
+      this.capacity, needed, storageCapacity(this.rhi, DRAW_DATA_BYTES), 'renderables',
+    );
     const device = this.rhi.device;
     const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 

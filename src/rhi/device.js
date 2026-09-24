@@ -31,6 +31,13 @@ export const DEPTH_COMPARE = 'greater';
  */
 const OPTIONAL_FEATURES = ['timestamp-query'];
 
+/**
+ * The limits a scene's size runs into: buffers that grow with objects, lights
+ * and morph targets, and textures and a canvas that grow with the asset and
+ * the display. Requested at whatever the adapter has.
+ */
+const SCALING_LIMITS = ['maxBufferSize', 'maxStorageBufferBindingSize', 'maxTextureDimension2D'];
+
 export async function createDevice(canvas, options = {}) {
   if (!navigator.gpu) {
     throw new Error(
@@ -48,9 +55,17 @@ export async function createDevice(canvas, options = {}) {
 
   const requiredFeatures = OPTIONAL_FEATURES.filter((f) => adapter.features.has(f));
 
+  // What the adapter really has, rather than WebGPU's defaults. Without this
+  // every size check in the engine compared against 8192-texel textures and
+  // 128 MiB bindings on hardware that commonly allows 16384 and gigabytes.
+  // Asking for exactly what the adapter reports always succeeds.
+  const requiredLimits = {};
+  for (const name of SCALING_LIMITS) requiredLimits[name] = adapter.limits[name];
+
   const device = await adapter.requestDevice({
     label: options.label ?? 'engine',
     requiredFeatures,
+    requiredLimits,
   });
 
   return new Device(adapter, device, canvas, options);

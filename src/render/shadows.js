@@ -267,7 +267,15 @@ export class ShadowMaps {
     depthBiasSlope = -2.0,
     depthBiasConstant = -1,
   } = {}) {
-    if (DEBUG) assert(cascades > 0 && cascades <= MAX_CASCADES, 'bad cascade count');
+    // Unconditional: past MAX_CASCADES the per-cascade arrays and the cascade
+    // uniform are overrun, and the shadows are wrong with nothing reported.
+    if (!(cascades > 0 && cascades <= MAX_CASCADES)) {
+      throw new RangeError(`Shadows: ${cascades} cascades; 1 to ${MAX_CASCADES} are supported`);
+    }
+    const maxSize = rhi.limits.maxTextureDimension2D;
+    if (size > maxSize) {
+      throw new RangeError(`Shadows: a ${size} map is past this device's ${maxSize}`);
+    }
 
     this.rhi = rhi;
     this.size = size;

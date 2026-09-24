@@ -298,7 +298,10 @@ export class Renderer {
         base | VARIANT_SKINNED, base | VARIANT_MIRRORED | VARIANT_SKINNED);
     }
     for (const variant of wanted) {
-      if (this._pipelineByVariant.has(variant)) continue;
+      // Every wanted variant goes to warm(), built or not: one another load
+      // is still compiling has to be waited on, and warm() knows which.
+      const known = this._pipelineByVariant.get(variant);
+      if (known) { pending.push(known); continue; }
 
       const state = variantPipelineState(variant);
       const skinned = (variant & VARIANT_SKINNED) !== 0;
@@ -316,7 +319,7 @@ export class Renderer {
       this._pipelineByVariant.set(variant, descriptor);
       pending.push(descriptor);
     }
-    if (pending.length > 0) await this.pipelines.warm(pending);
+    await this.pipelines.warm(pending);
     if (this.oit) await this._ensureOitVariants(wanted);
   }
 
@@ -332,7 +335,8 @@ export class Renderer {
     const pending = [];
     for (const variant of variants) {
       if ((variant & 3) !== ALPHA_BLEND) continue;
-      if (this._oitPipelineByVariant.has(variant)) continue;
+      const known = this._oitPipelineByVariant.get(variant);
+      if (known) { pending.push(known); continue; }
 
       const state = variantPipelineState(variant);
       // Skinned variants skin, exactly as the forward ones do. These used to
@@ -369,7 +373,7 @@ export class Renderer {
       this._oitPipelineByVariant.set(variant, descriptor);
       pending.push(descriptor);
     }
-    if (pending.length > 0) await this.pipelines.warm(pending);
+    await this.pipelines.warm(pending);
   }
 
   _frameBindGroup(environment) {

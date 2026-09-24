@@ -34,6 +34,15 @@ const DEFAULT_CAPACITY = 4096;
  */
 let nextSceneId = 1;
 
+/**
+ * Where every scene's revisions come from: one counter for the page, so no
+ * two scenes ever report the same revision. Per-scene counters were equal
+ * almost at once, and each cache that compared revision alone had to learn to
+ * compare the id as well -- the renderer's batch order and scene bounds never
+ * did, so rendering a second scene kept the first one's draw list.
+ */
+let nextRevision = 1;
+
 export class Scene {
   constructor({ capacity = DEFAULT_CAPACITY, renderableCapacity = capacity, lightCapacity = 256 } = {}) {
     /** Unique for the life of the page. See nextSceneId. */
@@ -49,7 +58,7 @@ export class Scene {
      * Bumped whenever the set of renderables changes. Batching is O(n log n)
      * and must not run on a scene that is merely moving.
      */
-    this.revision = 0;
+    this.revision = nextRevision++;
     this.renderableEntity = new Uint32Array(renderableCapacity);
     /** Which transform slot each renderable reads its world matrix from. */
     this.renderableMatrixSlot = new Uint32Array(renderableCapacity);
@@ -351,7 +360,7 @@ export class Scene {
       this._growRenderables(this.renderableCount + 1);
     }
     const i = this.renderableCount++;
-    this.revision++;
+    this.revision = nextRevision++;
 
     this.renderableEntity[i] = entity;
     this.renderableMatrixSlot[i] = handleIndex(entity);
@@ -487,7 +496,7 @@ export class Scene {
       }
       this.renderablePrimitive[last] = undefined;
       this.renderableMorphExtent[last] = null;
-      this.revision++;
+      this.revision = nextRevision++;
     }
 
     // Imported cameras on a doomed node go with it. A camera the caller made

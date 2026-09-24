@@ -462,15 +462,21 @@ test('double free is rejected', () => {
   assert.throws(() => h.free(a));
 });
 
-test('generation wraps past 255 without ever hitting 0', () => {
+test('no handle ever aliases a later one, however often a slot is reused', () => {
+  // The free list is a stack, so a spawn and despawn every frame reuses one
+  // slot over and over. Generations used to wrap from 255 back to 1, and the
+  // very first handle came back to life on the 255th reuse.
   const h = new HandleAllocator(4);
-  let handle = h.alloc();
+  const issued = [h.alloc()];
   for (let i = 0; i < 600; i++) {
-    h.free(handle);
-    handle = h.alloc();
+    h.free(issued[issued.length - 1]);
+    const handle = h.alloc();
     assert.notEqual(handle & 0xff, 0, `generation hit 0 on cycle ${i}`);
     assert.ok(h.alive(handle));
+    assert.ok(!issued.includes(handle), `cycle ${i} reissued a handle already given out`);
+    issued.push(handle);
   }
+  assert.equal(new Set(issued.map(handleIndex)).size, 3, 'a slot is retired after 255 uses');
 });
 
 test('running past the initial capacity grows instead of throwing', () => {

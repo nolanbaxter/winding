@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Limits and lifetimes.** Two audits covered what breaks once a scene gets
+big, and what races once engines destroy themselves.
+
+### Changed
+
+- The device is asked for the adapter's own `maxBufferSize`,
+  `maxStorageBufferBindingSize` and `maxTextureDimension2D`, instead of
+  WebGPU's defaults. Every size check used to stop at 8192-texel textures and
+  128 MiB bindings, even on hardware that allows 16384 and gigabytes.
+- `Winding.create` refuses an `Environment` object. Passing one "to share" could
+  never work: every create makes a new device and the cubemaps live on the old
+  one. Share an environment between scenes with `createScene({ environment })`.
+
+### Fixed
+
+- **Arrays that grow stop at what the device can hold, and say so.** This covers
+  draw data, lights, joint palettes, morph deltas and morph weights.
+  - They used to double past the binding limit into buffers WebGPU rejects
+    without throwing, so the frame went black. Two high-end face rigs were
+    enough to trigger it.
+  - `createBuffer` also throws for a mesh past `maxBufferSize`. That mesh used
+    to vanish silently.
+- **Rendering a second scene drew the first scene's batch order and bounds**
+  whenever their revisions matched, which happened as soon as both had the
+  same number of objects. Revisions now come from one counter for the whole
+  page.
+- **Handle generations no longer wrap.** The free list is a stack, so one spawn
+  and despawn per frame reused a slot 255 times in four seconds. After that, a
+  stale `Node` came back to life and moved whatever owned the slot. A slot
+  that runs out of generations is now retired instead of reused.
+- **`load()` stops if its engine is destroyed mid-load,** instead of building an
+  asset on a dead device. If it throws partway, it frees the buffers,
+  textures, material ids and morph ranges it had already created.
+- **Two loads at once no longer let a pipeline compile land in a frame.** A
+  compile already in flight is now waited on, not treated as done. A failed
+  compile is retried rather than cached.
+- **An engine whose device was lost, or whose canvas left the page, during
+  `create()` now destroys itself.** Nothing was listening yet, so it used to
+  miss the event.
+- `unload` refuses an asset another engine loaded. The asset's ids would
+  otherwise have freed live entries in this engine's registry.
+- `load`, `run`, `renderFrame` and `createScene` fail by name once the engine is
+  destroyed.
+- **OIT caps each fragment's weight** so HDR colour can't overflow the
+  accumulator. One sun glint on glass used to fill it. Colours of 1 or less
+  are unaffected.
+- **Settings that made invalid textures now throw clearly:**
+  - An environment `size` smaller than `prefilterMips` needs is clamped to the
+    levels the cube actually has.
+  - An environment or shadow map past the device's texture limit throws.
+  - More than four cascades throws in release builds as well as debug.
+- `JOINTS_0` stored as `UNSIGNED_INT`, which glTF doesn't allow, is refused.
+  It used to be narrowed to 16 bits.
+- Buffer and GLB-chunk alignment no longer goes negative at 2 GiB.
+
 ## [0.10.1] - 2026-09-24
 
 **Nothing builds up.** An audit for anything that accumulates across

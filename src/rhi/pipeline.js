@@ -38,6 +38,8 @@ export class PipelineCache {
   constructor(device) {
     this.device = device;
     this.pipelines = new Map();
+    /** Compiles in flight, by key, so a second warm() waits on the first. */
+    this._compiling = new Map();
     /** How many distinct pipelines exist. Watch this stop growing after load. */
     this.created = 0;
     /** Cache hits. If this is 0 in steady state, the key is unstable. */
@@ -62,16 +64,25 @@ export class PipelineCache {
    * scene can use; by the first frame, get() is pure cache hits.
    */
   async warm(descs) {
-    await Promise.all(descs.map(async (desc) => {
+    // A compile already in flight is awaited, not skipped. Two loads at once
+    // used to see each other's variants as handled and return before they
+    // were built, and the first frame then compiled them synchronously --
+    // the hitch warm() exists to prevent. A failed compile is not cached, so
+    // the next warm() tries again.
+    await Promise.all(descs.map((desc) => {
       const key = pipelineKey(desc);
-      if (this.pipelines.has(key)) return;
-      const pipeline = await this.device.createRenderPipelineAsync(gpuDescriptor(desc));
-      // Another warm() may have landed first; keep one object per key so the
-      // sort key's pipeline identity stays meaningful.
-      if (!this.pipelines.has(key)) {
-        this.pipelines.set(key, pipeline);
-        this.created++;
+      if (this.pipelines.has(key)) return undefined;
+      let compiling = this._compiling.get(key);
+      if (!compiling) {
+        compiling = this.device.createRenderPipelineAsync(gpuDescriptor(desc))
+          .then((pipeline) => {
+            this.pipelines.set(key, pipeline);
+            this.created++;
+          })
+          .finally(() => this._compiling.delete(key));
+        this._compiling.set(key, compiling);
       }
+      return compiling;
     }));
   }
 }

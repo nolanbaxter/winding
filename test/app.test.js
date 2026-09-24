@@ -14,7 +14,8 @@ import { NO_PARENT } from '../src/scene/transform.js';
 import { handleIndex } from '../src/core/handle.js';
 import { quatCreate, quatFromEuler } from '../src/core/math/quat.js';
 import { vec3Create, vec3TransformQuat } from '../src/core/math/vec3.js';
-import { createModuleWorker, workerShimSource } from '../src/app/engine.js';
+import { createModuleWorker, workerShimSource, Winding } from '../src/app/engine.js';
+import { Environment } from '../src/render/ibl.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -281,6 +282,14 @@ test('every scene counts what draws a primitive, so unload knows when it is free
   assert.equal(primitive.instances, 4);
   second.destroy();
   assert.equal(primitive.instances, 2, 'the other scene still draws it');
+});
+
+await atest('create refuses an Environment, which belongs to another device', async () => {
+  // It was accepted "to share", and could never work: create() makes a new
+  // device every time, and the Environment's cubemaps live on the old one.
+  // Refused before any device is asked for, which is why Node can check it.
+  const foreign = Object.create(Environment.prototype);
+  await assert.rejects(() => Winding.create(null, { environment: foreign }), /belongs to the engine/);
 });
 
 test('an unloaded asset is refused, not drawn from freed buffers', () => {

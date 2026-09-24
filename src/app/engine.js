@@ -88,7 +88,8 @@ export function createModuleWorker(
 export class Winding {
   /**
    * @param canvas a <canvas>; it is sized, configured and observed for you
-   * @param options.environment  Environment settings, or an Environment to share
+   * @param options.environment  Environment settings (share one between scenes
+   *                             with createScene({ environment }))
    * @param options.onDeviceLost called when the GPU goes away
    *
    * `shadows`, `post`, `shadowDistance` and `lightDistance` reach the renderer
@@ -100,6 +101,15 @@ export class Winding {
    * lost.
    */
   static async create(canvas, options = {}) {
+    // This used to be accepted as "an Environment to share". It could never
+    // work: its cubemaps belong to the device that baked them, and every
+    // create() makes a new device, so every frame was a validation error.
+    if (options.environment instanceof Environment) {
+      throw new Error(
+        'create: an Environment belongs to the engine that made it. Pass its settings, '
+        + 'or share it between scenes with createScene({ environment }).',
+      );
+    }
     const rhi = await createDevice(canvas, {
       label: options.label ?? 'winding',
       powerPreference: options.powerPreference,
@@ -121,10 +131,7 @@ export class Winding {
         oit: options.oit,
       });
 
-      const sharedEnvironment = options.environment instanceof Environment;
-      const environment = sharedEnvironment
-        ? options.environment
-        : new Environment(rhi, options.environment ?? {});
+      const environment = new Environment(rhi, options.environment ?? {});
 
       // Workers need cross-origin isolation (COOP + COEP). Without it the job
       // system falls back to running inline, which is slower and identical.
@@ -135,7 +142,7 @@ export class Winding {
           : null,
       });
 
-      return new Winding(rhi, renderer, environment, jobs, !sharedEnvironment);
+      return new Winding(rhi, renderer, environment, jobs);
     } catch (error) {
       rhi.destroy();
       throw error;
@@ -148,7 +155,7 @@ export class Winding {
     this.renderer = renderer;
     this.environment = environment;
     this.jobs = jobs;
-    /** False when create() was handed an Environment to share. */
+    /** False when whoever constructs this directly lends an Environment it keeps. */
     this._ownsEnvironment = ownsEnvironment;
 
     // Registered once, for the engine, not once per scene. The handler reads
@@ -174,11 +181,24 @@ export class Winding {
     // run() is driving it: an engine that failed before run(), or one driven
     // through renderFrame(), has no loop to notice.
     rhi.onUnusable = () => this.destroy();
+    // It may already have happened: create() compiles pipelines for hundreds
+    // of milliseconds before this runs, and nobody was listening then.
+    if (rhi.destroyed || rhi.canvas.isConnected === false) queueMicrotask(() => this.destroy());
+  }
+
+  /** Every entry point that would use the GPU fails here, by name, once destroyed. */
+  _assertAlive(what) {
+    if (this._destroyed) throw new Error(`${what}: this engine was destroyed`);
   }
 
   createScene(options = {}) {
+    this._assertAlive('createScene');
+    const environment = options.environment ?? this.environment;
+    if (environment.rhi !== this.rhi) {
+      throw new Error('createScene: that Environment belongs to another engine');
+    }
     const scene = new Scene(options);
-    scene.environment = options.environment ?? this.environment;
+    scene.environment = environment;
     return scene;
   }
 
@@ -196,108 +216,159 @@ export class Winding {
    */
   async load(source, options = {}) {
     const { retainGeometry = false } = options;
+    this._assertAlive('load');
     let bytes = source;
     let baseURL = options.baseURL;
 
+    // Every await is a point where the engine may have been destroyed -- the
+    // canvas left the page or the device was lost, and both now do that on
+    // their own. Carrying on built an asset on a dead device, which a
+    // recovering app then handed to its new engine.
     if (typeof source === 'string') {
       baseURL = baseURL ?? new URL(source, globalThis.location?.href ?? 'http://localhost/');
       const response = await fetch(source);
       if (!response.ok) throw new Error(`load: ${source} returned ${response.status}`);
       bytes = new Uint8Array(await response.arrayBuffer());
+      this._assertAlive('load');
     } else if (source instanceof ArrayBuffer) {
       bytes = new Uint8Array(source);
     }
 
     const model = await loadGLTF(bytes, { baseURL });
+    this._assertAlive('load');
     const bitmaps = await decodeImages(model.source.json, model.source.buffers, { baseURL });
-    const textures = new GLTFTextures(this.rhi, model.source.json, bitmaps);
-
-    // Materials first: a primitive needs its material id before it can be
-    // turned into something the draw list can sort.
-    const materialIds = model.materials.map(
-      (material) => this.renderer.materials.register(material, textures.texturesFor(material)),
-    );
-
-    // Every image that was going to be uploaded now has been, so the decoded
-    // copies are dead weight. An ImageBitmap holds native memory the collector
-    // frees only when it gets round to it, and a texture-heavy asset is
-    // hundreds of megabytes of them -- Sponza decodes to over a gigabyte.
-    // close() gives it back at a known moment instead.
-    textures.releaseBitmaps();
-
-    const meshes = model.meshes.map((mesh, m) => ({
-      name: mesh.name,
-      // How many morph targets every primitive here carries. The scene reads
-      // it to decide whether a node instancing this mesh needs weights.
-      targetCount: mesh.targetCount,
-      primitives: mesh.primitives.map((primitive, p) => ({
-        vertexBuffer: createBuffer(this.rhi, {
-          label: `${mesh.name}[${p}].vertices`,
-          data: primitive.vertices,
-          usage: GPUBufferUsage.VERTEX,
-        }),
-        indexBuffer: createBuffer(this.rhi, {
-          label: `${mesh.name}[${p}].indices`,
-          data: primitive.indices,
-          usage: GPUBufferUsage.INDEX,
-        }),
-        /** Whether this primitive carries influences. The scene reads this. */
-        skinned: primitive.jointIndices != null,
-        // Null unless the mesh is rigged. A second vertex buffer, bound at
-        // slot 1 by skinned pipelines only, so static meshes carry nothing.
-        skinBuffer: primitive.jointIndices
-          ? createBuffer(this.rhi, {
-            label: `${mesh.name}[${p}].skin`,
-            data: new Uint8Array(packSkinVertices(
-              primitive.jointIndices, primitive.jointWeights, primitive.vertexCount,
-            )),
-            usage: GPUBufferUsage.VERTEX,
-          })
-          : null,
-        indexCount: primitive.indexCount,
-        bounds: primitive.bounds,
-        // How far each target reaches, which is all a bound needs. The deltas
-        // themselves are a GPU buffer; this is the one number the CPU keeps.
-        morphExtent: primitive.morph?.extent ?? null,
-        // Where this primitive's deltas landed in the engine-wide arena, and
-        // its target count and stride packed as draw data carries them. Zero
-        // for an unmorphed primitive, which is what makes the vertex shader
-        // skip the loop entirely.
-        morphBase: primitive.morph ? this.renderer.morph.allocate(primitive.morph.deltas) : 0,
-        /** How many floats of the arena that is, for unload() to give back. */
-        morphFloats: primitive.morph ? primitive.morph.deltas.length : 0,
-        morphCountStride: primitive.morph
-          ? packMorphCountStride(primitive.morph.targetCount, primitive.morph.stride)
-          : 0,
-        // Only when asked. Scene.raycast tests triangles for primitives that have
-        // these and falls back to the bounding box for those that do not, so the
-        // flag buys precision with memory and nothing else changes.
-        positions: retainGeometry ? primitive.positions : undefined,
-        indices: retainGeometry ? primitive.indices : undefined,
-        materialId: primitive.material >= 0
-          ? materialIds[primitive.material]
-          : this._defaultMaterial(),
-        meshIndex: m,
-        /** Renderables drawing this, across every scene. See Scene.add. */
-        instances: 0,
-      })),
-    }));
-
-    // Every pipeline the asset can possibly need, compiled off-thread, before
-    // the caller is even told the asset exists.
-    const variants = new Set();
-    for (const mesh of meshes) {
-      for (const primitive of mesh.primitives) {
-        variants.add(this.renderer.materials.variants[primitive.materialId]);
-      }
+    if (this._destroyed) {
+      for (const bitmap of bitmaps) bitmap?.close?.();
+      this._assertAlive('load');
     }
-    await this.renderer.ensureVariants([...variants]);
 
-    return {
-      nodes: model.nodes, meshes, roots: model.roots, materialIds,
+    // Filled in as it is built, so a throw part way through -- a texture past
+    // the device limit, a mesh with too many targets, a pipeline that will
+    // not compile -- frees exactly what exists. It used to leak all of it,
+    // material ids included, which then counted against the 4096 for good.
+    const textures = new GLTFTextures(this.rhi, model.source.json, bitmaps);
+    const asset = {
+      nodes: model.nodes, meshes: [], roots: model.roots, materialIds: [],
       animations: model.animations, skins: model.skins, source: model.source,
       lights: model.lights, cameras: model.cameras, textures,
+      /** Which engine made it. unload() refuses an asset from another. */
+      engine: this,
     };
+
+    try {
+      // Materials first: a primitive needs its material id before it can be
+      // turned into something the draw list can sort.
+      for (const material of model.materials) {
+        asset.materialIds.push(
+          this.renderer.materials.register(material, textures.texturesFor(material)),
+        );
+      }
+
+      // Every image that was going to be uploaded now has been, so the decoded
+      // copies are dead weight. An ImageBitmap holds native memory the collector
+      // frees only when it gets round to it, and a texture-heavy asset is
+      // hundreds of megabytes of them -- Sponza decodes to over a gigabyte.
+      // close() gives it back at a known moment instead.
+      textures.releaseBitmaps();
+
+      model.meshes.forEach((mesh, m) => {
+        const primitives = [];
+        asset.meshes.push({
+          name: mesh.name,
+          // How many morph targets every primitive here carries. The scene reads
+          // it to decide whether a node instancing this mesh needs weights.
+          targetCount: mesh.targetCount,
+          primitives,
+        });
+        mesh.primitives.forEach((primitive, p) => {
+          const built = {
+            vertexBuffer: null,
+            indexBuffer: null,
+            /** Whether this primitive carries influences. The scene reads this. */
+            skinned: primitive.jointIndices != null,
+            // Null unless the mesh is rigged. A second vertex buffer, bound at
+            // slot 1 by skinned pipelines only, so static meshes carry nothing.
+            skinBuffer: null,
+            indexCount: primitive.indexCount,
+            bounds: primitive.bounds,
+            // How far each target reaches, which is all a bound needs. The deltas
+            // themselves are a GPU buffer; this is the one number the CPU keeps.
+            morphExtent: primitive.morph?.extent ?? null,
+            // Its target count and stride packed as draw data carries them, and
+            // where its deltas landed in the engine-wide arena. Zero for an
+            // unmorphed primitive, which is what makes the vertex shader skip
+            // the loop entirely. Packed first: it is the check that can throw.
+            morphCountStride: primitive.morph
+              ? packMorphCountStride(primitive.morph.targetCount, primitive.morph.stride)
+              : 0,
+            morphBase: 0,
+            /** How many floats of the arena that is, for unload() to give back. */
+            morphFloats: 0,
+            // Only when asked. Scene.raycast tests triangles for primitives that have
+            // these and falls back to the bounding box for those that do not, so the
+            // flag buys precision with memory and nothing else changes.
+            positions: retainGeometry ? primitive.positions : undefined,
+            indices: retainGeometry ? primitive.indices : undefined,
+            materialId: primitive.material >= 0
+              ? asset.materialIds[primitive.material]
+              : this._defaultMaterial(),
+            meshIndex: m,
+            /** Renderables drawing this, across every scene. See Scene.add. */
+            instances: 0,
+          };
+          primitives.push(built);
+
+          built.vertexBuffer = createBuffer(this.rhi, {
+            label: `${mesh.name}[${p}].vertices`,
+            data: primitive.vertices,
+            usage: GPUBufferUsage.VERTEX,
+          });
+          built.indexBuffer = createBuffer(this.rhi, {
+            label: `${mesh.name}[${p}].indices`,
+            data: primitive.indices,
+            usage: GPUBufferUsage.INDEX,
+          });
+          if (primitive.jointIndices) {
+            built.skinBuffer = createBuffer(this.rhi, {
+              label: `${mesh.name}[${p}].skin`,
+              data: new Uint8Array(packSkinVertices(
+                primitive.jointIndices, primitive.jointWeights, primitive.vertexCount,
+              )),
+              usage: GPUBufferUsage.VERTEX,
+            });
+          }
+          if (primitive.morph) {
+            built.morphBase = this.renderer.morph.allocate(primitive.morph.deltas);
+            built.morphFloats = primitive.morph.deltas.length;
+          }
+        });
+      });
+
+      // Every pipeline the asset can possibly need, compiled off-thread, before
+      // the caller is even told the asset exists.
+      const variants = new Set();
+      for (const mesh of asset.meshes) {
+        for (const primitive of mesh.primitives) {
+          variants.add(this.renderer.materials.variants[primitive.materialId]);
+        }
+      }
+      await this.renderer.ensureVariants([...variants]);
+      this._assertAlive('load');
+    } catch (error) {
+      textures.releaseBitmaps();
+      this._free(asset);
+      throw error;
+    }
+
+    return asset;
+  }
+
+  /** glTF lets a primitive have no material; the spec's default is a white dielectric. */
+  _defaultMaterial() {
+    if (this._defaultMaterialId < 0) {
+      this._defaultMaterialId = this.renderer.materials.register(DEFAULT_MATERIAL);
+    }
+    return this._defaultMaterialId;
   }
 
   /**
@@ -311,6 +382,10 @@ export class Winding {
    */
   unload(asset) {
     if (asset.unloaded) return;
+    // Its ids and arena ranges index THIS engine's registry and morph store.
+    // Unloading another engine's asset -- the one from before a device loss,
+    // say -- freed live entries here, and the next load overwrote them.
+    if (asset.engine !== this) throw new Error('unload: this asset was loaded by another engine');
     for (const mesh of asset.meshes) {
       for (const primitive of mesh.primitives) {
         if (primitive.instances > 0) {
@@ -318,12 +393,16 @@ export class Winding {
         }
       }
     }
-    asset.unloaded = true;
+    this._free(asset);
+  }
 
+  /** Everything an asset holds, freed. Also what a failed load() undoes. */
+  _free(asset) {
+    asset.unloaded = true;
     for (const mesh of asset.meshes) {
       for (const primitive of mesh.primitives) {
-        primitive.vertexBuffer.destroy();
-        primitive.indexBuffer.destroy();
+        primitive.vertexBuffer?.destroy();
+        primitive.indexBuffer?.destroy();
         primitive.skinBuffer?.destroy();
         if (primitive.morphFloats > 0) {
           this.renderer.morph.free(primitive.morphBase, primitive.morphFloats);
@@ -333,15 +412,6 @@ export class Winding {
     for (const id of asset.materialIds) this.renderer.materials.release(id);
     asset.textures.destroy();
   }
-
-  /** glTF lets a primitive have no material; the spec's default is a white dielectric. */
-  _defaultMaterial() {
-    if (this._defaultMaterialId < 0) {
-      this._defaultMaterialId = this.renderer.materials.register(DEFAULT_MATERIAL);
-    }
-    return this._defaultMaterialId;
-  }
-
   /**
    * Own the frame loop.
    *
@@ -359,6 +429,7 @@ export class Winding {
    * is not running learns the same thing from its resize observer.)
    */
   run({ scene, camera, update, frame }) {
+    this._assertAlive('run');
     if (this._running) throw new Error('run: already running; call stop() first');
     this._running = true;
 
@@ -368,7 +439,7 @@ export class Winding {
       // every later run() threw 'already running' with no way back short of
       // destroy() -- a lost device wedged the engine rather than stopping it.
       if (!this._running) return;
-      if (this.rhi.destroyed) { this.stop(); return; }
+      if (this.rhi.destroyed) { this.destroy(); return; }
       // A canvas that has left the document can never be seen again, so every
       // frame drawn into it is waste. This is what a live editor's reload
       // leaves behind: it rewrites the page in place (document.open/write), no
@@ -406,6 +477,7 @@ export class Winding {
 
   /** One frame, synchronously. Use this when you own the loop. */
   renderFrame(scene, camera) {
+    this._assertAlive('renderFrame');
     this.renderer.render(scene, camera, this.jobs);
   }
 

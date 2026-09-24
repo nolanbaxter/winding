@@ -264,6 +264,7 @@ function nodeShadowMaps() {
   const rhi = {
     device: { createTexture: () => ({ createView: () => ({}) }), createSampler: () => ({}) },
     queue: { writeBuffer() {} },
+    limits: { maxTextureDimension2D: 8192 },   // WebGPU's default
   };
   const maps = new ShadowMaps(rhi, {});
   maps.alignment = 256;

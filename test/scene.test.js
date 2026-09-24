@@ -792,8 +792,10 @@ test('two scenes are distinguishable, not merely countable', () => {
     scene._addRenderable(entity, primitive);
   }
 
-  assert.equal(a.revision, b.revision,
-    'and their revisions DO collide, which is exactly why revision alone cannot decide');
+  // They used to collide here, one add() old each, and a cache that
+  // compared revision alone kept the wrong scene's work. Revisions now come
+  // from one counter for the page, so revision alone is enough to decide.
+  assert.notEqual(a.revision, b.revision, 'no two scenes share a revision');
 });
 
 

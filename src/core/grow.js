@@ -6,11 +6,21 @@
 // only honest default is one that stops mattering.
 //
 
-/** Doubles until `needed` fits. */
-export function grownCapacity(current, needed) {
+/**
+ * Doubles until `needed` fits, never past `ceiling`.
+ *
+ * The ceiling is what the device can hold, and going past it is a throw, not
+ * a clamp. Doubling regardless made a buffer WebGPU rejects without throwing:
+ * the bind group naming it failed, and the frame went black with the cause
+ * several calls away.
+ */
+export function grownCapacity(current, needed, ceiling = Infinity, what = 'items') {
+  if (needed > ceiling) {
+    throw new RangeError(`${needed} ${what} is past the ${ceiling} this device can hold`);
+  }
   let capacity = Math.max(current, 1);
   while (capacity < needed) capacity *= 2;
-  return capacity;
+  return Math.min(capacity, ceiling);
 }
 
 /** `elementsPerItem` grows a column of packed vec3s or mat4s by item count. */

@@ -14,6 +14,7 @@
 
 import { Winding, Camera } from '../src/winding.js';
 import { Benchmark } from '../src/bench.js';
+import { Environment } from '../src/render/ibl.js';
 import { CLUSTER_Z, MAX_LIGHTS_PER_CLUSTER } from '../src/render/clustered.js';
 import { shaderErrors } from '../src/rhi/shader.js';
 import { NOT_BATCHED, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
@@ -952,6 +953,86 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
     engine.unload(again);
     return `${asset.materialIds.length} material ids came back and were reused`;
+  });
+
+  await step('two scenes the same size keep their own draw lists', async () => {
+    // Two renderables each, so under per-scene counters both reported
+    // revision 2 -- and the renderer, which compared revision alone, kept the
+    // first scene's sorted batches for the second.
+    const asset = await engine.load(await buildDemoGLB({ arms: 2 }));
+    if (asset.meshes.length < 2) throw new Error('the demo needs two meshes for this');
+    const meshA = { name: 'a', primitives: [asset.meshes[0].primitives[0]] };
+    const meshB = { name: 'b', primitives: [asset.meshes[1].primitives[0]] };
+    const at = (x) => ({ position: [x, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [] });
+    const same = engine.createScene();     // one mesh twice: one batch
+    same.add({ meshes: [meshA], nodes: [{ ...at(-2), mesh: 0 }, { ...at(2), mesh: 0 }], roots: [0, 1] });
+    const mixed = engine.createScene();    // two meshes: two batches
+    mixed.add({ meshes: [meshA, meshB], nodes: [{ ...at(-2), mesh: 0 }, { ...at(2), mesh: 1 }], roots: [0, 1] });
+
+    const counts = [];
+    for (const s of [same, mixed, same, mixed]) {
+      engine.renderFrame(s, camera);
+      const { batchList, gpu } = engine.renderer;
+      if (batchList.count !== gpu.batchCount) {
+        throw new Error(`drew ${batchList.count} batches of the ${gpu.batchCount} this scene has`);
+      }
+      counts.push(gpu.batchCount);
+    }
+    await engine.rhi.device.queue.onSubmittedWorkDone();
+    return `batches per frame: ${counts.join(', ')}`;
+  });
+
+  await step('a load that fails part way gives back what it had built', async () => {
+    const realEnsure = engine.renderer.ensureVariants;
+    engine.renderer.ensureVariants = () => Promise.reject(new Error('forced'));
+    const freeBefore = engine.renderer.materials._free.length;
+    try {
+      await engine.load(await buildDemoGLB({ arms: 2 }));
+      throw new Error('the forced failure did not surface');
+    } catch (error) {
+      if (error.message !== 'forced') throw error;
+    } finally {
+      engine.renderer.ensureVariants = realEnsure;
+    }
+    const returned = engine.renderer.materials._free.length - freeBefore;
+    if (returned !== 3) throw new Error(`${returned} material ids came back, expected the demo's 3`);
+    return 'buffers, textures and 3 material ids freed';
+  });
+
+  await step('the device is asked for what the adapter has, not the defaults', async () => {
+    const { adapter, limits } = engine.rhi;
+    for (const name of ['maxBufferSize', 'maxStorageBufferBindingSize', 'maxTextureDimension2D']) {
+      if (limits[name] !== adapter.limits[name]) {
+        throw new Error(`${name}: device ${limits[name]}, adapter ${adapter.limits[name]}`);
+      }
+    }
+    // A cube this small has five levels; asking for six made an invalid texture.
+    const small = new Environment(engine.rhi, { size: 16 });
+    const mips = small.prefilterMips;
+    small.destroy();
+    if (mips !== 5) throw new Error(`a 16 cube kept ${mips} prefilter levels`);
+    let refused = false;
+    try { engine.unload({ engine: {}, meshes: [], materialIds: [] }); } catch { refused = true; }
+    if (!refused) throw new Error("unloaded another engine's asset");
+    return `maxTextureDimension2D ${limits.maxTextureDimension2D}, maxBufferSize ${limits.maxBufferSize}`;
+  });
+
+  await step('a destroyed engine refuses work by name, including a load in flight', async () => {
+    const doomedCanvas = document.createElement('canvas');
+    document.body.appendChild(doomedCanvas);
+    const doomed = await Winding.create(doomedCanvas);
+    const inFlight = doomed.load(await buildDemoGLB({ arms: 1 }));
+    doomed.destroy();
+    doomedCanvas.remove();
+    let message = '';
+    try { await inFlight; } catch (error) { message = error.message; }
+    if (!/destroyed/.test(message)) throw new Error(`a load in flight ${message ? `threw "${message}"` : 'resolved'}`);
+    for (const call of [() => doomed.createScene(), () => doomed.renderFrame(null, camera), () => doomed.run({})]) {
+      let threw = '';
+      try { call(); } catch (error) { threw = error.message; }
+      if (!/destroyed/.test(threw)) throw new Error(`a call on a destroyed engine ${threw ? `threw "${threw}"` : 'went through'}`);
+    }
+    return 'load, createScene, renderFrame and run all refuse';
   });
 
   await step('an engine that never ran shuts down when its canvas leaves', async () => {

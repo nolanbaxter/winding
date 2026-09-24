@@ -42,6 +42,7 @@
 
 import { DEBUG, assert } from '../core/assert.js';
 import { grownCapacity } from '../core/grow.js';
+import { storageCapacity } from '../rhi/buffer.js';
 import { compileShader } from '../rhi/shader.js';
 
 /**
@@ -452,7 +453,9 @@ export class ClusteredLights {
    * the line after this returns.
    */
   _grow(needed) {
-    const capacity = grownCapacity(this.lightCapacity, needed);
+    const capacity = grownCapacity(
+      this.lightCapacity, needed, storageCapacity(this.rhi, LIGHT_BYTES), 'lights',
+    );
     this.lightData = new Float32Array(capacity * (LIGHT_BYTES / 4));
 
     this.lightBuffer.destroy();

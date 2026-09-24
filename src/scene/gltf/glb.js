@@ -68,7 +68,9 @@ export function parseContainer(source) {
 
     // Chunk lengths are already 4-byte padded per spec, but rounding up costs
     // nothing and keeps one malformed exporter from desyncing the whole walk.
-    offset = dataStart + ((chunkLength + 3) & ~3);
+    // Math, not `& ~3`: that works in signed 32 bits, and a 2 GiB chunk turned
+    // the offset negative.
+    offset = dataStart + Math.ceil(chunkLength / 4) * 4;
   }
 
   if (json === null) throw new Error('glb: no JSON chunk');

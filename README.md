@@ -158,8 +158,8 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 530 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 21 checks on a real device
+npm test          # 537 checks, Node, no browser
+npm run test:gpu  # serves the page; open test/gpu.html for 25 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
@@ -328,9 +328,10 @@ These are real and currently unaddressed.
   Anything not coincident renders identically every frame. A fixed order would need a prefix-sum
   compaction -- more passes, every frame, for every scene -- to hold still an artifact that is a
   content error either way.
-- **Device loss ends the session.** `onDeviceLost` fires with enough to act on and the frame loop
-  stops itself, but nothing is rebuilt -- recovering would mean holding a CPU copy of every GPU
-  resource, textures' contents included, for the whole process lifetime. Reload is the route back.
+- **Device loss ends the session.** `onDeviceLost` fires with enough to act on and the engine
+  destroys itself, but nothing is rebuilt -- recovering would mean holding a CPU copy of every GPU
+  resource, textures' contents included, for the whole process lifetime. Create a new engine, or
+  reload.
 
 ## License
 
