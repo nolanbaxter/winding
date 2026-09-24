@@ -22,6 +22,7 @@ import { OIT_RESOLVE_SHADER } from '../src/render/shaders/oit.js';
 import { HZB_SHADER } from '../src/render/hzb.js';
 import { CLUSTER_SHADER } from '../src/render/clustered.js';
 import { POST_SHADER } from '../src/render/post.js';
+import { Renderer } from '../src/render/renderer.js';
 import {
   DrawList, opaqueSortKey, transparentSortKey,
   transparentDepthBucket,
@@ -1247,6 +1248,98 @@ test('a material with no maps binds white everywhere a factor scales it', () => 
   assert.equal(slot(4), 'default-white', 'occlusion');
   assert.equal(slot(5), 'default-white', 'emissive must not multiply its own factor away');
   assert.equal(slot(2), 'default-normal', 'and the normal map stays flat, not white');
+});
+
+// --------------------------------------------------- blended draw runs
+
+console.log('\nblended draw runs');
+
+/**
+ * Just enough renderer for _encodeTransparent: a sorted list of renderables,
+ * each a (primitive, material, skinned, mirrored), and a pass that logs calls.
+ */
+function blendedFrame(items) {
+  const primitives = {};
+  const primitive = (name) => primitives[name] ??= {
+    name, indexCount: 36, vertexBuffer: `vb:${name}`, indexBuffer: `ib:${name}`, skinBuffer: `sb:${name}`,
+  };
+  const renderer = Object.create(Renderer.prototype);
+  renderer._frameScene = {
+    renderableMaterial: items.map((it) => it.material),
+    renderablePrimitive: items.map((it) => primitive(it.mesh)),
+    renderableSkin: items.map((it) => (it.skinned ? 0 : -1)),
+  };
+  renderer.gpu = {
+    opaqueCount: 100,
+    itemMirrored: items.map((it) => (it.mirrored ? 1 : 0)),
+    transparentBatchOffset: () => 0,
+  };
+  // Already sorted: payload k is renderable k.
+  renderer.transparentList = { count: items.length, payloads: items.map((_, k) => k) };
+  renderer.materials = { variants: items.map(() => 0), bindGroup: (id) => `material:${id}` };
+  renderer.pipelines = { get: (v) => `pipeline:${v}` };
+  renderer.drawBindGroup = 'draws';
+  renderer.stats = { transparentDraws: 0 };
+
+  const calls = [];
+  const log = (name) => (...args) => calls.push([name, ...args]);
+  const pass = {
+    setPipeline: log('setPipeline'), setBindGroup: log('setBindGroup'),
+    setVertexBuffer: log('setVertexBuffer'), setIndexBuffer: log('setIndexBuffer'),
+    drawIndexed: log('drawIndexed'),
+  };
+  renderer._encodeTransparent(pass, { get: (variant) => variant });
+  const draws = calls.filter((c) => c[0] === 'drawIndexed')
+    .map(([, , instances, , , first]) => ({ first: first - 100, instances }));
+  return { calls, draws, stats: renderer.stats };
+}
+
+const glass = { mesh: 'pane', material: 2 };
+
+test('neighbours that draw alike become one instanced call', () => {
+  const { draws, stats } = blendedFrame([glass, glass, glass, glass]);
+  assert.deepEqual(draws, [{ first: 0, instances: 4 }], 'four panes, one call, from the first slot');
+  assert.equal(stats.transparentDraws, 1);
+});
+
+test('the sorted order is kept: runs never reach past something different', () => {
+  // pane pane BOTTLE pane: the last pane is behind the bottle, so it cannot
+  // join the first run without being drawn before the bottle.
+  const bottle = { mesh: 'bottle', material: 3 };
+  const { draws } = blendedFrame([glass, glass, bottle, glass]);
+  assert.deepEqual(draws, [
+    { first: 0, instances: 2 },
+    { first: 2, instances: 1 },
+    { first: 3, instances: 1 },
+  ]);
+});
+
+test('every slot is drawn exactly once, in order', () => {
+  const kinds = [glass, { mesh: 'pane', material: 5 }, { mesh: 'leaf', material: 2 }];
+  const items = Array.from({ length: 40 }, (_, k) => kinds[(k * 7) % 5 % 3]);
+  const { draws } = blendedFrame(items);
+  const slots = draws.flatMap((d) => Array.from({ length: d.instances }, (_, n) => d.first + n));
+  assert.deepEqual(slots, items.map((_, k) => k));
+});
+
+test('a different material, skinning or mirroring splits a run', () => {
+  const { draws } = blendedFrame([
+    glass,
+    { ...glass, material: 9 },
+    { ...glass, skinned: true },
+    { ...glass, mirrored: true },
+  ]);
+  assert.equal(draws.length, 4);
+});
+
+test('buffers are bound when the mesh or its skinning changes, not per object', () => {
+  const { calls } = blendedFrame([glass, glass, { ...glass, material: 9 }, { ...glass, skinned: true }]);
+  const vertexBinds = calls.filter((c) => c[0] === 'setVertexBuffer').map((c) => [c[1], c[2]]);
+  assert.deepEqual(vertexBinds, [
+    [0, 'vb:pane'],                       // first run
+    // the material-9 run reuses them: same mesh, same skinning
+    [0, 'vb:pane'], [1, 'sb:pane'],       // skinned needs its skin buffer, so it rebinds
+  ]);
 });
 
 console.log(`\n${passed} checks passed\n`);

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Blended objects that draw alike are one instanced call.** Transparent
+  geometry was one draw per object, on the reasoning that instancing would
+  lose the back-to-front order. Not for NEIGHBOURS in that order: a GPU
+  blends a draw's instances in sequence, and the draw data is already laid
+  out sorted, so a run of adjacent objects with the same mesh, material and
+  variant is one call of that many instances -- the same image. Measured on
+  100 copies of the demo scene (272 visible panes), alternating blocks in
+  one page: 272 calls became 1, the late forward pass went 0.55ms -> 0.35ms
+  of GPU time and the whole GPU frame 2.17ms -> 1.95ms. CPU time did not
+  move: Chrome's JavaScript side of a draw call is cheaper than the timer.
+  Buffers are also no longer rebound for every object.
+
 - **The render graph compiles only when the frame changes.** It was
   re-deriving the order, the live passes, every load and store op and the
   texture aliasing on every frame, for a frame that is almost always the

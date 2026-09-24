@@ -213,7 +213,7 @@ export class Renderer {
     this._frameScene = null;
     this._frameEnvironment = null;
 
-    this.stats = { renderables: 0, draws: 0, recomposed: 0, transparent: 0 };
+    this.stats = { renderables: 0, draws: 0, recomposed: 0, transparent: 0, transparentDraws: 0 };
     /**
      * CPU milliseconds per phase, for the optimization pass.
      *
@@ -931,11 +931,22 @@ export class Renderer {
   }
 
   /**
-   * Draw every blended object, one call each.
+   * Draw every blended object, in sorted order, as few calls as that allows.
    *
-   * Two blended objects at different depths cannot share an instanced draw
-   * without losing the ordering the sorted path exists to produce, and the OIT
-   * path has no ordering to lose but still needs per-object material binds.
+   * NEIGHBOURS IN THE SORTED ORDER THAT DRAW ALIKE ARE ONE INSTANCED CALL.
+   * This used to be one call per object, on the reasoning that two blended
+   * objects at different depths cannot share an instanced draw without losing
+   * their order. That holds for objects apart in the order, and not for
+   * adjacent ones: a GPU rasterizes and blends a draw's primitives in API
+   * order, instance by instance, so a run of neighbours drawn as consecutive
+   * instances blends exactly as the separate calls did. The draw data is
+   * already laid out in sorted order (slot opaqueCount + k is the k-th), so a
+   * run of r is one call of r instances starting at its first slot.
+   *
+   * "Alike" is everything a call binds: primitive, material, and the pipeline
+   * variant that skinning and mirroring pick. A scene of three hundred panes of
+   * one kind of glass was three hundred calls and is now however many runs the
+   * depth order makes of them -- one, when nothing else is between them.
    *
    * firstInstance carries the slot, which a DIRECT draw may set freely -- the
    * optional-feature restriction the vertex shader mentions applies to
@@ -945,19 +956,36 @@ export class Renderer {
   _encodeTransparent(pass, pipelineByVariant, boundPipeline = null, boundMaterial = -1) {
     const scene = this._frameScene;
     const gpu = this.gpu;
+    const payloads = this.transparentList.payloads;
     const transparentCount = this.transparentList.count;
+    this.stats.transparentDraws = 0;
     if (transparentCount === 0) return;
 
     pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.transparentBatchOffset()]);
 
-    for (let k = 0; k < transparentCount; k++) {
-      const i = this.transparentList.payloads[k];
+    let boundPrimitive = null;
+    let boundSkinned = false;
+    let k = 0;
+    while (k < transparentCount) {
+      const i = payloads[k];
       const materialId = scene.renderableMaterial[i];
       const primitive = scene.renderablePrimitive[i];
-
       const skinned = scene.renderableSkin[i] >= 0;
+      const mirrored = gpu.itemMirrored[i];
+
+      // How far the run of neighbours that draw exactly like this one goes.
+      let run = 1;
+      while (k + run < transparentCount) {
+        const j = payloads[k + run];
+        if (scene.renderablePrimitive[j] !== primitive
+          || scene.renderableMaterial[j] !== materialId
+          || (scene.renderableSkin[j] >= 0) !== skinned
+          || gpu.itemMirrored[j] !== mirrored) break;
+        run++;
+      }
+
       const variant = this.materials.variants[materialId]
-        | (gpu.itemMirrored[i] ? VARIANT_MIRRORED : 0)
+        | (mirrored ? VARIANT_MIRRORED : 0)
         | (skinned ? VARIANT_SKINNED : 0);
       const pipeline = this.pipelines.get(pipelineByVariant.get(variant));
       if (pipeline !== boundPipeline) {
@@ -968,11 +996,18 @@ export class Renderer {
         pass.setBindGroup(GROUP_MATERIAL, this.materials.bindGroup(materialId));
         boundMaterial = materialId;
       }
-
-      pass.setVertexBuffer(0, primitive.vertexBuffer);
-      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
-      pass.drawIndexed(primitive.indexCount, 1, 0, 0, gpu.opaqueCount + k);
+      // Buffers too only when they change: two runs of one mesh split by
+      // something else in between still share them.
+      if (primitive !== boundPrimitive || skinned !== boundSkinned) {
+        pass.setVertexBuffer(0, primitive.vertexBuffer);
+        if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
+        pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
+        boundPrimitive = primitive;
+        boundSkinned = skinned;
+      }
+      pass.drawIndexed(primitive.indexCount, run, 0, 0, gpu.opaqueCount + k);
+      this.stats.transparentDraws++;
+      k += run;
     }
   }
 
