@@ -317,6 +317,12 @@ These are real and currently unaddressed.
   wrong for interpenetrating ones; OIT needs no order and is approximate everywhere. Being exact
   means depth peeling, which is a pass per layer.
 - **Blended geometry casts no shadow**, on either path.
+- **Exactly coincident surfaces flicker instead of z-fighting in a fixed pattern.** GPU culling
+  hands out draw slots with an atomic, so the order objects draw in within a batch can change
+  from frame to frame, and two different objects at *exactly* the same depth swap which one wins.
+  Anything not coincident renders identically every frame. A fixed order would need a prefix-sum
+  compaction -- more passes, every frame, for every scene -- to hold still an artifact that is a
+  content error either way.
 - **Device loss ends the session.** `onDeviceLost` fires with enough to act on and the frame loop
   stops itself, but nothing is rebuilt -- recovering would mean holding a CPU copy of every GPU
   resource, textures' contents included, for the whole process lifetime. Reload is the route back.
