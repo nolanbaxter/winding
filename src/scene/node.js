@@ -16,7 +16,9 @@
 // alternatives are a Proxy on every access or dirty-checking every transform
 // every frame, and both give back what the propagation design just bought.
 
-import { quatCreate, quatSetAxisAngle, quatFromEuler, quatNormalize } from '../core/math/quat.js';
+import {
+  quatCreate, quatSetAxisAngle, quatFromEuler, quatNormalize, quatLookAlong,
+} from '../core/math/quat.js';
 import { NULL_HANDLE } from '../core/handle.js';
 
 // Shared scratch. Node methods are called from user code, never concurrently,
@@ -46,6 +48,19 @@ export class Node {
   /** Takes a quaternion. For angles you can reason about, use the two below. */
   setRotation(q) {
     this.scene.transforms.setRotation(this.entity, q);
+    return this;
+  }
+
+  /**
+   * Face -Z along (x, y, z), upright: the way a spot shines, the way the
+   * sun's light travels, the way a followed camera looks. In the parent's
+   * space, like every other setter here.
+   *
+   *   scene.sun.setDirection(-0.4, -0.7, -0.3);
+   */
+  setDirection(x, y, z) {
+    quatLookAlong(scratchQuat, [x, y, z]);
+    this.scene.transforms.setRotation(this.entity, scratchQuat);
     return this;
   }
 

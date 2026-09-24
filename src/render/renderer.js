@@ -19,6 +19,7 @@ import { mat4NormalMatrix } from '../core/math/mat4.js';
 import { vec3Create, vec3Sub, vec3Normalize } from '../core/math/vec3.js';
 import { frustumCreate, frustumFromViewProjection, frustumTestAABB } from '../core/math/frustum.js';
 import { grownCapacity } from '../core/grow.js';
+import { DIRECTIONAL_FLOATS } from '../scene/scene.js';
 
 import {
   MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, ALPHA_BLEND,
@@ -50,7 +51,7 @@ const now = () => (globalThis.performance?.now?.() ?? Date.now());
 export class Renderer {
   static async create(rhi, {
     maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
-    shadowDistance = null, post, gpuTiming = true, oit = false,
+    shadowDistance = null, post, gpuTiming = false, oit = false,
   } = {}) {
     const renderer = new Renderer(rhi, {
       maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit,
@@ -60,7 +61,7 @@ export class Renderer {
   }
 
   constructor(rhi, {
-    maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = true,
+    maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = false,
     oit = false,
   }) {
     this.shadowOptions = shadows ?? {};
@@ -103,6 +104,8 @@ export class Renderer {
         // zero, which is a number the shader already has in hand.
         { binding: 12, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 13, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        // Every directional light but the shadowed one.
+        { binding: 14, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ],
     });
     this.drawLayout = rhi.device.createBindGroupLayout({
@@ -124,6 +127,10 @@ export class Renderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.frameData = new Float32Array(FRAME_BYTES / 4);
+    // The directional lights that do not cast the shadow. Grown to the scene's
+    // count on demand; one entry to start, since a binding cannot be empty.
+    this.directionalCapacity = 1;
+    this.directionalBuffer = this._createDirectionalBuffer(1);
     // Same memory, integer view: the cluster grid dimensions are u32 in WGSL.
     this.frameU32 = new Uint32Array(this.frameData.buffer);
 
@@ -215,6 +222,14 @@ export class Renderer {
      * optimize the wrong one.
      */
     this.timing = { transforms: 0, upload: 0, graph: 0, encode: 0, total: 0 };
+
+    /**
+     * A fine-grained CPU profiler, or null. Nothing sets it but a Benchmark
+     * (src/bench.js). While it is null each phase boundary below costs one
+     * null check: the marks are `p?.mark(...)`, which does not even evaluate
+     * its argument. See bench.js for what it measures and how to read it.
+     */
+    this.profiler = null;
   }
 
   async _init() {
@@ -372,6 +387,7 @@ export class Renderer {
           { binding: 11, resource: { buffer: this.skinPalette.buffer } },
           { binding: 12, resource: { buffer: this.morph.deltaBuffer } },
           { binding: 13, resource: { buffer: this.morph.weightBuffer } },
+          { binding: 14, resource: { buffer: this.directionalBuffer } },
         ],
       });
       this._frameBindGroups.set(environment, bindGroup);
@@ -379,16 +395,28 @@ export class Renderer {
     return bindGroup;
   }
 
+  _createDirectionalBuffer(count) {
+    return this.rhi.device.createBuffer({
+      label: 'directionals',
+      size: count * DIRECTIONAL_FLOATS * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+  }
+
   render(scene, camera, jobs = null) {
     const rhi = this.rhi;
     const environment = scene.environment;
     if (!environment) throw new Error('Renderer: the scene has no environment');
 
+    const p = this.profiler;
+    p?.frameStart();
     const tFrame = now();
     this.stats.recomposed = scene.update(jobs);
     const tAfterTransforms = now();
+    p?.mark('transforms');
     camera.update(rhi.aspect);
     frustumFromViewProjection(this.frustum, camera.viewProjection);
+    p?.mark('camera');
 
     const count = scene.renderableCount;
     this.stats.renderables = count;
@@ -421,6 +449,7 @@ export class Renderer {
       );
       this._boundsRevision = scene.revision;
     }
+    p?.mark('bounds');
 
     // Culling happens on the GPU. Nothing here reads back which objects survived
     // -- that answer only ever exists in the indirect argument buffer, which
@@ -435,6 +464,7 @@ export class Renderer {
     this.gpu.update(scene, this.frustum, this.hzb, camera.viewProjection, writeDrawData,
       this.skinPalette.offsets, this.morph);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
+    p?.mark('draw data');
 
     // Palettes are rebuilt from this frame's pose, before anything reads them.
     // A grow replaces the buffer the frame group names, so that invalidates
@@ -457,6 +487,7 @@ export class Renderer {
     scene.transforms.moved.fill(0, 0, scene.transforms.capacity);
 
     const tAfterUpload = now();
+    p?.mark('skin + morph');
 
     if (this._batchRevision !== this.gpu.sceneRevision) {
       this.batchList.clear();
@@ -475,8 +506,10 @@ export class Renderer {
       this._batchRevision = this.gpu.sceneRevision;
     }
     this.stats.draws = this.gpu.batchCount;
+    p?.mark('batch sort');
 
     this._orderTransparent(scene, camera);
+    p?.mark('transparent sort');
 
     // These three recompute what the frame uniform is about to copy, so they
     // have to run FIRST. Filling the uniform before them uploaded the previous
@@ -501,12 +534,25 @@ export class Renderer {
 
     this.shadows.shadowDistance = shadowRange;
     this.skybox.update(camera, 1.0);
-    this.shadows.update(camera, scene.sun.direction);
     // Lights are scene objects: their position and aim live in their
     // transforms, which have composed by now. Copied into the packed array
     // here, immediately before upload, so a light parented to something that
     // moved this frame is lit from where it is rather than where it was.
-    if (scene.lightCount > 0) scene.refreshLights();
+    // Before the shadow fit, because the sun is one of them.
+    scene.refreshLights();
+    if (scene.directionalCount > this.directionalCapacity) {
+      this.directionalBuffer.destroy();
+      this.directionalCapacity = grownCapacity(this.directionalCapacity, scene.directionalCount);
+      this.directionalBuffer = this._createDirectionalBuffer(this.directionalCapacity);
+      this._frameBindGroups = new WeakMap();   // they name the buffer just replaced
+    }
+    if (scene.directionalCount > 0) {
+      rhi.queue.writeBuffer(this.directionalBuffer, 0, scene.directionals, 0,
+        scene.directionalCount * DIRECTIONAL_FLOATS);
+    }
+    p?.mark('lights');
+    this.shadows.update(camera, scene.sunDirection);
+    p?.mark('shadow fit');
     this.clusters.update(scene, camera, lightRange);
     // Growing the light list replaced lightBuffer, which every cached frame
     // bind group names. Dropping the cache rebuilds them on next use.
@@ -523,11 +569,11 @@ export class Renderer {
     this.frameData[19] = 1.0;
     // The shader wants the direction TOWARD the light; the scene stores the
     // direction light travels, which is what a user means by "sun direction".
-    this.frameData[20] = -scene.sun.direction[0];
-    this.frameData[21] = -scene.sun.direction[1];
-    this.frameData[22] = -scene.sun.direction[2];
+    this.frameData[20] = -scene.sunDirection[0];
+    this.frameData[21] = -scene.sunDirection[1];
+    this.frameData[22] = -scene.sunDirection[2];
     this.frameData[23] = environment.prefilterMips;
-    this.frameData.set(scene.sun.color, 24);
+    this.frameData.set(scene.sunColor, 24);
     this.frameData[27] = this.shadows.activeCascades;
 
     // Cascade matrices (4 x mat4), splits, texel sizes, then the bias params.
@@ -554,7 +600,9 @@ export class Renderer {
     this.frameData[112] = -camera.view[2];
     this.frameData[113] = -camera.view[6];
     this.frameData[114] = -camera.view[10];
+    this.frameU32[115] = scene.directionalCount;
     rhi.queue.writeBuffer(this.frameBuffer, 0, this.frameData);
+    p?.mark('clusters + frame uniform');
 
 
 
@@ -704,6 +752,7 @@ export class Renderer {
 
     graph.compile();
     const tAfterGraph = now();
+    p?.mark('graph build');
 
     const encoder = rhi.device.createCommandEncoder({ label: 'frame' });
     graph.execute(encoder);
@@ -718,10 +767,13 @@ export class Renderer {
     this.timing.graph = tAfterGraph - tAfterUpload;
     this.timing.encode = tEnd - tAfterGraph;
     this.timing.total = tEnd - tFrame;
+    p?.mark('encode');
     rhi.queue.submit([encoder.finish()]);
     // After the submit, never before: the command buffer above writes the
     // buffer this maps, and a buffer with a map pending cannot be written.
     this.gpuTiming.readback();
+    p?.mark('submit');
+    p?.frameEnd();
   }
 
   /**
@@ -745,6 +797,7 @@ export class Renderer {
     this.hzb.destroy();
     this.post.destroy();
     this.frameBuffer.destroy();
+    this.directionalBuffer.destroy();
   }
 
   /**

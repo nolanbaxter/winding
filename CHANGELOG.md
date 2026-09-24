@@ -7,14 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Lights and cameras you attach -- from code or from the file -- and a camera without perspective.**
+**Lights and cameras you attach -- from code or from the file -- a sun that is
+not special, a camera without perspective, and a way to measure all of it.**
 
 Breaking: `addLight` returns a node, and the index-based light calls are
 gone. A light index was never stable -- removal swap-compacts the array -- so
-anything holding one could end up pointing at a different light.
+anything holding one could end up pointing at a different light. And
+`scene.sun` is a node too: `scene.sun.direction.set(...)` and
+`scene.sun.color.set(...)` become `scene.sun.setDirection(x, y, z)` and
+`scene.sun.setLight({ color, intensity })`.
 
 ### Changed
 
+- **The sun is a directional light, and not a special one.** It was a plain
+  `{ direction, color }` object the renderer read, the one light that was
+  not a node and the only kind there could be one of. Now `addLight({ type:
+  'directional' })` makes a node like any other light, and EVERY directional
+  light lights the scene. The one thing only one can have is the shadow map,
+  and it goes to the brightest by luminance -- the shadow you would see --
+  so `scene.sun` is derived from the lights there are, not a slot to fill. A
+  new scene still starts with one, as a light node you can aim, recolour,
+  parent (a day cycle is one rotating node) or destroy.
+- **GPU pass timing is off by default** (`gpuTiming: false`). It stamped
+  every pass of every frame for a result nothing in the engine read. It can
+  now be switched at runtime (`renderer.gpuTiming.enabled`), which is what
+  the benchmark does for the length of a run.
 - **Lights are scene nodes.** `scene.addLight(...)` returns a `Node` and
   accepts a `parent`, so a light on a moving object follows it with no
   per-frame bookkeeping -- the viewer example used to call
@@ -49,8 +66,20 @@ anything holding one could end up pointing at a different light.
   and the same windowed falloff -- so `range` is the radius. An absent range
   (infinite, per the spec) becomes the distance where the light falls below
   one 8-bit step on a white surface: `sqrt(256 I / pi)`. Directional lights
-  are skipped rather than overwriting the scene's sun. A file that lists the
-  extension as required now loads.
+  come in too and join the scene's others. A file that lists the extension as
+  required now loads.
+- **Benchmarking, opt-in** (`src/bench.js`, not imported by the engine).
+  `new Benchmark(engine).run(scene, camera)` times every CPU phase of a
+  frame -- thirteen of them, which partition the frame so they sum to its
+  total -- every GPU pass, and the wall time, and `Benchmark.format` says
+  whether the frame was CPU-bound, GPU-bound or waiting for the display.
+  Until a benchmark attaches, the renderer's hook is a null check per phase.
+- **`node.setDirection(x, y, z)`** faces a node's -Z along a direction,
+  upright, and **`quatLookAlong`** is the rotation behind it. Upright
+  matters: the shortest turn, which `addLight({ direction })` used, rolls
+  the node when the target is up and to the side at once.
+- **`KHR_materials_emissive_strength`.** Blender writes it for any emission
+  strength above 1; ignored, those glows came out dimmer with nothing said.
 - **glTF cameras.** Perspective and orthographic cameras import as
   `scene.cameras`, each already following its node. `zfar` is dropped for
   perspective (there is no far plane) and the canvas decides the aspect;

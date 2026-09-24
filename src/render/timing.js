@@ -44,8 +44,15 @@ export class GpuProfiler {
    */
   constructor(rhi, { enabled = true, depth = 3 } = {}) {
     this.rhi = rhi;
-    /** False on any device without `timestamp-query`. Every method is then a no-op. */
-    this.supported = enabled && (rhi.features?.has('timestamp-query') ?? false);
+    /** Whether the device can time passes at all. Fixed at device creation. */
+    this.available = rhi.features?.has('timestamp-query') ?? false;
+    /**
+     * Whether it does. Settable at any time: the device asks for the feature
+     * whenever the adapter has it, so switching on later needs nothing that
+     * construction would have had to decide. Off, every method is a no-op and
+     * no pass carries timestamp writes.
+     */
+    this.enabled = enabled;
     this.depth = depth;
 
     /**
@@ -81,6 +88,11 @@ export class GpuProfiler {
     this._names = [];
     /** The slot resolve() claimed this frame, waiting for readback(). */
     this._pending = null;
+  }
+
+  /** True when this is actually timing: available AND enabled. */
+  get supported() {
+    return this.available && this.enabled;
   }
 
   /**

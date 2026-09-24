@@ -9,9 +9,10 @@
 //   instantiate(model, entities, transforms);   // becomes entities
 //
 // Lights (KHR_lights_punctual) and cameras come through as data on the nodes
-// that carry them; the scene makes them live. Directional lights do not: the
-// scene has one sun, and an asset that silently replaced yours on add() would
-// be worse than one that leaves it alone. No other extension is handled.
+// that carry them; the scene makes them live, and a directional light becomes
+// the scene's sun for as long as the asset is in it (see Scene.sun).
+// KHR_materials_emissive_strength scales the emissive factor. No other
+// extension is handled.
 //
 // Skins and morph targets both come through whole -- the joint list, the
 // inverse bind matrices and the per-vertex influences (skin.js); the per-target
@@ -479,7 +480,13 @@ function readMaterials(json) {
       baseColorFactor: Float32Array.from(pbr.baseColorFactor ?? [1, 1, 1, 1]),
       metallic: pbr.metallicFactor ?? 1,
       roughness: pbr.roughnessFactor ?? 1,
-      emissive: Float32Array.from(material.emissiveFactor ?? [0, 0, 0]),
+      // KHR_materials_emissive_strength lifts the factor past 1, which the
+      // core spec clamps it to. Blender writes it for any emission strength
+      // above 1, so ignoring it dims every such glow with nothing reported.
+      // Applied here, once: the shader already takes the factor as a float.
+      emissive: Float32Array.from(material.emissiveFactor ?? [0, 0, 0]).map(
+        (v) => v * (material.extensions?.KHR_materials_emissive_strength?.emissiveStrength ?? 1),
+      ),
       alphaMode: material.alphaMode ?? 'OPAQUE',
       alphaCutoff: material.alphaCutoff ?? 0.5,
       doubleSided: material.doubleSided === true,
@@ -562,7 +569,7 @@ function readNodes(json) {
 // ------------------------------------------------------- lights and cameras
 
 /** Extensions this importer understands well enough to accept as required. */
-const SUPPORTED_EXTENSIONS = new Set(['KHR_lights_punctual']);
+const SUPPORTED_EXTENSIONS = new Set(['KHR_lights_punctual', 'KHR_materials_emissive_strength']);
 
 /**
  * KHR_lights_punctual, in the terms scene.addLight uses.
@@ -573,20 +580,25 @@ const SUPPORTED_EXTENSIONS = new Set(['KHR_lights_punctual']);
  * spec recommends -- inverse-square times clamp(1 - (d/range)^4)^2 -- is the
  * shader's, term for term. So `range` IS the radius.
  *
- * Directional lights come back as null; see the header.
+ * A directional light has no position and no reach, just a direction (its
+ * node's -Z) and a colour at an intensity (lux, as the sun's is). An unknown
+ * type comes back as null and is skipped.
  */
 function readLights(json) {
   const lights = json.extensions?.KHR_lights_punctual?.lights ?? [];
   return lights.map((light) => {
-    if (light.type !== 'point' && light.type !== 'spot') return null;
     const color = light.color ?? [1, 1, 1];
     const intensity = light.intensity ?? 1;
+    if (light.type === 'directional') {
+      return { name: light.name ?? '', type: 'directional', color, intensity };
+    }
+    if (light.type !== 'point' && light.type !== 'spot') return null;
     return {
       name: light.name ?? '',
+      type: light.type,
       color,
       intensity,
       radius: light.range ?? unboundedLightRadius(intensity, color),
-      spot: light.type === 'spot',
       innerAngle: light.spot?.innerConeAngle ?? 0,
       outerAngle: light.spot?.outerConeAngle ?? Math.PI / 4,
     };

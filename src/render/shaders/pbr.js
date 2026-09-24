@@ -37,8 +37,14 @@ struct Frame {
   shadowParams   : vec4<f32>,               // 400  x = normal bias, y = map size
   clusterGrid    : vec4<u32>,               // 416  x, y, z cells; w = light count
   clusterDepth   : vec4<f32>,               // 432  x slice scale, y bias, zw tile size
-  cameraForward  : vec4<f32>,               // 448  world-space view axis; w unused
+  cameraForward  : vec4<f32>,               // 448  world-space view axis; w = directional count (u32 bits)
 };                                          // 464
+
+/** A directional light other than the shadowed one. Packed by Scene.refreshLights. */
+struct Directional {
+  direction : vec4<f32>,   // the way its light travels
+  color     : vec4<f32>,   // colour times intensity
+};
 
 struct Light {
   positionRadius : vec4<f32>,
@@ -112,6 +118,8 @@ struct Material {
 @group(0) @binding(12) var<storage, read> morphDeltas   : array<f32>;
 // Every morphed instance's weights, rebuilt each frame.
 @group(0) @binding(13) var<storage, read> morphWeights  : array<f32>;
+// Every directional light except the one with the shadow map, which is frame.sun*.
+@group(0) @binding(14) var<storage, read> directionals  : array<Directional>;
 
 @group(2) @binding(0) var<uniform> material     : Material;
 @group(2) @binding(1) var          baseColorMap : texture_2d<f32>;
@@ -501,6 +509,22 @@ fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // usual cause of shadowed areas going implausibly black.
   let visibility = sunVisibility(v.world, n, NoL, viewDepth);
   var direct = (kd * diffuseColor / PI + specular) * frame.sunColor.rgb * NoL * visibility;
+
+  // ---- every other directional light ----
+  // The same BRDF as the sun above, without the shadow: there is one shadow
+  // map, and it went to the brightest. Nothing else about them is different.
+  let directionalCount = bitcast<u32>(frame.cameraForward.w);
+  for (var di = 0u; di < directionalCount; di = di + 1u) {
+    let dl = directionals[di];
+    let dL = -dl.direction.xyz;
+    let dNoL = dot(n, dL);
+    if (dNoL <= 0.0) { continue; }
+    let dH = normalize(view + dL);
+    let dF = fresnelSchlick(max(dot(view, dH), 0.0), f0);
+    let dSpecular = distributionGGX(max(dot(n, dH), 0.0), roughness)
+                  * visibilitySmithGGX(NoV, dNoL, roughness) * dF;
+    direct = direct + ((vec3<f32>(1.0) - dF) * diffuseColor / PI + dSpecular) * dl.color.rgb * dNoL;
+  }
 
   // ---- clustered punctual lights ----
   // Only the lights the compute pass put in THIS fragment's cell are touched,

@@ -245,3 +245,41 @@ export function quatFromTo(out, from, to) {
   out[3] = 1 + dot;
   return quatNormalize(out, out);
 }
+
+const LOOK_UP = Object.freeze([0, 1, 0]);
+const LOOK_FORWARD = Object.freeze([0, 0, -1]);
+const LOOK_BASIS = new Float32Array(16);
+
+/**
+ * The rotation that points -Z along `direction`, with +Y kept as upright as
+ * it can be. The orientation of a light, a sun or a camera given only where
+ * it should face.
+ *
+ * NOT quatFromTo, which finds the SHORTEST turn from -Z and so rolls the node
+ * about its own axis whenever the target is off to one side and up at once.
+ * Invisible on a round light and a tilted horizon on anything with an up.
+ *
+ * Looking straight along `up` has no upright answer -- every roll is equally
+ * level -- so there it falls back to the shortest turn. `direction` need not
+ * be unit length.
+ */
+export function quatLookAlong(out, direction, up = LOOK_UP) {
+  const length = Math.hypot(direction[0], direction[1], direction[2]) || 1;
+  const fx = direction[0] / length, fy = direction[1] / length, fz = direction[2] / length;
+
+  // right = forward x up
+  let rx = fy * up[2] - fz * up[1];
+  let ry = fz * up[0] - fx * up[2];
+  let rz = fx * up[1] - fy * up[0];
+  const rLength = Math.hypot(rx, ry, rz);
+  if (rLength < 1e-6) return quatFromTo(out, LOOK_FORWARD, [fx, fy, fz]);
+  rx /= rLength; ry /= rLength; rz /= rLength;
+
+  // A basis whose columns are the node's axes: +X right, +Y up, +Z backward.
+  const m = LOOK_BASIS;
+  m[0] = rx; m[1] = ry; m[2] = rz;
+  m[4] = ry * fz - rz * fy; m[5] = rz * fx - rx * fz; m[6] = rx * fy - ry * fx;
+  m[8] = -fx; m[9] = -fy; m[10] = -fz;
+  m[15] = 1;
+  return quatFromMat4(out, m);
+}

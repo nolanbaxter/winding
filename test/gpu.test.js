@@ -13,6 +13,7 @@
 // full frame records and submits without the device complaining.
 
 import { Winding, Camera } from '../src/winding.js';
+import { Benchmark } from '../src/bench.js';
 import { shaderErrors } from '../src/rhi/shader.js';
 import { NOT_BATCHED, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
 import {
@@ -124,34 +125,47 @@ export async function run(canvas, onDone) {
     await engine.rhi.device.queue.onSubmittedWorkDone();
   });
 
-  await step('GPU pass timing reports a duration per pass', async () => {
-    const profiler = engine.renderer.gpuTiming;
-    if (!profiler.supported) return 'skipped: no timestamp-query on this adapter';
+  await step('a benchmark times every CPU phase and GPU pass, and leaves nothing on', async () => {
+    const renderer = engine.renderer;
+    if (renderer.profiler !== null) throw new Error('a profiler was attached before anyone asked');
+    if (renderer.gpuTiming.enabled) throw new Error('GPU timing was on by default');
 
     // Chrome quantises timestamps to 65536ns, so most passes read as 0 on any
     // given frame. Only the mean over a few hundred frames means anything.
-    const SAMPLES = 400;
-    profiler.resetAverages();
-    for (let i = 0; i < SAMPLES * 3 && profiler.samples < SAMPLES; i++) {
-      camera.position.set([Math.sin(i * 0.02) * 8, 2, Math.cos(i * 0.02) * 8]);
-      engine.renderFrame(scene, camera);
-      await engine.rhi.device.queue.onSubmittedWorkDone();
-    }
-    if (profiler.samples === 0) throw new Error('no timing readback completed');
+    const report = await new Benchmark(engine).run(scene, camera, {
+      frames: 400,
+      update: (i) => camera.position.set([Math.sin(i * 0.02) * 8, 2, Math.cos(i * 0.02) * 8]),
+    });
 
-    for (const { name, ms } of profiler.average) {
-      if (!Number.isFinite(ms) || ms < 0) throw new Error(`pass ${name} averaged ${ms}ms`);
+    if (renderer.profiler !== null) throw new Error('the benchmark stayed attached');
+    if (renderer.gpuTiming.enabled) throw new Error('GPU timing stayed on after the run');
+
+    // The renderer's side of the contract: every phase marked, in frame order.
+    const expected = [
+      'transforms', 'camera', 'bounds', 'draw data', 'skin + morph', 'batch sort',
+      'transparent sort', 'lights', 'shadow fit', 'clusters + frame uniform',
+      'graph build', 'encode', 'submit', 'frame (cpu)',
+    ];
+    const names = report.cpu.map((row) => row.name);
+    if (names.join() !== expected.join()) throw new Error(`phases were: ${names.join(', ')}`);
+    if (report.frames !== 400) throw new Error(`${report.frames} frames recorded, not 400`);
+    if (!(report.wall?.median > 0)) throw new Error('no wall time');
+
+    console.log(Benchmark.format(report));
+
+    if (!renderer.gpuTiming.available) return `cpu only: no timestamp-query on this adapter`;
+    if (report.gpuSamples === 0) throw new Error('no GPU timing readback completed');
+    for (const { name, mean } of report.gpu) {
+      if (!Number.isFinite(mean) || mean < 0) throw new Error(`pass ${name} averaged ${mean}ms`);
     }
-    if (profiler.averageTotalMs <= 0) {
+    if (!report.gpu.some((row) => row.mean > 0)) {
       throw new Error('every pass averaged 0ms, which means the queries never landed');
     }
-
-    console.log(`[gpu timing] ${profiler.samples} samples, ${profiler.averageTotalMs.toFixed(3)}ms total:`,
-      profiler.average.map((p) => `${p.name}=${p.ms.toFixed(4)}`).join(' '));
-
-    const top = profiler.slowest(3).map((p) => `${p.name} ${p.ms.toFixed(3)}ms`).join(', ');
-    return `${profiler.average.length} passes over ${profiler.samples} frames, `
-      + `${profiler.averageTotalMs.toFixed(2)}ms; slowest ${top}`;
+    const top = (rows, key) => [...rows].sort((a, b) => b[key] - a[key])[0];
+    const cpuTop = top(report.cpu.filter((r) => r.name !== 'frame (cpu)'), 'median');
+    const gpuTop = top(report.gpu, 'mean');
+    return `${report.cpu.length - 1} cpu phases, ${report.gpu.length} gpu passes; `
+      + `slowest ${cpuTop.name} ${cpuTop.median.toFixed(3)}ms / ${gpuTop.name} ${gpuTop.mean.toFixed(3)}ms`;
   });
 
   await step('blended geometry is held out of the batched path', async () => {
@@ -539,7 +553,9 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.position.set([0, 0, 2]);
       cam.target.set([0, 0, 0]);
       scene.add(await probe.load(buildFeatureGLB(options)));
-      if (light) scene.addLight(light);
+      // A function gets the scene to arrange as it likes; an object is one light.
+      if (typeof light === 'function') light(scene);
+      else if (light) scene.addLight(light);
       probe.renderFrame(scene, cam);
       // Once per frame, before anything else awaits -- see rhi.readPixels.
       const pixels = await probe.rhi.readPixels();
@@ -690,6 +706,22 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         throw new Error(`a light imported from glTF did not reach the surface: ${show(unlit)} -> ${show(fileLit)}`);
       }
       results.push('a light imported from glTF lights the surface');
+
+      // EVERY directional light lights, not only the one with the shadow. The
+      // bright one faces away from the quad, so it takes the shadow slot and
+      // adds nothing; the dim one faces it and can only reach the surface
+      // through the loop over the rest. Before, it would have been ignored.
+      const grey = { baseColorFactor: [0.6, 0.6, 0.6, 1] };
+      const noSun = await shootWith(grey, (scene) => scene.sun.destroy());
+      const fill = await shootWith(grey, (scene) => {
+        scene.sun.destroy();
+        scene.addLight({ type: 'directional', direction: [0, 0, 1], intensity: 20 });   // away
+        scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity: 2 });   // at it
+      });
+      if (!(fill[0] > noSun[0] + 20)) {
+        throw new Error(`a directional light without the shadow lit nothing: ${show(noSun)} -> ${show(fill)}`);
+      }
+      results.push('a directional light without the shadow still lights');
 
       // Emissive with no texture. The default map was black, so this factor
       // used to be multiplied away entirely.

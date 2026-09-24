@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 
-import { Scene } from '../src/scene/scene.js';
+import { Scene, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
 import { Node } from '../src/scene/node.js';
 import { Camera } from '../src/scene/camera.js';
 import { OrbitController } from '../src/app/controllers.js';
@@ -59,6 +59,13 @@ function fakeAsset({ nodes, roots, meshCount = 1, primitivesPerMesh = 1 } = {}) 
   };
 }
 
+/**
+ * Entities a scene holds before anything is added: its sun, which is a node.
+ * Measured rather than written down, so a count that means "what the asset
+ * made" stays right whatever a fresh scene starts with.
+ */
+const EMPTY_SCENE_ENTITIES = new Scene({ capacity: 8 }).entities.liveCount;
+
 function node(name, extra = {}) {
   return {
     name,
@@ -80,7 +87,7 @@ test('adding an asset creates entities, transforms and renderables', () => {
   const root = scene.add(fakeAsset());
 
   assert.ok(root instanceof Node);
-  assert.equal(scene.entities.liveCount, 1);
+  assert.equal(scene.entities.liveCount - EMPTY_SCENE_ENTITIES, 1);
   assert.equal(scene.renderableCount, 1);
   assert.equal(scene.renderablePrimitive[0].indexCount, 36);
   assert.equal(scene.renderableMaterial[0], 0);
@@ -90,7 +97,7 @@ test('a mesh with several primitives becomes several renderables on one entity',
   const scene = new Scene({ capacity: 64 });
   const root = scene.add(fakeAsset({ primitivesPerMesh: 3 }));
 
-  assert.equal(scene.entities.liveCount, 1, 'still one node');
+  assert.equal(scene.entities.liveCount - EMPTY_SCENE_ENTITIES, 1, 'still one node');
   assert.equal(scene.renderableCount, 3, 'but three things to draw');
   for (let i = 0; i < 3; i++) {
     assert.equal(scene.renderableEntity[i], root.entity);
@@ -113,14 +120,14 @@ test('a multi-root asset gets one wrapper node', () => {
     roots: [0, 1],
   }));
 
-  assert.equal(scene.entities.liveCount, 3, 'two nodes plus the wrapper');
+  assert.equal(scene.entities.liveCount - EMPTY_SCENE_ENTITIES, 3, 'two nodes plus the wrapper');
   assert.equal(root.children().length, 2);
 });
 
 test('a single-root asset is returned directly, with no wrapper', () => {
   const scene = new Scene({ capacity: 64 });
   const root = scene.add(fakeAsset());
-  assert.equal(scene.entities.liveCount, 1, 'no extra node invented');
+  assert.equal(scene.entities.liveCount - EMPTY_SCENE_ENTITIES, 1, 'no extra node invented');
   assert.equal(scene.transforms.parent[handleIndex(root.entity)], NO_PARENT);
 });
 
@@ -246,12 +253,12 @@ test('removing a node takes its subtree and its renderables', () => {
   }));
 
   assert.equal(scene.renderableCount, 3);
-  assert.equal(scene.entities.liveCount, 3);
+  assert.equal(scene.entities.liveCount - EMPTY_SCENE_ENTITIES, 3);
 
   doomed.destroy();
 
   assert.equal(scene.renderableCount, 1, 'both of its renderables went');
-  assert.equal(scene.entities.liveCount, 1);
+  assert.equal(scene.entities.liveCount - EMPTY_SCENE_ENTITIES, 1);
   assert.equal(scene.renderableEntity[0], keep.entity, 'the survivor is intact');
   assert.equal(doomed.alive, false);
 });
@@ -698,7 +705,7 @@ function carrierAsset(extra, assetExtra) {
 test('an imported light is its node, and follows the asset', () => {
   const scene = new Scene({ capacity: 16 });
   const root = scene.add(carrierAsset({ light: 0 }, {
-    lights: [{ color: [1, 0.5, 0.25], intensity: 9, radius: 4, spot: false, innerAngle: 0, outerAngle: 0.7 }],
+    lights: [{ color: [1, 0.5, 0.25], intensity: 9, radius: 4, type: 'point', innerAngle: 0, outerAngle: 0.7 }],
   }));
   root.setPosition(5, 0, 0);
   scene.update();
@@ -712,7 +719,7 @@ test('an imported light is its node, and follows the asset', () => {
 test('an imported spot turns with the asset', () => {
   const scene = new Scene({ capacity: 16 });
   const root = scene.add(carrierAsset({ light: 0 }, {
-    lights: [{ color: [1, 1, 1], intensity: 1, radius: 4, spot: true, innerAngle: 0.1, outerAngle: 0.5 }],
+    lights: [{ color: [1, 1, 1], intensity: 1, radius: 4, type: 'spot', innerAngle: 0.1, outerAngle: 0.5 }],
   }));
   root.setRotationAxisAngle([0, 1, 0], Math.PI / 2);   // quarter turn about +Y
   scene.update();
@@ -720,17 +727,143 @@ test('an imported spot turns with the asset', () => {
   vecClose([...scene.lights.subarray(8, 11)], [-1, 0, 0], 1e-5, '-Z swung onto -X');
 });
 
-test('a directional light in an asset is skipped, not misread', () => {
+test('an unknown light type in an asset is skipped, not misread', () => {
   const scene = new Scene({ capacity: 16 });
   scene.add(carrierAsset({ light: 0 }, { lights: [null] }));
   assert.equal(scene.lightCount, 0);
+});
+
+// ---------------------------------------------------------------------- sun
+
+console.log('\nthe sun is a node');
+
+/** Compose and refresh, as a frame would before reading the sun. */
+function settleSun(scene) {
+  scene.update();
+  scene.refreshLights();
+}
+
+test('a new scene has a sun, and it is a node', () => {
+  const scene = new Scene({ capacity: 16 });
+  const sun = scene.sun;
+  assert.ok(sun instanceof Node && sun.alive);
+  settleSun(scene);
+  const d = [-0.35, -0.55, -0.45];
+  const length = Math.hypot(...d);
+  vecClose(scene.sunDirection, d.map((v) => v / length), 1e-5, 'the default direction');
+  vecClose(scene.sunColor, [3.2, 3.0, 2.7], 1e-5, 'the default colour, as before');
+  assert.equal(scene.lightCount, 0, 'the sun is not a clustered light');
+});
+
+test('aiming and recolouring the sun is aiming and recolouring its node', () => {
+  const scene = new Scene({ capacity: 16 });
+  scene.sun.setDirection(0, -1, 0);
+  assert.equal(scene.sun.setLight({ color: [1, 0.5, 0.25], intensity: 2 }), true);
+  settleSun(scene);
+  vecClose(scene.sunDirection, [0, -1, 0], 1e-6, 'straight down: the degenerate look-along case');
+  vecClose(scene.sunColor, [2, 1, 0.5], 1e-6);
+
+  scene.sun.setLight({ intensity: 4 });
+  settleSun(scene);
+  vecClose(scene.sunColor, [4, 2, 1], 1e-6, 'partial: the colour stayed');
+});
+
+test('a sun turns with its parent, so a day cycle is one rotating node', () => {
+  const scene = new Scene({ capacity: 16 });
+  const sky = scene.createNode();
+  scene.sun.setDirection(0, 0, -1);
+  scene.sun.setParent(sky);
+  sky.setRotationAxisAngle([1, 0, 0], -Math.PI / 2);   // tip -Z down to -Y
+  settleSun(scene);
+  vecClose(scene.sunDirection, [0, -1, 0], 1e-5);
+});
+
+test('every directional light lights the scene, and the brightest has the shadow', () => {
+  // No light is the sun by kind or by order. The shadow map goes to whichever
+  // is brightest by luminance; every other one is packed for the shader.
+  const scene = new Scene({ capacity: 16 });
+  const original = scene.sun;
+  scene.sun.setDirection(0, -1, 0);
+
+  // Red at 5 is luminance 1.06; the default sun is 3.02. The file's light is
+  // dimmer, so it lights -- and the default keeps the shadow.
+  const dim = scene.add(carrierAsset({ light: 0 }, {
+    lights: [{ type: 'directional', color: [1, 0, 0], intensity: 5 }],
+  }));
+  settleSun(scene);
+  assert.equal(scene.sun.entity, original.entity, 'the brighter one keeps the shadow');
+  assert.equal(scene.directionalCount, 1, 'the dimmer one still lights');
+  vecClose(scene.directionals.subarray(0, 3), [0, 0, -1], 1e-6, 'aimed by its node');
+  vecClose(scene.directionals.subarray(4, 7), [5, 0, 0], 1e-6, 'colour at intensity');
+
+  // A brighter one takes the shadow, and the default joins the others.
+  const bright = scene.addLight({ type: 'directional', direction: [1, -1, 0], intensity: 10 });
+  settleSun(scene);
+  assert.equal(scene.sun.entity, bright.entity);
+  vecClose(scene.sunColor, [10, 10, 10], 1e-6);
+  assert.equal(scene.directionalCount, 2);
+
+  // Removing lights never needs restoring anything: the rule just re-reads.
+  bright.destroy();
+  dim.destroy();
+  settleSun(scene);
+  assert.equal(scene.sun.entity, original.entity);
+  assert.equal(scene.directionalCount, 0);
+  vecClose(scene.sunDirection, [0, -1, 0], 1e-6, 'with the aim it had');
+});
+
+test('brightening a light moves the shadow to it', () => {
+  const scene = new Scene({ capacity: 16 });
+  const other = scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity: 1 });
+  settleSun(scene);
+  assert.notEqual(scene.sun.entity, other.entity);
+  other.setLight({ intensity: 50 });
+  settleSun(scene);
+  assert.equal(scene.sun.entity, other.entity, 'derived from the lights, every frame');
+});
+
+test('the packed directionals grow past their starting size', () => {
+  const scene = new Scene({ capacity: 16 });
+  for (let i = 0; i < 9; i++) {
+    scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity: 0.1 * (i + 1) });
+  }
+  settleSun(scene);
+  assert.equal(scene.directionalCount, 9, 'ten directionals, one of them the sun');
+  assert.ok(scene.directionals.length >= 9 * DIRECTIONAL_FLOATS);
+});
+
+test('no sun at all is allowed, and lights nothing', () => {
+  const scene = new Scene({ capacity: 16 });
+  scene.sun.destroy();
+  settleSun(scene);
+  assert.equal(scene.sun, null);
+  vecClose(scene.sunColor, [0, 0, 0], 0);
+});
+
+test('addLight refuses a type it does not have', () => {
+  const scene = new Scene({ capacity: 16 });
+  assert.throws(() => scene.addLight({ type: 'area' }), /point, spot or directional/);
+});
+
+test('setDirection keeps the node upright, where the shortest turn would roll it', () => {
+  // Up and to the side at once is the case the shortest turn gets wrong: it
+  // tips the node about its own axis. An upright node's +X stays level.
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.createNode();
+  node.setDirection(1, 1, -1);
+  scene.update();
+  const m = scene.transforms.world;
+  const o = handleIndex(node.entity) * 16;
+  close(m[o + 1], 0, 1e-6, 'right axis has no vertical component');
+  const f = [-m[o + 8], -m[o + 9], -m[o + 10]];
+  vecClose(f, [1, 1, -1].map((v) => v / Math.sqrt(3)), 1e-6, 'and -Z is where it was sent');
 });
 
 test('removing an asset removes its lights and its cameras', () => {
   const scene = new Scene({ capacity: 16 });
   const kept = scene.add(carrierAsset({ camera: 0 }, { cameras: [{ orthographic: false, fovY: 1, near: 0.1 }] }));
   const doomed = scene.add(carrierAsset({ light: 0, camera: 0 }, {
-    lights: [{ color: [1, 1, 1], intensity: 1, radius: 4, spot: false }],
+    lights: [{ color: [1, 1, 1], intensity: 1, radius: 4, type: 'point' }],
     cameras: [{ orthographic: false, fovY: 1, near: 0.1 }],
   }));
   assert.equal(scene.cameras.length, 2);

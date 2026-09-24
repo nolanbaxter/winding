@@ -814,9 +814,9 @@ await atest('punctual lights import onto their nodes, in the engine\'s own terms
   assert.deepEqual(bulb.color, [1, 0.5, 0.25]);
   assert.equal(bulb.intensity, 30);
   assert.equal(bulb.radius, 7, 'range is the radius: the spec\'s falloff is the shader\'s');
-  assert.equal(bulb.spot, false);
+  assert.equal(bulb.type, 'point');
 
-  assert.equal(torch.spot, true);
+  assert.equal(torch.type, 'spot');
   assert.equal(torch.intensity, 1, 'spec default');
   close(torch.innerAngle, 0.1);
   close(torch.outerAngle, 0.4);
@@ -844,12 +844,35 @@ await atest('a light with no range reaches where it stops being visible', async 
   assert.equal(unboundedLightRadius(0, [1, 1, 1]), 0, 'a dark light reaches nowhere');
 });
 
-await atest('directional lights are left to the scene\'s sun', async () => {
+await atest('a directional light imports as a sun: colour and intensity, no reach', async () => {
   const model = await loadGLTF(sceneryGLB({
-    lights: [{ type: 'directional', intensity: 3 }],
+    lights: [{ type: 'directional', intensity: 3, color: [1, 0.9, 0.8] }, { type: 'area' }],
     nodes: [{ extensions: { KHR_lights_punctual: { light: 0 } } }],
   }));
-  assert.equal(model.lights[0], null);
+  assert.equal(model.lights[0].type, 'directional');
+  assert.equal(model.lights[0].intensity, 3);
+  assert.deepEqual(model.lights[0].color, [1, 0.9, 0.8]);
+  assert.equal('radius' in model.lights[0], false, 'a sun reaches everywhere');
+  assert.equal(model.lights[1], null, 'a type the spec does not define is skipped');
+});
+
+await atest('emissive strength lifts the emissive factor past 1', async () => {
+  // Blender writes this extension for any emission strength above 1. Ignored,
+  // every such glow came out dimmer and nothing said so.
+  const json = {
+    asset: { version: '2.0' },
+    extensionsUsed: ['KHR_materials_emissive_strength'],
+    materials: [
+      { emissiveFactor: [1, 0.5, 0], extensions: { KHR_materials_emissive_strength: { emissiveStrength: 4 } } },
+      { emissiveFactor: [1, 0.5, 0] },
+    ],
+  };
+  const model = await loadGLTF(makeGLB(json, null));
+  assert.deepEqual([...model.materials[0].emissive], [4, 2, 0]);
+  assert.deepEqual([...model.materials[1].emissive], [1, 0.5, 0], 'no extension, no change');
+
+  json.extensionsRequired = ['KHR_materials_emissive_strength'];
+  await loadGLTF(makeGLB(json, null));   // accepted when required, too
 });
 
 await atest('KHR_lights_punctual is accepted as a required extension', async () => {

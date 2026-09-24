@@ -40,7 +40,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/core.test.js && node test/scene.test.js && node test/gltf.test.js && node test/animation.test.js && node test/render.test.js && node test/app.test.js && node test/shadow.test.js && node test/graph.test.js && node test/clustered.test.js && node test/hzb.test.js && node test/jobs.test.js",
+    "test": "node test/core.test.js && node test/scene.test.js && node test/gltf.test.js && node test/animation.test.js && node test/render.test.js && node test/app.test.js && node test/shadow.test.js && node test/graph.test.js && node test/clustered.test.js && node test/hzb.test.js && node test/jobs.test.js && node test/bench.test.js",
     "test:gpu": "node serve.js"
   }
 }

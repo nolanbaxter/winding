@@ -153,14 +153,15 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 429 checks, Node, no browser
+npm test          # 479 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 17 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
 keys, the render graph, shadow fitting, clustering and the job system. They cannot touch WGSL, so the GPU suite boots the
 engine on a real device and checks that every shader compiles, every material pipeline permutation
-builds, 30 frames submit without the device complaining, and that per-pass GPU timings come back.
+builds, 30 frames submit without the device complaining, and that a benchmark run times every CPU
+phase and GPU pass.
 
 ## What it does
 
@@ -205,6 +206,24 @@ radius and cone change through `light.setLight({ ... })`; position and aim are t
 `camera.follow(node)` does the same for a camera: parent a node to a car and the camera rides it,
 looking down the node's -Z.
 
+**The sun is not special.** A directional light is a node like the rest --
+`addLight({ type: 'directional' })`, or one from a glTF file -- and every one of them lights the
+scene. The only thing that cannot be shared is the shadow map, and it goes to the brightest, by
+luminance: the shadow you would actually see. `scene.sun` is that light, a question about the
+lights there are rather than a slot. A new scene starts with one; aim it with
+`scene.sun.setDirection(x, y, z)`, recolour it with `setLight`, or destroy it.
+
+**Benchmarking, opt-in.** `src/bench.js` is never imported by the engine, and until it attaches,
+the renderer's profiling hook is a null check. A run times every CPU phase of a frame (they sum to
+the frame, so nothing hides), every GPU pass, and the wall time, and says what the frame is bound
+by -- CPU, GPU, or waiting for the display:
+
+```js
+import { Benchmark } from 'winding-engine/bench.js';
+const report = await new Benchmark(engine).run(scene, camera, { frames: 300 });
+console.log(Benchmark.format(report));
+```
+
 **Two transparency paths.** Blended geometry is culled and sorted back-to-front on the CPU, then
 drawn after every opaque batch. `{ oit: true }` swaps that for weighted-blended order-independent
 transparency: two targets and a resolve, no sorting at all. They are different tools rather than one
@@ -222,8 +241,10 @@ analytic polynomial rather than a lookup texture, which removes a texture and a 
 byte-strided and normalized accessors, sparse accessors, generated tangents, both UV sets with
 per-texture `texCoord`, and vertex colours. Point and spot lights (`KHR_lights_punctual`) and cameras
 come in on their nodes, so a lamp or a camera animated in Blender plays with the clip; imported
-cameras are in `scene.cameras`. Directional lights are left to the scene's sun. Any other extension
-a document *requires* is refused rather than loaded into geometry that is quietly wrong.
+cameras are in `scene.cameras`; a directional light joins the scene's others. Emission strength
+(`KHR_materials_emissive_strength`, which Blender writes for anything brighter than 1) is honoured.
+Any other extension a document *requires* is refused rather than loaded into geometry that is
+quietly wrong.
 
 **Animation.** All three glTF interpolation modes — LINEAR, STEP and CUBICSPLINE — with rotations
 slerped rather than lerped. Playback state is per instance, so two copies of one asset play the same

@@ -21,7 +21,7 @@ import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
 import { vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
 import { mat4Create, mat4Copy, mat4Invert } from '../core/math/mat4.js';
-import { quatCreate, quatFromTo } from '../core/math/quat.js';
+import { quatCreate, quatLookAlong } from '../core/math/quat.js';
 import { grownCapacity, growArray } from '../core/grow.js';
 
 const DEFAULT_CAPACITY = 4096;
@@ -81,10 +81,22 @@ export class Scene {
     // --- lighting -----------------------------------------------------------
     // Plain mutable fields: they are per-scene data the renderer reads when it
     // is handed this scene, not hidden state a function reaches for.
-    this.sun = {
-      direction: Float32Array.from([-0.35, -0.55, -0.45]),
-      color: Float32Array.from([3.2, 3.0, 2.7]),
-    };
+    /**
+     * The shadow-casting directional light -- the brightest one, see `sun` --
+     * as the direction its light travels and its colour times intensity.
+     * DERIVED: refreshLights copies them out of the light's node every frame,
+     * so read them and never write them. To change a light, change its node.
+     */
+    this.sunDirection = new Float32Array(3);
+    this.sunColor = new Float32Array(3);
+    /**
+     * Every OTHER directional light, packed for the GPU: direction then
+     * colour times intensity, a vec4 each. They light the scene exactly as the
+     * sun does, minus the shadow, because there is one shadow map.
+     */
+    this.directionals = new Float32Array(DIRECTIONAL_FLOATS);
+    this.directionalCount = 0;
+    this._directional = new Map();   // entity -> { color, intensity }, in the order added
     /** Set by the engine. Drives ambient light and the skybox. */
     this.environment = null;
 
@@ -127,6 +139,43 @@ export class Scene {
      * Hand one to engine.run as the camera, or ignore them.
      */
     this.cameras = [];
+
+    // The sun a new scene starts with. A light node like any other, so it can
+    // be aimed, recoloured, parented, animated -- or destroyed, for none.
+    this.addLight({
+      type: 'directional',
+      direction: [-0.35, -0.55, -0.45],
+      color: [1, 0.9375, 0.84375],
+      intensity: 3.2,
+    });
+  }
+
+  /**
+   * The brightest directional light, as a Node, or null if there are none.
+   *
+   * NOT A SLOT. Every directional light lights the scene, and none of them is
+   * special by kind. The one thing only one of them can have is the shadow
+   * map, and it goes to the brightest -- by luminance, the shadow you would
+   * actually see; a dim fill light's shadow is the one nobody misses. So this
+   * is a question about the lights there are, not a place a light is put.
+   * Equal brightness goes to the one added first.
+   */
+  get sun() {
+    const entity = this._brightestDirectional();
+    return entity === undefined ? null : new Node(this, entity);
+  }
+
+  _brightestDirectional() {
+    let brightest;
+    let best = -Infinity;
+    for (const [entity, { color, intensity }] of this._directional) {
+      const luminance = intensity * (0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]);
+      if (luminance > best) {
+        best = luminance;
+        brightest = entity;
+      }
+    }
+    return brightest;
   }
 
   /**
@@ -211,8 +260,8 @@ export class Scene {
       }
 
       // A light or camera on a node is the node's, exactly as in glTF: where
-      // it is and which way it points are the node's transform. Directional
-      // lights arrive as null and are skipped; see gltf/parse.js.
+      // it is and which way it points are the node's transform. A directional
+      // light joins the others; whether it casts the shadow is `sun`'s call.
       const light = node.light >= 0 ? asset.lights?.[node.light] : null;
       if (light) this._attachLight(entity, light);
 
@@ -426,6 +475,7 @@ export class Scene {
     for (const entity of doomed) {
       const index = this._lightOf.get(entity);
       if (index !== undefined) this._removeLightAt(index);
+      this._directional.delete(entity);
     }
 
     for (const entity of doomed) {
@@ -470,18 +520,16 @@ export class Scene {
     intensity = 1,
     radius = 10,
     direction = null,
+    type = direction ? 'spot' : 'point',
     innerAngle = 0.2,
     outerAngle = 0.5,
     parent = null,
   } = {}) {
-    // Aim a spot by rotating its node: -Z onto the requested direction.
-    let rotation;
-    if (direction) {
-      const length = Math.hypot(direction[0], direction[1], direction[2]) || 1;
-      rotation = quatFromTo(quatCreate(), LIGHT_FORWARD, [
-        direction[0] / length, direction[1] / length, direction[2] / length,
-      ]);
+    if (type !== 'point' && type !== 'spot' && type !== 'directional') {
+      throw new Error(`Scene.addLight: type must be point, spot or directional, got ${type}`);
     }
+    // Aim by rotating the node: -Z along the requested direction, upright.
+    const rotation = direction ? quatLookAlong(quatCreate(), direction) : undefined;
 
     const entity = this.entities.alloc();
     this.transforms.add(entity, {
@@ -489,9 +537,7 @@ export class Scene {
       rotation,
       parent: parent ? parent.entity : NULL_HANDLE,
     });
-    this._attachLight(entity, {
-      color, intensity, radius, spot: direction !== null, innerAngle, outerAngle,
-    });
+    this._attachLight(entity, { type, color, intensity, radius, innerAngle, outerAngle });
 
     // Children list, so removing a parent removes the light with it.
     if (parent) {
@@ -510,6 +556,14 @@ export class Scene {
    * caller that is not sure can ask by trying.
    */
   setLight(entity, changes) {
+    const directional = this._directional.get(entity);
+    if (directional) {
+      // A sun has no radius and no cone: colour and brightness are all of it.
+      if (changes.color) directional.color.set(changes.color);
+      if (changes.intensity !== undefined) directional.intensity = changes.intensity;
+      return true;
+    }
+
     const index = this._lightOf.get(entity);
     if (index === undefined) return false;
     const o = index * LIGHT_FLOATS;
@@ -557,6 +611,44 @@ export class Scene {
         light[o + 10] = z * inv;
       }
     }
+
+    // Directional lights: -Z of the node, like a spot, and colour at
+    // intensity. The brightest goes to the sun fields, which the shadow map
+    // follows; the rest are packed for the shader to loop over.
+    const sun = this._brightestDirectional();
+    if (sun === undefined) this.sunColor.fill(0);
+
+    const others = this._directional.size - (sun === undefined ? 0 : 1);
+    if (this.directionals.length < others * DIRECTIONAL_FLOATS) {
+      this.directionals = new Float32Array(grownCapacity(this.directionals.length / DIRECTIONAL_FLOATS, others) * DIRECTIONAL_FLOATS);
+    }
+    let packed = 0;
+    for (const [entity, { color, intensity }] of this._directional) {
+      const m = handleIndex(entity) * 16;
+      const x = -world[m + 8];
+      const y = -world[m + 9];
+      const z = -world[m + 10];
+      const inv = 1 / (Math.hypot(x, y, z) || 1);
+      if (entity === sun) {
+        this.sunDirection[0] = x * inv;
+        this.sunDirection[1] = y * inv;
+        this.sunDirection[2] = z * inv;
+        this.sunColor[0] = color[0] * intensity;
+        this.sunColor[1] = color[1] * intensity;
+        this.sunColor[2] = color[2] * intensity;
+        continue;
+      }
+      const o = packed++ * DIRECTIONAL_FLOATS;
+      this.directionals[o] = x * inv;
+      this.directionals[o + 1] = y * inv;
+      this.directionals[o + 2] = z * inv;
+      this.directionals[o + 3] = 0;
+      this.directionals[o + 4] = color[0] * intensity;
+      this.directionals[o + 5] = color[1] * intensity;
+      this.directionals[o + 6] = color[2] * intensity;
+      this.directionals[o + 7] = 0;
+    }
+    this.directionalCount = packed;
   }
 
   /**
@@ -564,6 +656,15 @@ export class Scene {
    * imported glTF node already is one.
    */
   _attachLight(entity, properties) {
+    if (properties.type === 'directional') {
+      // Not in the packed array: that is the clustered lights, and a sun
+      // reaches everything, so it has no cluster to be in.
+      this._directional.set(entity, {
+        color: Float32Array.from(properties.color ?? [1, 1, 1]),
+        intensity: properties.intensity ?? 1,
+      });
+      return;
+    }
     if (this.lightCount >= this.lightCapacity) {
       const capacity = grownCapacity(this.lightCapacity, this.lightCount + 1);
       this.lights = growArray(this.lights, capacity, LIGHT_FLOATS);
@@ -573,7 +674,7 @@ export class Scene {
     const index = this.lightCount++;
     this.lightEntity[index] = entity;
     this._lightOf.set(entity, index);
-    this._writeLightProperties(index, properties);
+    this._writeLightProperties(index, { ...properties, spot: properties.type === 'spot' });
   }
 
   /**
@@ -876,11 +977,12 @@ function byDistance(a, b) {
 
 /** positionRadius, colorIntensity, directionCone, coneFalloff -- four vec4s. */
 export const LIGHT_FLOATS = 16;
+/** Floats per packed extra directional light: direction.xyz_, colour.rgb_. */
+export const DIRECTIONAL_FLOATS = 8;
 export const LIGHT_POINT = 0;
 export const LIGHT_SPOT = 1;
 
 /** The axis a spot shines along, in its own space: -Z, as in glTF. */
-const LIGHT_FORWARD = Object.freeze([0, 0, -1]);
 
 /** A Camera for an imported glTF camera, before it is pointed at its node. */
 function cameraFor(spec) {
