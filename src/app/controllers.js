@@ -198,7 +198,7 @@ export class OrbitController {
     const dx = camera.position[0] - camera.target[0];
     const dy = camera.position[1] - camera.target[1];
     const dz = camera.position[2] - camera.target[2];
-    const distance = Math.hypot(dx, dy, dz);
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
     this.target.set(camera.target);
     this.desired.target.set(camera.target);
@@ -213,7 +213,7 @@ export class OrbitController {
       // cos(yaw) on Z, and both carry the same positive scale, so it divides
       // out. Skipped at the pole, where both are zero and the answer would be
       // whatever the noise says.
-      if (Math.hypot(dx, dz) > 1e-6) this.yaw = Math.atan2(dx, dz);
+      if (dx * dx + dz * dz > 1e-12) this.yaw = Math.atan2(dx, dz);
 
       this.distance = clamp(distance, this.minDistance, this.maxDistance);
     }

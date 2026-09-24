@@ -19,7 +19,7 @@ import {
 } from './bounds.js';
 import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
-import { vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
+import { hypot3, vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
 import { mat4Create, mat4Copy, mat4Invert } from '../core/math/mat4.js';
 import { quatCreate, quatLookAlong } from '../core/math/quat.js';
 import { grownCapacity, growArray } from '../core/grow.js';
@@ -308,6 +308,9 @@ export class Scene {
           boundsMax: new Float32Array(3),
           // The mesh node this palette deforms, which it is removed with.
           owner,
+          // Every inverse bind matrix affine, checked at load (gltf/skin.js):
+          // the palette may then use the cheaper multiply.
+          affine: skin.affine === true,
         });
       }
     } catch (error) {
@@ -653,7 +656,7 @@ export class Scene {
         const x = -world[m + 8];
         const y = -world[m + 9];
         const z = -world[m + 10];
-        const inv = 1 / (Math.hypot(x, y, z) || 1);
+        const inv = 1 / (hypot3(x, y, z) || 1);
         light[o + 8] = x * inv;
         light[o + 9] = y * inv;
         light[o + 10] = z * inv;
@@ -676,7 +679,7 @@ export class Scene {
       const x = -world[m + 8];
       const y = -world[m + 9];
       const z = -world[m + 10];
-      const inv = 1 / (Math.hypot(x, y, z) || 1);
+      const inv = 1 / (hypot3(x, y, z) || 1);
       if (entity === sun) {
         this.sunDirection[0] = x * inv;
         this.sunDirection[1] = y * inv;

@@ -17,7 +17,7 @@
 // -- so by the time the next level starts, everything the previous one wrote is
 // visible. Release/acquire, without anything here having to say so.
 
-import { mat4Copy, mat4FromQuatPosScale, mat4Multiply } from '../core/math/mat4.js';
+import { mat4Copy, mat4FromQuatPosScale, mat4MultiplyAffine } from '../core/math/mat4.js';
 
 export const NO_PARENT = -1;
 
@@ -51,7 +51,8 @@ export function composeRange(columns, base, start, end) {
     if (p === NO_PARENT) {
       mat4Copy(world, local, e * 16, e * 16);
     } else {
-      mat4Multiply(world, world, local, e * 16, p * 16, e * 16);
+      // Affine: both are built from translation, rotation and scale.
+      mat4MultiplyAffine(world, world, local, e * 16, p * 16, e * 16);
     }
 
     recomputed[e] = 1;

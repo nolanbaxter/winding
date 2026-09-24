@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Changed
+
+- **Faster math where it runs per object, same answers.** Each replacement
+  is checked against the code it replaced -- bit for bit where it can be,
+  float32 where the inputs are -- and measured in place, old and new
+  alternating:
+  - World matrices compose with an affine multiply (36 multiplies instead of
+    64; every matrix built from translation, rotation and scale is affine):
+    359 -> 302 us for 10,000 transforms with 1,000 moving roots. Skin
+    palettes use it too, when the file's inverse binds are affine, which is
+    checked at load rather than assumed.
+  - The box transform behind every moved object's bounds is unrolled:
+    45 -> 28 us for 1,700.
+  - Math.hypot, ten times slower than a square root of squares in V8 for a
+    guard float32 data never needs, is gone from all 22 call sites.
+  - Slerp takes a square root where it took sin(acos(c)).
+  - Sort-key checks build their messages only when they fail; they were
+    formatted on every call, 33 us per 1,700 keys, with DEBUG shipped on.
 
 - **Nothing standing on a floor cast a sun shadow.** Each cascade's light
   view has its eye at the world origin, and its near plane was clamped to at

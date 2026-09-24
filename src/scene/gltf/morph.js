@@ -36,6 +36,7 @@
 // normals and tangents would triple a face rig for nothing.
 
 import { readAccessorAsFloat32, componentCountOf } from './accessor.js';
+import { hypot3 } from '../../core/math/vec3.js';
 
 /** Floats per vertex per target, by the widest attribute any target carries. */
 export const MORPH_STRIDE_POSITION = 3;
@@ -124,7 +125,7 @@ export function readMorphTargets(json, buffers, targets, vertexCount, label) {
       if (attribute.offset === 0) {
         for (let v = 0; v < vertexCount; v++) {
           const from = v * 3;
-          const distance = Math.hypot(values[from], values[from + 1], values[from + 2]);
+          const distance = hypot3(values[from], values[from + 1], values[from + 2]);
           if (distance > extent[t]) extent[t] = distance;
         }
       }

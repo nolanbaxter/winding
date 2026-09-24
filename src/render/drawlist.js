@@ -74,10 +74,12 @@ const TRANSPARENT_DEPTH_MAX = (1 << TRANSPARENT_DEPTH_BITS) - 1;
  */
 export function opaqueSortKey(pipelineId, materialId, depthBucket) {
   if (DEBUG) {
-    assert(pipelineId >>> 0 === pipelineId && pipelineId < (1 << OPAQUE_PIPELINE_BITS),
-      `opaqueSortKey: pipeline id ${pipelineId} does not fit in ${OPAQUE_PIPELINE_BITS} bits`);
-    assert(materialId >>> 0 === materialId && materialId < (1 << OPAQUE_MATERIAL_BITS),
-      `opaqueSortKey: material id ${materialId} does not fit in ${OPAQUE_MATERIAL_BITS} bits`);
+    if (!(pipelineId >>> 0 === pipelineId && pipelineId < (1 << OPAQUE_PIPELINE_BITS))) {
+      assert(false, `opaqueSortKey: pipeline id ${pipelineId} does not fit in ${OPAQUE_PIPELINE_BITS} bits`);
+    }
+    if (!(materialId >>> 0 === materialId && materialId < (1 << OPAQUE_MATERIAL_BITS))) {
+      assert(false, `opaqueSortKey: material id ${materialId} does not fit in ${OPAQUE_MATERIAL_BITS} bits`);
+    }
     assert(depthBucket >= 0 && depthBucket <= OPAQUE_DEPTH_MAX, 'depth bucket out of range');
   }
   // >>> 0 because the top bit of a 32-bit shift makes a signed negative, and a
@@ -89,11 +91,16 @@ export function opaqueSortKey(pipelineId, materialId, depthBucket) {
 
 /** Ascending sort order gives far-to-near, which is the order blending needs. */
 export function transparentSortKey(pipelineId, materialId, depthBucket) {
+  // The messages are built only when a check fails. Passed to assert() they
+  // were built on every call, checks passing or not, and DEBUG ships on:
+  // 33 us of string formatting for 1,700 keys, per frame.
   if (DEBUG) {
-    assert(pipelineId < (1 << TRANSPARENT_PIPELINE_BITS),
-      `transparentSortKey: pipeline id ${pipelineId} does not fit in ${TRANSPARENT_PIPELINE_BITS} bits`);
-    assert(materialId < (1 << TRANSPARENT_MATERIAL_BITS),
-      `transparentSortKey: material id ${materialId} does not fit in ${TRANSPARENT_MATERIAL_BITS} bits`);
+    if (!(pipelineId < (1 << TRANSPARENT_PIPELINE_BITS))) {
+      assert(false, `transparentSortKey: pipeline id ${pipelineId} does not fit in ${TRANSPARENT_PIPELINE_BITS} bits`);
+    }
+    if (!(materialId < (1 << TRANSPARENT_MATERIAL_BITS))) {
+      assert(false, `transparentSortKey: material id ${materialId} does not fit in ${TRANSPARENT_MATERIAL_BITS} bits`);
+    }
     assert(depthBucket >= 0 && depthBucket <= TRANSPARENT_DEPTH_MAX, 'depth bucket out of range');
   }
   return ((depthBucket << (TRANSPARENT_PIPELINE_BITS + TRANSPARENT_MATERIAL_BITS))

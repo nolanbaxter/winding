@@ -21,6 +21,8 @@
 // faint seams under this. Swap in a MikkTSpace port if that ever shows up on a
 // real asset -- the interface here does not change.
 
+import { hypot3 } from '../../core/math/vec3.js';
+
 const DEGENERATE_UV_EPSILON = 1e-12;
 
 /**
@@ -92,7 +94,7 @@ export function generateTangents(positions, normals, uvs, indices) {
     const dot = nx * tx + ny * ty + nz * tz;
     tx -= nx * dot; ty -= ny * dot; tz -= nz * dot;
 
-    let length = Math.hypot(tx, ty, tz);
+    let length = hypot3(tx, ty, tz);
     if (length < 1e-8) {
       // No usable tangent (isolated vertex, or every triangle degenerate).
       // Any perpendicular direction beats NaN, and flat-shaded geometry with
@@ -127,7 +129,7 @@ export function perpendicularTo(nx, ny, nz) {
   const cx = ny * uz - nz * uy;
   const cy = nz * ux - nx * uz;
   const cz = nx * uy - ny * ux;
-  const inv = 1 / (Math.hypot(cx, cy, cz) || 1);
+  const inv = 1 / (hypot3(cx, cy, cz) || 1);
   return [cx * inv, cy * inv, cz * inv];
 }
 
@@ -176,7 +178,7 @@ export function unweldAndComputeFlatNormals(positions, indices, extraAttributes)
     let nx = e1y * e2z - e1z * e2y;
     let ny = e1z * e2x - e1x * e2z;
     let nz = e1x * e2y - e1y * e2x;
-    const length = Math.hypot(nx, ny, nz);
+    const length = hypot3(nx, ny, nz);
     if (length > 0) {
       nx /= length; ny /= length; nz /= length;
     } else {

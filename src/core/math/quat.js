@@ -11,6 +11,7 @@
 // produces rotations that look almost right, which is the worst kind of bug.
 
 import { DEBUG, assert } from '../assert.js';
+import { hypot3 } from './vec3.js';
 
 /** Startup-only. Allocates. Returns the identity rotation. */
 export function quatCreate() {
@@ -185,7 +186,9 @@ export function quatSlerp(out, a, b, t) {
   let scale0, scale1;
   if (1 - cosom > SLERP_LINEAR_EPSILON) {
     const omega = Math.acos(cosom);
-    const sinom = Math.sin(omega);
+    // sin(acos(c)) is sqrt(1 - c^2): one transcendental fewer per rotation
+    // channel per frame, and the same float32 results.
+    const sinom = Math.sqrt((1 - cosom) * (1 + cosom));
     scale0 = Math.sin((1 - t) * omega) / sinom;
     scale1 = Math.sin(t * omega) / sinom;
   } else {
@@ -264,14 +267,14 @@ const LOOK_BASIS = new Float32Array(16);
  * be unit length.
  */
 export function quatLookAlong(out, direction, up = LOOK_UP) {
-  const length = Math.hypot(direction[0], direction[1], direction[2]) || 1;
+  const length = hypot3(direction[0], direction[1], direction[2]) || 1;
   const fx = direction[0] / length, fy = direction[1] / length, fz = direction[2] / length;
 
   // right = forward x up
   let rx = fy * up[2] - fz * up[1];
   let ry = fz * up[0] - fx * up[2];
   let rz = fx * up[1] - fy * up[0];
-  const rLength = Math.hypot(rx, ry, rz);
+  const rLength = hypot3(rx, ry, rz);
   if (rLength < 1e-6) return quatFromTo(out, LOOK_FORWARD, [fx, fy, fz]);
   rx /= rLength; ry /= rLength; rz /= rLength;
 

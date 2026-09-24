@@ -29,6 +29,8 @@
 // Planes are (a, b, c, d) with a point inside when a*x + b*y + c*z + d >= 0,
 // normalized so that expression is the signed distance in world units.
 
+import { hypot3 } from './vec3.js';
+
 export const PLANE_LEFT = 0;
 export const PLANE_RIGHT = 1;
 export const PLANE_BOTTOM = 2;
@@ -67,7 +69,7 @@ function setPlane(out, index, a, b, c, d) {
   // distance, which is what the sphere test needs and what makes the box test
   // readable. Unnormalized planes still give the right SIGN, so cheap tests
   // sometimes skip this -- we do not, because it costs one sqrt per frame.
-  const length = Math.hypot(a, b, c);
+  const length = hypot3(a, b, c);
   const inv = length > 0 ? 1 / length : 0;
   const o = index * 4;
   out[o] = a * inv;

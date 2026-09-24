@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {
   vec3Create, vec3Set, vec3Add, vec3Sub, vec3Scale, vec3ScaleAndAdd,
   vec3Dot, vec3Cross, vec3Length, vec3Normalize, vec3Lerp,
-  vec3TransformMat4, vec3TransformMat4Dir, vec3TransformQuat,
+  vec3TransformMat4, vec3TransformMat4Dir, vec3TransformQuat, hypot3,
 } from '../src/core/math/vec3.js';
 
 import {
@@ -18,10 +18,10 @@ import {
 
 import {
   mat4Create, mat4Identity, mat4Copy, mat4Multiply, mat4FromQuatPosScale,
-  mat4Invert, mat4LookAt, mat4NormalMatrix, mat4PerspectiveReverseZInfinite,
+  mat4Invert, mat4LookAt, mat4NormalMatrix, mat4PerspectiveReverseZInfinite, mat4MultiplyAffine,
 } from '../src/core/math/mat4.js';
 
-import { rayTriangleDistance } from '../src/core/math/aabb.js';
+import { rayTriangleDistance, aabbTransform } from '../src/core/math/aabb.js';
 import {
   srgbToLinear, linearToSrgb, colorFromHex, colorFromBytes,
 } from '../src/core/color.js';
@@ -697,6 +697,108 @@ test('the result is a plain array, so it survives JSON', () => {
   // glTF's baseColorFactor. A Float32Array serialises to {"0":...} there.
   assert.equal(JSON.stringify(colorFromHex('#ff0000')), '[1,0,0,1]');
   assert.ok(Array.isArray(colorFromBytes(255, 0, 0)));
+});
+
+// --------------------------------------------- faster math, same answers
+
+console.log('\nfaster math, same answers');
+
+/** A deterministic stream of numbers in [-1, 1), so failures reproduce. */
+function numbers(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 2 ** 31 - 1;
+  };
+}
+
+/** A random affine matrix: rotation, scale (sometimes negative), translation. */
+function affineMatrix(next) {
+  const q = quatNormalize(quatCreate(), [next(), next(), next(), next() + 1.5]);
+  return mat4FromQuatPosScale(
+    new Float32Array(16), q, [next() * 50, next() * 50, next() * 50],
+    [next() * 3 + (next() > 0 ? 0.1 : -0.1), next() * 3 + 0.1, next() * 3 + 0.1],
+  );
+}
+
+test('the affine multiply gives the general multiply\'s bits on affine input', () => {
+  const next = numbers(7);
+  const general = new Float32Array(16);
+  const affine = new Float32Array(16);
+  for (let n = 0; n < 5000; n++) {
+    const a = affineMatrix(next);
+    const b = affineMatrix(next);
+    mat4Multiply(general, a, b);
+    mat4MultiplyAffine(affine, a, b);
+    for (let i = 0; i < 16; i++) {
+      assert.ok(Object.is(general[i], affine[i]) || (general[i] === 0 && affine[i] === 0),
+        `element ${i} of product ${n}: ${general[i]} vs ${affine[i]}`);
+    }
+  }
+});
+
+test('hypot3 agrees with Math.hypot to float32', () => {
+  const next = numbers(11);
+  for (let n = 0; n < 20000; n++) {
+    const x = next() * 1e4, y = next() * 1e-3, z = next() * 1e6;
+    assert.equal(Math.fround(hypot3(x, y, z)), Math.fround(Math.hypot(x, y, z)));
+  }
+  assert.equal(hypot3(0, 0, 0), 0);
+  assert.equal(hypot3(3, 4, 12), 13);
+});
+
+test('the unrolled box transform gives the loop\'s bits', () => {
+  // The loop it replaced, kept here as the reference.
+  const reference = (outMin, outMax, min, max, m) => {
+    for (let i = 0; i < 3; i++) {
+      let lo = m[12 + i];
+      let hi = lo;
+      for (let j = 0; j < 3; j++) {
+        const e = m[j * 4 + i];
+        const a = e * min[j];
+        const b = e * max[j];
+        if (a < b) { lo += a; hi += b; } else { lo += b; hi += a; }
+      }
+      outMin[i] = lo;
+      outMax[i] = hi;
+    }
+  };
+  const next = numbers(13);
+  const got = [new Float32Array(3), new Float32Array(3)];
+  const want = [new Float32Array(3), new Float32Array(3)];
+  for (let n = 0; n < 5000; n++) {
+    const m = affineMatrix(next);
+    const min = [next() * 10, next() * 10, next() * 10];
+    const max = [min[0] + Math.abs(next()) * 5, min[1] + Math.abs(next()) * 5, min[2] + Math.abs(next()) * 5];
+    aabbTransform(got[0], got[1], min, max, m);
+    reference(want[0], want[1], min, max, m);
+    assert.deepEqual([...got[0], ...got[1]], [...want[0], ...want[1]], `box ${n}`);
+  }
+});
+
+test('slerp with the square root agrees with sin(acos) to float32', () => {
+  const next = numbers(17);
+  const out = new Float32Array(4);
+  for (let n = 0; n < 5000; n++) {
+    const a = quatNormalize(quatCreate(), [next(), next(), next(), next()]);
+    const b = quatNormalize(quatCreate(), [next(), next(), next(), next()]);
+    const t = (next() + 1) / 2;
+    quatSlerp(out, a, b, t);
+    // The reference: the textbook form this replaced.
+    let [bx, by, bz, bw] = b;
+    let c = a[0] * bx + a[1] * by + a[2] * bz + a[3] * bw;
+    if (c < 0) { c = -c; bx = -bx; by = -by; bz = -bz; bw = -bw; }
+    let s0 = 1 - t, s1 = t;
+    if (1 - c > 1e-6) {
+      const omega = Math.acos(c);
+      s0 = Math.sin((1 - t) * omega) / Math.sin(omega);
+      s1 = Math.sin(t * omega) / Math.sin(omega);
+    }
+    const want = [s0 * a[0] + s1 * bx, s0 * a[1] + s1 * by, s0 * a[2] + s1 * bz, s0 * a[3] + s1 * bw];
+    for (let i = 0; i < 4; i++) {
+      assert.ok(Math.abs(out[i] - Math.fround(want[i])) <= 2 ** -22, `slerp ${n}[${i}]: ${out[i]} vs ${want[i]}`);
+    }
+  }
 });
 
 console.log(`\n${passed} checks passed\n`);

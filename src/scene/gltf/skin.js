@@ -13,6 +13,7 @@
 // maps a node index onto an entity is the instance, not the asset.
 
 import { readAccessorAsFloat32 } from './accessor.js';
+import { hypot3 } from '../../core/math/vec3.js';
 
 /** Column-major identity, for a skin that declares no inverse bind matrices. */
 const IDENTITY = Float32Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
@@ -50,7 +51,18 @@ export function readSkins(json, buffers) {
       }
     }
 
+    // Whether every inverse bind matrix is affine, so the palette can use the
+    // cheaper multiply. Checked rather than assumed: the joint's world matrix
+    // always is, but these come from the file.
+    let affine = true;
+    for (let m = 0; m < joints.length && affine; m++) {
+      const o = m * 16;
+      affine = inverseBind[o + 3] === 0 && inverseBind[o + 7] === 0
+        && inverseBind[o + 11] === 0 && inverseBind[o + 15] === 1;
+    }
+
     return {
+      affine,
       name: skin.name ?? `skin${i}`,
       joints,
       inverseBind,
@@ -149,7 +161,7 @@ export function jointInfluenceRadii(
       const jy = inverseBind[m + 1] * x + inverseBind[m + 5] * y + inverseBind[m + 9] * z + inverseBind[m + 13];
       const jz = inverseBind[m + 2] * x + inverseBind[m + 6] * y + inverseBind[m + 10] * z + inverseBind[m + 14];
 
-      const distance = Math.hypot(jx, jy, jz);
+      const distance = hypot3(jx, jy, jz);
       if (distance > radii[j]) radii[j] = distance;
     }
   }

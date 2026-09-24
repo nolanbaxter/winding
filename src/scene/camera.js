@@ -18,7 +18,7 @@
 // thing you are looking at the same size on screen.
 
 import { DEBUG, assert, assertFinite } from '../core/assert.js';
-import { vec3Create, vec3Copy, vec3Cross, vec3Normalize, vec3Sub } from '../core/math/vec3.js';
+import { hypot3, vec3Create, vec3Copy, vec3Cross, vec3Normalize, vec3Sub } from '../core/math/vec3.js';
 import {
   mat4Create, mat4Invert, mat4LookAt, mat4Multiply, mat4PerspectiveReverseZInfinite,
   mat4OrthographicReverseZ,
@@ -57,7 +57,7 @@ export function fitDistance(radius, { fovY, aspect = 1, margin = 1, near = 0 } =
 
 /** Half the diagonal of an axis-aligned box: the radius that contains it. */
 export function boundsRadius(min, max) {
-  return 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+  return 0.5 * hypot3(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
 }
 
 /**
@@ -153,15 +153,15 @@ export class Camera {
     const m = FOLLOW_MATRIX;
     node.scene.transforms.worldMatrixInto(m, node.entity);
 
-    const distance = Math.hypot(
+    const distance = hypot3(
       this.position[0] - this.target[0],
       this.position[1] - this.target[1],
       this.position[2] - this.target[2],
     ) || 1;
     // Columns of the world matrix are the node's axes, scaled. Normalizing
     // drops the scale, which has no meaning for a viewpoint.
-    const forward = Math.hypot(m[8], m[9], m[10]) || 1;
-    const up = Math.hypot(m[4], m[5], m[6]) || 1;
+    const forward = hypot3(m[8], m[9], m[10]) || 1;
+    const up = hypot3(m[4], m[5], m[6]) || 1;
     for (let i = 0; i < 3; i++) {
       this.position[i] = m[12 + i];
       this.target[i] = m[12 + i] - (m[8 + i] / forward) * distance;
@@ -211,7 +211,7 @@ export class Camera {
     // Where the camera is now, relative to what it was looking at. Preserved
     // so framing is a zoom rather than a jump to some canonical angle.
     vec3Sub(FRAME_DIRECTION, this.position, this.target);
-    let length = Math.hypot(FRAME_DIRECTION[0], FRAME_DIRECTION[1], FRAME_DIRECTION[2]);
+    let length = hypot3(FRAME_DIRECTION[0], FRAME_DIRECTION[1], FRAME_DIRECTION[2]);
     if (!(length > 0)) {
       // Degenerate: the camera is sitting on its own target and has no
       // direction to preserve. Looking down -Z is the convention everything
@@ -243,7 +243,7 @@ export class Camera {
    * projection and rayFromScreen have to agree on it exactly.
    */
   orthographicHalfHeight() {
-    const distance = Math.hypot(
+    const distance = hypot3(
       this.position[0] - this.target[0],
       this.position[1] - this.target[1],
       this.position[2] - this.target[2],

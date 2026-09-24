@@ -1869,4 +1869,14 @@ await atest('the same holds for a mesh that supplies normals but no UVs', async 
   }
 });
 
+await atest('a skin says whether its inverse binds are affine', async () => {
+  // The palette uses the cheaper affine multiply only when this is true; a
+  // projective inverse bind would come out wrong through it.
+  const model = await loadGLTF(skinnedGLB());
+  assert.equal(model.skins[0].affine, true);
+  const { readSkins } = await import('../src/scene/gltf/skin.js');
+  const json = { skins: [{ joints: [0] }], nodes: [{}] };
+  assert.equal(readSkins(json, []).at(0).affine, true, 'an absent inverse bind is the identity, which is affine');
+});
+
 console.log(`\n${passed} checks passed\n`);

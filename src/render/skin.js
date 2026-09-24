@@ -11,7 +11,7 @@
 // are ordinary nodes, and the inverse bind matrices came from the file. So
 // this is a multiply per joint per frame and no new state.
 
-import { mat4Multiply } from '../core/math/mat4.js';
+import { mat4Multiply, mat4MultiplyAffine } from '../core/math/mat4.js';
 import { grownCapacity } from '../core/grow.js';
 import { handleIndex } from '../core/handle.js';
 
@@ -61,14 +61,18 @@ export class SkinPalette {
     const world = scene.transforms.world;
     let joint = 0;
     for (let s = 0; s < skins.length; s++) {
-      const { joints, inverseBind } = skins[s];
+      const { joints, inverseBind, affine } = skins[s];
       this.offsets[s] = joint;
+      // A joint's world matrix is always affine; the inverse binds come from
+      // the file and were checked at load. Both affine, the cheaper multiply
+      // gives the same bits.
+      const multiply = affine ? mat4MultiplyAffine : mat4Multiply;
 
       for (let j = 0; j < joints.length; j++) {
         // jointWorld * inverseBind, straight into the upload staging array.
         // The node's own transform does NOT appear: glTF says a skinned mesh's
         // node transform is ignored, because the joints place it entirely.
-        mat4Multiply(
+        multiply(
           this.data, world, inverseBind,
           joint * 16, handleIndex(joints[j]) * 16, j * 16,
         );

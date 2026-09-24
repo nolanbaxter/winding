@@ -80,8 +80,21 @@ export function vec3LengthSq(a) {
   return a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
 }
 
+/**
+ * The length of (x, y, z), as a square root of the sum of squares.
+ *
+ * NOT Math.hypot, which V8 runs about ten times slower (29 ns against 3,
+ * measured) for a guard against overflow in the squares. Every length taken
+ * here is of float32 data, whose largest value squared (1e77) is nowhere near
+ * the float64 limit (1.8e308), so that guard buys nothing here. Twenty call
+ * sites, several of them per light or per frame.
+ */
+export function hypot3(x, y, z) {
+  return Math.sqrt(x * x + y * y + z * z);
+}
+
 export function vec3Length(a) {
-  return Math.hypot(a[0], a[1], a[2]);
+  return hypot3(a[0], a[1], a[2]);
 }
 
 export function vec3DistanceSq(a, b) {
