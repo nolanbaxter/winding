@@ -16,6 +16,7 @@ import { Camera } from '../src/scene/camera.js';
 import { Scene } from '../src/scene/scene.js';
 import { GpuDriven, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
 import { SkinPalette } from '../src/render/skin.js';
+import { MorphStore } from '../src/render/morph.js';
 import { PBR_SHADER } from '../src/render/shaders/pbr.js';
 import { SHADOW_SHADER } from '../src/render/shadows.js';
 import { OIT_RESOLVE_SHADER } from '../src/render/shaders/oit.js';
@@ -1340,6 +1341,41 @@ test('buffers are bound when the mesh or its skinning changes, not per object', 
     // the material-9 run reuses them: same mesh, same skinning
     [0, 'vb:pane'], [1, 'sb:pane'],       // skinned needs its skin buffer, so it rebinds
   ]);
+});
+
+console.log('\nmorph arena');
+
+test('freed morph ranges are reused, merged, and shrink the arena from the end', () => {
+  const rhi = {
+    device: {
+      createBuffer: () => ({ destroy() {} }),
+      createCommandEncoder: () => ({ copyBufferToBuffer() {}, finish() {} }),
+    },
+    queue: { writeBuffer() {}, submit() {} },
+  };
+  const store = new MorphStore(rhi, { deltaCapacity: 64 });
+  const floats = (n) => new Float32Array(n);
+
+  const a = store.allocate(floats(10));
+  const b = store.allocate(floats(10));
+  const c = store.allocate(floats(10));
+  assert.deepEqual([a, b, c], [0, 10, 20]);
+
+  // The same asset reloaded over and over used to append every time.
+  for (let i = 0; i < 100; i++) {
+    store.free(b, 10);
+    assert.equal(store.allocate(floats(10)), b, `reload ${i} landed in the hole`);
+  }
+  assert.equal(store.deltaCount, 30, 'and the arena did not grow');
+
+  store.free(a, 10);
+  store.free(b, 10);
+  assert.equal(store.allocate(floats(20)), 0, 'neighbouring holes merge into one');
+
+  store.free(0, 20);
+  store.free(c, 10);
+  assert.equal(store.deltaCount, 0, 'freeing the tail gives back every hole touching it');
+  assert.equal(store._holes.length, 0);
 });
 
 console.log(`\n${passed} checks passed\n`);

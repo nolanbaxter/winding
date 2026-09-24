@@ -146,6 +146,41 @@ await test('repeated dispatches stay correct', async () => {
   jobs.destroy();
 });
 
+await test('workers pick up buffers published after the first', async () => {
+  // What a growing scene does: new SharedArrayBuffers, published again. A
+  // worker parked in its loop never read the second 'init' and went on
+  // writing into the first buffers, so its share of the work vanished.
+  const count = 8000;
+  const { jobs } = makeSystem(3, count);
+  await jobs.ready();
+
+  const input = sharedInt32Array(count);
+  const output = sharedInt32Array(count);
+  const touches = sharedInt32Array(count);
+  const who = sharedInt32Array(count);
+  jobs.register(JOB_SLOW, (start, end) => {
+    for (let i = start; i < end; i++) {
+      Atomics.add(touches, i, 1);
+      who[i] = WHO;
+    }
+    const until = Date.now() + 2;
+    while (Date.now() < until) { /* burn a chunk's worth of time */ }
+  });
+  jobs.setSharedData({ input: input.buffer, output: output.buffer, touches: touches.buffer, who: who.buffer });
+
+  // The first dispatch after a republish is how a waiting worker finds out;
+  // it steps out to read the new buffers and the dispatching thread covers.
+  jobs.dispatch(JOB_SLOW, count, { chunkSize: 500 });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  touches.fill(0);
+  who.fill(0);
+
+  jobs.dispatch(JOB_SLOW, count, { chunkSize: 500 });
+  for (let i = 0; i < count; i++) assert.equal(touches[i], 1, `item ${i} was touched ${touches[i]} times`);
+  assert.ok(new Set(who).size > 1, 'the workers took part with the new buffers');
+  jobs.destroy();
+});
+
 await test('a tiny job is still correct', async () => {
   // Fewer items than threads: most threads claim nothing at all.
   const count = 3;

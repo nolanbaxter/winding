@@ -185,6 +185,8 @@ export class Scene {
    * to a scene must never be the thing that stalls a frame.
    */
   add(asset, { parent = null } = {}) {
+    // Its buffers and textures are destroyed; drawing it would fail on the GPU.
+    if (asset.unloaded) throw new Error('Scene.add: this asset was unloaded; load it again');
     const created = new Array(asset.nodes.length).fill(NULL_HANDLE);
     const roots = [];
     // Node index -> that node's morph weights, for the animation player. Same
@@ -355,6 +357,10 @@ export class Scene {
     this.renderableMatrixSlot[i] = handleIndex(entity);
     this.renderableMaterial[i] = primitive.materialId;
     this.renderablePrimitive[i] = primitive;
+    // How many renderables in any scene draw it. engine.unload refuses while
+    // this is above zero: freeing buffers a scene still draws is a GPU error,
+    // and a reused material id would draw with someone else's surface.
+    primitive.instances = (primitive.instances ?? 0) + 1;
     this.renderableSkin[i] = skin;
     this.renderableMorph[i] = morph;
     this.renderableMorphExtent[i] = morph >= 0 ? primitive.morphExtent : null;
@@ -455,6 +461,7 @@ export class Scene {
     const dying = new Set(doomed);
     for (let i = this.renderableCount - 1; i >= 0; i--) {
       if (!dying.has(this.renderableEntity[i])) continue;
+      this.renderablePrimitive[i].instances--;
 
       const last = --this.renderableCount;
       if (i !== last) {

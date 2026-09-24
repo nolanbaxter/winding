@@ -9,6 +9,9 @@ import { workerLoop, JOB_COMPOSE_TRANSFORMS } from './jobs.js';
 import { composeRange, columnsFromBuffers } from '../scene/transformJob.js';
 
 const postReady = () => self.postMessage({ type: 'ready' });
+// Once. A worker gets a fresh 'init' every time a scene republishes its
+// buffers, and it is the same worker checking in.
+let reported = false;
 
 self.addEventListener('message', (event) => {
   const message = event.data;
@@ -17,8 +20,8 @@ self.addEventListener('message', (event) => {
   const control = new Int32Array(message.control);
   const columns = columnsFromBuffers(message.buffers);
 
-  postReady();
+  if (!reported) { reported = true; postReady(); }
   workerLoop(control, new Map([
     [JOB_COMPOSE_TRANSFORMS, (start, end, base) => composeRange(columns, base, start, end)],
-  ]));
+  ]), message.revision);
 });

@@ -74,6 +74,12 @@ export class Device {
 
     this.onDeviceLost = options.onDeviceLost ?? null;
     this.onError = options.onError ?? null;
+    /**
+     * Called once nothing drawn here can be seen again: the device was lost,
+     * or the canvas left the document. The engine destroys itself on it; a
+     * tier-0 user who owns this directly can do the same.
+     */
+    this.onUnusable = null;
 
     // WebGPU errors do NOT throw. They surface here, and without a listener
     // they vanish into the console at best.
@@ -103,6 +109,10 @@ export class Device {
     device.lost.then((info) => {
       if (this.destroyed && info.reason === 'destroyed') return;   // we did that
       this.destroyed = true;
+      // It kept resizing the canvas and allocating depth textures on a dead
+      // device, for as long as the canvas lived.
+      this._observer?.disconnect();
+      this.onUnusable?.();
 
       // 'destroyed' here means someone else destroyed it, since our own case
       // returned above. Everything else is the GPU going away underneath us,
@@ -165,6 +175,9 @@ export class Device {
     const apply = (w, h) => this.resize(w, h);
 
     this._observer = new ResizeObserver((entries) => {
+      // Removing an observed element is itself a resize, to nothing. It is
+      // the only notice a page rewritten in place (document.open) ever gives.
+      if (!this.canvas.isConnected) { this.onUnusable?.(); return; }
       for (const entry of entries) {
         // device-pixel-content-box gives EXACT device pixels. The usual
         // clientWidth * devicePixelRatio is rounded twice and lands half a

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-24
+
+**Nothing builds up.** An audit for anything that accumulates across
+frames, reloads, loads and edits. It found one leak that a live editor hits
+on every save, a job-system bug that froze nodes in large scenes, and the
+missing counterpart to `load()`.
+
+### Added
+
+- `engine.unload(asset)` frees what `load()` made: vertex, index and skin
+  buffers, textures, material ids and morph deltas. Every `load()` uploads a
+  fresh copy, the same file included, and nothing used to give one back. A
+  viewer that swapped models kept every one it had shown, and the 4097th
+  material threw. Unload refuses while any scene still draws the asset, and
+  `scene.add` refuses an unloaded one.
+
+### Fixed
+
+- An engine whose canvas leaves the document now destroys itself. A live
+  editor that reloads by rewriting the page in place (`document.open`/`write`)
+  fires no `pagehide`, so every old engine kept rendering and kept its GPU
+  device. That meant one more full render loop per edit, each reload slower
+  than the last, and eventually no adapter at all.
+  - A running engine stops on the next frame.
+  - An engine that never reached `run()`, or is driven through
+    `renderFrame()`, learns it from its resize observer.
+- A lost device now destroys the engine too. Its resize observer kept
+  resizing the canvas against a dead device, and its workers were never
+  ended.
+- `Winding.create` releases the device if anything after it fails.
+- `destroy()` is safe to call twice.
+- Job workers now use buffers published after the first. A worker sits
+  inside its loop and never returned to read a second `init`, so after a
+  scene grew it went on composing into the old columns. Depth levels of 4096+
+  nodes lost those workers' share of their transforms, and with two scenes
+  the unread messages piled up by the hundreds a second. This only happens in
+  cross-origin-isolated pages, the only place workers run.
+- Material ids and morph-delta ranges are reused after unload. The morph
+  arena was append-only, so reloading a face rig added its deltas again until
+  the buffer passed the binding limit.
+
 ## [0.10.0] - 2026-09-24
 
 **An audit, fixed.** Five parallel audits -- scene, render, glTF import, math
@@ -1362,7 +1403,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/nolanbaxter/winding/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/nolanbaxter/winding/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/nolanbaxter/winding/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/nolanbaxter/winding/compare/v0.8.0...v0.9.0

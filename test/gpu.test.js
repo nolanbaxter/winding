@@ -930,6 +930,78 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
   });
 
+  await step('unload gives back ids and buffers, and only once no scene draws the asset', async () => {
+    const asset = await engine.load(await buildDemoGLB({ arms: 2 }));
+    if (asset.materialIds.length === 0) throw new Error('the demo asset has no materials to give back');
+    const node = scene.add(asset);
+    let refused = false;
+    try { engine.unload(asset); } catch { refused = true; }
+    if (!refused) throw new Error('unloaded an asset a scene still draws');
+
+    node.destroy();
+    engine.unload(asset);
+    engine.unload(asset);   // twice is harmless
+    // Drawing after the free is the real check: a batch still naming a
+    // destroyed buffer shows up as the device error asserted at the end.
+    engine.renderFrame(scene, camera);
+    await engine.rhi.device.queue.onSubmittedWorkDone();
+
+    const again = await engine.load(await buildDemoGLB({ arms: 2 }));
+    if (!again.materialIds.every((id) => asset.materialIds.includes(id))) {
+      throw new Error(`reload took ids ${again.materialIds} rather than the freed ${asset.materialIds}`);
+    }
+    engine.unload(again);
+    return `${asset.materialIds.length} material ids came back and were reused`;
+  });
+
+  await step('an engine that never ran shuts down when its canvas leaves', async () => {
+    // No loop to notice, so this is the resize observer's job -- and a hidden
+    // page delivers no observations at all, so there is nothing to test there.
+    if (document.visibilityState === 'hidden') return 'not run: the page is hidden';
+    const idleCanvas = document.createElement('canvas');
+    document.body.appendChild(idleCanvas);
+    const idle = await Winding.create(idleCanvas);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    idleCanvas.remove();
+    for (let i = 0; i < 20 && !idle.rhi.destroyed; i++) await new Promise((r) => setTimeout(r, 50));
+    if (!idle.rhi.destroyed) {
+      idle.destroy();
+      throw new Error('still alive a second after its canvas left');
+    }
+    return 'destroyed by its resize observer';
+  });
+
+  await step('a running engine whose canvas leaves the page shuts down', async () => {
+    // What a live editor's reload does: the page is rewritten in place, the
+    // old canvas drops out of the document and nothing tells the engine.
+    // The loop is driven by hand, so a hidden tab's paused rAF cannot stall it.
+    const frames = [];
+    const realRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (cb) => frames.push(cb);
+    const goneCanvas = document.createElement('canvas');
+    document.body.appendChild(goneCanvas);
+    const gone = await Winding.create(goneCanvas);
+    try {
+      const goneScene = gone.createScene();
+      let drawn = 0;
+      gone.run({ scene: goneScene, camera: new Camera({ near: 0.1 }), frame: () => drawn++ });
+      const tick = (ms) => frames.splice(0).forEach((cb) => cb(ms));
+      tick(16);
+      if (drawn !== 1 || gone.rhi.destroyed) throw new Error('a connected canvas did not draw');
+      goneCanvas.remove();
+      tick(32);
+      if (drawn !== 1) throw new Error('drew into a detached canvas');
+      if (!gone.rhi.destroyed) throw new Error('the device was kept alive');
+      if (frames.length) throw new Error('the loop asked for another frame');
+      gone.destroy();   // the page's own teardown may still call it
+      return 'destroyed on the first frame after removal';
+    } finally {
+      globalThis.requestAnimationFrame = realRaf;
+      gone.destroy();
+      goneCanvas.remove();
+    }
+  });
+
   check('no WGSL compilation errors', shaderErrors.length === 0, shaderErrors.join('\n'));
   check('no uncaptured device errors', deviceErrors.length === 0, deviceErrors.join('\n'));
 

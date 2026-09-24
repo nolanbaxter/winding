@@ -66,6 +66,11 @@ engine.run({
 That is the whole setup. There is no `init()` to forget, no render-order to get right, no pass list to
 maintain, and no far plane to tune.
 
+Nothing it allocates outlives its use unless you keep it. `engine.unload(asset)` frees a model once
+every scene has removed it, since each `load()` uploads a fresh copy. `engine.destroy()` frees
+the rest. And an engine whose canvas leaves the page destroys itself, which is what a live editor
+that reloads by rewriting the page needs.
+
 ## Install
 
 There is no build step and there are no dependencies, so a URL is the whole install. The files you
@@ -75,7 +80,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.10.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.10.1/src/winding.js';
 </script>
 ```
 
@@ -95,8 +100,8 @@ import { Winding, Camera } from 'winding-engine';
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.10.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.10.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.10.1/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.10.1/src/"
   }
 }
 </script>
@@ -153,8 +158,8 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 526 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 18 checks on a real device
+npm test          # 530 checks, Node, no browser
+npm run test:gpu  # serves the page; open test/gpu.html for 21 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort

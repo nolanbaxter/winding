@@ -263,6 +263,34 @@ test('removing a node takes its subtree and its renderables', () => {
   assert.equal(doomed.alive, false);
 });
 
+test('every scene counts what draws a primitive, so unload knows when it is free', () => {
+  const asset = fakeAsset({
+    nodes: [node('p', { children: [1], mesh: 0 }), node('c', { mesh: 0 })],
+    roots: [0],
+  });
+  const primitive = asset.meshes[0].primitives[0];
+  const a = new Scene({ capacity: 16 });
+  const b = new Scene({ capacity: 16 });
+
+  const first = a.add(asset);
+  const second = a.add(asset);
+  b.add(asset);
+  assert.equal(primitive.instances, 6, 'two nodes each, three adds, two scenes');
+
+  first.destroy();
+  assert.equal(primitive.instances, 4);
+  second.destroy();
+  assert.equal(primitive.instances, 2, 'the other scene still draws it');
+});
+
+test('an unloaded asset is refused, not drawn from freed buffers', () => {
+  const asset = fakeAsset();
+  asset.unloaded = true;
+  const scene = new Scene({ capacity: 8 });
+  assert.throws(() => scene.add(asset), /unloaded/);
+  assert.equal(scene.renderableCount, 0);
+});
+
 test('removal swap-removes, so renderable indices are not stable', () => {
   const scene = new Scene({ capacity: 64 });
   const first = scene.add(fakeAsset());

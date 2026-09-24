@@ -50,6 +50,7 @@ const KIND = 5;        // which job to run
 const ARG0 = 6;        // job-specific scalars
 const ARG1 = 7;
 const SHUTDOWN = 8;
+const DATA = 9;        // bumped per setSharedData; which buffers are current
 const CONTROL_SLOTS = 16;
 
 /**
@@ -160,8 +161,13 @@ export class JobSystem {
     this._buffers = buffers;
     /** Whatever last published its buffers here. See setSharedData. */
     this.sharedOwner = owner;
+    // A worker sits inside workerLoop and never returns to its event loop on
+    // its own, so a second 'init' would queue unread while the worker went on
+    // composing into the FIRST buffers it was given -- memory nobody reads
+    // once a store has grown. The revision is how it learns to go and read it.
+    const revision = Atomics.add(this.control, DATA, 1) + 1;
     for (const worker of this.workers) {
-      worker.postMessage({ type: 'init', control: this.control.buffer, buffers });
+      worker.postMessage({ type: 'init', control: this.control.buffer, buffers, revision });
     }
   }
 
@@ -345,14 +351,21 @@ export function runChunks(control, handler, arg0, arg1, epoch = 0) {
 /**
  * The loop a worker thread sits in: wait for a new epoch, run, wait again.
  * Exported so the worker entry module is a handful of lines.
+ *
+ * `revision` is the one its 'init' message carried. The loop returns as soon
+ * as the buffers it holds are no longer current, so the worker's event loop
+ * can deliver the newer 'init' that is already queued. Claiming nothing in the
+ * meantime is safe: the dispatching thread runs every chunk nobody takes.
  */
-export function workerLoop(control, handlers) {
+export function workerLoop(control, handlers, revision = Atomics.load(control, DATA)) {
   let seen = Atomics.load(control, EPOCH);
   for (;;) {
+    if (Atomics.load(control, DATA) !== revision) return;
     Atomics.wait(control, EPOCH, seen);
     seen = Atomics.load(control, EPOCH);
 
     if (Atomics.load(control, SHUTDOWN) === 1) return;
+    if (Atomics.load(control, DATA) !== revision) return;
 
     const kind = Atomics.load(control, KIND);
     const handler = handlers.get(kind);
@@ -369,7 +382,7 @@ export function workerLoop(control, handlers) {
   }
 }
 
-export const CONTROL = { EPOCH, CURSOR, COMPLETED, ITEM_COUNT, CHUNK, KIND, ARG0, ARG1, SHUTDOWN, CONTROL_SLOTS };
+export const CONTROL = { EPOCH, CURSOR, COMPLETED, ITEM_COUNT, CHUNK, KIND, ARG0, ARG1, SHUTDOWN, DATA, CONTROL_SLOTS };
 
 /**
  * One worker per core, minus the one this thread is already using.

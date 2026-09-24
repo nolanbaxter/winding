@@ -107,32 +107,39 @@ export class Winding {
       onError: options.onError,
     });
 
-    const renderer = await Renderer.create(rhi, {
-      maxDraws: options.maxDraws,
-      exposure: options.exposure,
-      shadows: options.shadows,
-      post: options.post,
-      shadowDistance: options.shadowDistance,
-      lightDistance: options.lightDistance,
-      gpuTiming: options.gpuTiming,
-      oit: options.oit,
-    });
+    // A failure past this point would otherwise strand the device and its
+    // resize observer, with no engine for anyone to call destroy() on.
+    try {
+      const renderer = await Renderer.create(rhi, {
+        maxDraws: options.maxDraws,
+        exposure: options.exposure,
+        shadows: options.shadows,
+        post: options.post,
+        shadowDistance: options.shadowDistance,
+        lightDistance: options.lightDistance,
+        gpuTiming: options.gpuTiming,
+        oit: options.oit,
+      });
 
-    const sharedEnvironment = options.environment instanceof Environment;
-    const environment = sharedEnvironment
-      ? options.environment
-      : new Environment(rhi, options.environment ?? {});
+      const sharedEnvironment = options.environment instanceof Environment;
+      const environment = sharedEnvironment
+        ? options.environment
+        : new Environment(rhi, options.environment ?? {});
 
-    // Workers need cross-origin isolation (COOP + COEP). Without it the job
-    // system falls back to running inline, which is slower and identical.
-    const jobs = new JobSystem({
-      workerCount: options.workerCount,
-      createWorker: sharedMemoryAvailable
-        ? () => createModuleWorker(new URL('../core/jobWorker.js', import.meta.url))
-        : null,
-    });
+      // Workers need cross-origin isolation (COOP + COEP). Without it the job
+      // system falls back to running inline, which is slower and identical.
+      const jobs = new JobSystem({
+        workerCount: options.workerCount,
+        createWorker: sharedMemoryAvailable
+          ? () => createModuleWorker(new URL('../core/jobWorker.js', import.meta.url))
+          : null,
+      });
 
-    return new Winding(rhi, renderer, environment, jobs, !sharedEnvironment);
+      return new Winding(rhi, renderer, environment, jobs, !sharedEnvironment);
+    } catch (error) {
+      rhi.destroy();
+      throw error;
+    }
   }
 
   constructor(rhi, renderer, environment, jobs, ownsEnvironment = true) {
@@ -160,6 +167,13 @@ export class Winding {
     this._fpsAccum = 0;
     this._fpsFrames = 0;
     this._defaultMaterialId = -1;
+
+    // The device was lost, or the canvas left the document. Either way nothing
+    // this engine draws can be seen again, so it lets go of everything --
+    // including its workers, which nothing else would ever end. Whether or not
+    // run() is driving it: an engine that failed before run(), or one driven
+    // through renderFrame(), has no loop to notice.
+    rhi.onUnusable = () => this.destroy();
   }
 
   createScene(options = {}) {
@@ -250,6 +264,8 @@ export class Winding {
         // for an unmorphed primitive, which is what makes the vertex shader
         // skip the loop entirely.
         morphBase: primitive.morph ? this.renderer.morph.allocate(primitive.morph.deltas) : 0,
+        /** How many floats of the arena that is, for unload() to give back. */
+        morphFloats: primitive.morph ? primitive.morph.deltas.length : 0,
         morphCountStride: primitive.morph
           ? packMorphCountStride(primitive.morph.targetCount, primitive.morph.stride)
           : 0,
@@ -262,6 +278,8 @@ export class Winding {
           ? materialIds[primitive.material]
           : this._defaultMaterial(),
         meshIndex: m,
+        /** Renderables drawing this, across every scene. See Scene.add. */
+        instances: 0,
       })),
     }));
 
@@ -278,8 +296,42 @@ export class Winding {
     return {
       nodes: model.nodes, meshes, roots: model.roots, materialIds,
       animations: model.animations, skins: model.skins, source: model.source,
-      lights: model.lights, cameras: model.cameras,
+      lights: model.lights, cameras: model.cameras, textures,
     };
+  }
+
+  /**
+   * Free what load() made for an asset: its buffers, textures, material ids
+   * and morph deltas. Remove it from every scene first; this throws if any
+   * scene still draws it.
+   *
+   * load() allocates on every call, the same file included, and until this
+   * existed nothing ever gave it back. An editor that re-imports on each save
+   * kept every version it had ever loaded, and the 4097th material threw.
+   */
+  unload(asset) {
+    if (asset.unloaded) return;
+    for (const mesh of asset.meshes) {
+      for (const primitive of mesh.primitives) {
+        if (primitive.instances > 0) {
+          throw new Error(`unload: mesh "${mesh.name}" is still in a scene; remove it first`);
+        }
+      }
+    }
+    asset.unloaded = true;
+
+    for (const mesh of asset.meshes) {
+      for (const primitive of mesh.primitives) {
+        primitive.vertexBuffer.destroy();
+        primitive.indexBuffer.destroy();
+        primitive.skinBuffer?.destroy();
+        if (primitive.morphFloats > 0) {
+          this.renderer.morph.free(primitive.morphBase, primitive.morphFloats);
+        }
+      }
+    }
+    for (const id of asset.materialIds) this.renderer.materials.release(id);
+    asset.textures.destroy();
   }
 
   /** glTF lets a primitive have no material; the spec's default is a white dielectric. */
@@ -301,6 +353,10 @@ export class Winding {
    * Getting this accumulator right is the thing hobby engines most reliably
    * miss, which is why the engine owns it by default. renderFrame() stays
    * public for anyone who needs to drive it themselves.
+   *
+   * If the canvas is removed from the document, the next frame destroys the
+   * engine: nothing drawn into a detached canvas can be seen. (An engine that
+   * is not running learns the same thing from its resize observer.)
    */
   run({ scene, camera, update, frame }) {
     if (this._running) throw new Error('run: already running; call stop() first');
@@ -313,6 +369,12 @@ export class Winding {
       // destroy() -- a lost device wedged the engine rather than stopping it.
       if (!this._running) return;
       if (this.rhi.destroyed) { this.stop(); return; }
+      // A canvas that has left the document can never be seen again, so every
+      // frame drawn into it is waste. This is what a live editor's reload
+      // leaves behind: it rewrites the page in place (document.open/write), no
+      // pagehide fires, and each old engine kept rendering and kept its GPU
+      // device -- one more full loop per edit, until the adapter ran out.
+      if (this.rhi.canvas.isConnected === false) { this.destroy(); return; }
       this._raf = requestAnimationFrame(loop);
 
       this.clock.begin(nowMs / 1000);
@@ -359,6 +421,8 @@ export class Winding {
    * whichever engine is still using them.
    */
   destroy() {
+    if (this._destroyed) return;   // the loop may already have done it
+    this._destroyed = true;
     this.stop();
     this.jobs.destroy();
     this.renderer.destroy();

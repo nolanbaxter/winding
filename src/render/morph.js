@@ -49,6 +49,8 @@ export class MorphStore {
     this.deltaCount = 0;
     this.deltaCapacity = deltaCapacity;
     this.deltaBuffer = this._createDeltaBuffer(deltaCapacity);
+    /** Freed ranges below deltaCount, as { base, length }, sorted by base. */
+    this._holes = [];
 
     this.weightCapacity = weightCapacity;
     this.weightData = new Float32Array(weightCapacity);
@@ -85,6 +87,21 @@ export class MorphStore {
    * primitive's draw data and is what makes one arena addressable.
    */
   allocate(deltas) {
+    // A hole an unloaded asset left behind first, if one is big enough.
+    // ponytail: first fit, no compaction -- a hole smaller than every later
+    // asset stays a hole. Compacting means moving live deltas and rewriting
+    // every primitive's morphBase; worth it only if fragmentation shows up.
+    for (let h = 0; h < this._holes.length; h++) {
+      const hole = this._holes[h];
+      if (hole.length < deltas.length) continue;
+      const base = hole.base;
+      hole.base += deltas.length;
+      hole.length -= deltas.length;
+      if (hole.length === 0) this._holes.splice(h, 1);
+      this.rhi.queue.writeBuffer(this.deltaBuffer, base * MORPH_FLOAT_BYTES, deltas);
+      return base;
+    }
+
     const base = this.deltaCount;
     const needed = base + deltas.length;
 
@@ -111,6 +128,36 @@ export class MorphStore {
     this.rhi.queue.writeBuffer(this.deltaBuffer, base * MORPH_FLOAT_BYTES, deltas);
     this.deltaCount = needed;
     return base;
+  }
+
+  /**
+   * Give back `length` floats at `base`, from an unloaded asset.
+   *
+   * The arena used to be append-only, so every reload of a face rig added its
+   * tens of megabytes again until the buffer passed the binding limit. Holes
+   * are kept sorted and merged; one that reaches the end shortens the arena.
+   */
+  free(base, length) {
+    let at = 0;
+    while (at < this._holes.length && this._holes[at].base < base) at++;
+    this._holes.splice(at, 0, { base, length });
+
+    const next = this._holes[at + 1];
+    if (next && base + length === next.base) {
+      this._holes[at].length += next.length;
+      this._holes.splice(at + 1, 1);
+    }
+    const previous = this._holes[at - 1];
+    if (previous && previous.base + previous.length === base) {
+      previous.length += this._holes[at].length;
+      this._holes.splice(at, 1);
+    }
+
+    const last = this._holes[this._holes.length - 1];
+    if (last && last.base + last.length === this.deltaCount) {
+      this.deltaCount = last.base;
+      this._holes.pop();
+    }
   }
 
   /**

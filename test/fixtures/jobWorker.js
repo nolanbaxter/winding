@@ -19,6 +19,7 @@ const JOB_SLOW = 97;
 const WHO = threadId + 1;
 
 const postReady = () => parentPort.postMessage({ type: 'ready' });
+let reported = false;
 
 parentPort.on('message', (message) => {
   if (message.type !== 'init') return;
@@ -54,6 +55,6 @@ parentPort.on('message', (message) => {
     }],
   ]);
 
-  postReady();
-  workerLoop(control, handlers);
+  if (!reported) { reported = true; postReady(); }
+  workerLoop(control, handlers, message.revision);
 });

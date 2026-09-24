@@ -132,6 +132,8 @@ export class MaterialRegistry {
      */
     this._textures = [];
     this._names = [];
+    /** Ids given back by release(), handed out again before new ones. */
+    this._free = [];
     this.variants = new Uint8Array(capacity);
     this.alphaModes = new Uint8Array(capacity);
 
@@ -158,9 +160,13 @@ export class MaterialRegistry {
     // material field is 12 bits, and an id that does not fit would silently
     // alias two materials into one bucket. drawlist.js only DEBUG-checks
     // because by then the id has already been minted here.
-    if (this.count >= this.capacity) this._grow(this.count + 1);
-
-    const id = this.count++;
+    // A released id first. Without reuse, loading and unloading one asset over
+    // and over walked the id up to the 4096 the sort key allows, and threw.
+    let id = this._free.pop();
+    if (id === undefined) {
+      if (this.count >= this.capacity) this._grow(this.count + 1);
+      id = this.count++;
+    }
     const offset = id * this.alignment;
 
     const f32 = new Float32Array(this.staging, offset, MATERIAL_BYTES / 4);
@@ -256,6 +262,17 @@ export class MaterialRegistry {
 
     // Every existing bind group points at the destroyed buffer.
     for (let id = 0; id < this.count; id++) this.bindGroups[id] = this._makeBindGroup(id);
+  }
+
+  /**
+   * Give an id back. Nothing may still draw with it -- engine.unload checks
+   * that -- because the next register() will reuse it for another surface.
+   * The references go too, so the textures behind it are not kept alive.
+   */
+  release(id) {
+    this._textures[id] = undefined;
+    this.bindGroups[id] = undefined;
+    this._free.push(id);
   }
 
   bindGroup(materialId) {
