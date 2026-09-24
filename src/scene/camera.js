@@ -44,8 +44,8 @@ import {
 export function fitDistance(radius, { fovY, aspect = 1, margin = 1, near = 0 } = {}) {
   if (!(radius > 0)) return 0;
   const halfY = fovY * 0.5;
-  // A non-positive aspect means update() has not run; square is the
-  // conservative read, since it can only over-estimate the distance.
+  // A non-positive aspect cannot be fitted to; square is the conservative
+  // read, since it can only over-estimate the distance.
   const halfX = Math.atan(Math.tan(halfY) * (aspect > 0 ? aspect : 1));
   const fit = (radius / Math.sin(Math.min(halfY, halfX))) * margin;
 
@@ -192,8 +192,8 @@ export class Camera {
    * frustum is `atan(tan(fovY/2) * aspect)`. On a portrait viewport that is
    * the SMALLER of the two, so fitting to fovY alone would push a wide object
    * off both sides. Aspect defaults to the last one update() was given, which
-   * is zero before the first frame -- pass it explicitly when framing during
-   * setup.
+   * is 1 before the first frame rather than the canvas's -- pass it explicitly
+   * when framing during setup.
    */
   frameBounds(min, max, { margin = 1, aspect = this.aspect } = {}) {
     if (DEBUG) {

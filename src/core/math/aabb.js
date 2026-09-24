@@ -23,6 +23,17 @@ import { hypot3 } from './vec3.js';
 export function aabbTransform(
   outMin, outMax, min, max, m, mOff = 0, outOff = 0, inOff = 0,
 ) {
+  // An empty box (min above max -- what a primitive with no vertices has)
+  // stays empty. Transformed, its infinities met the matrix's zeros and came
+  // out NaN, which no cull test ever rejects.
+  if (!(min[inOff] <= max[inOff])) {
+    for (let i = 0; i < 3; i++) {
+      outMin[outOff + i] = Infinity;
+      outMax[outOff + i] = -Infinity;
+    }
+    return;
+  }
+
   // The same loop as before -- for each world axis i, start at the
   // translation and add each local axis j's contribution, smaller end to the
   // minimum -- with the inner three steps written out. V8 did not unroll it
@@ -113,7 +124,10 @@ export function aabbRayDistance(min, max, origin, direction, boundsOff = 0) {
   let exit = Infinity;
 
   for (let i = 0; i < 3; i++) {
-    const inverse = 1 / direction[i];
+    // + 0 turns -0 into +0. A local-space ray through a mirrored matrix picks
+    // up -0 components naturally, and 1 / -0 is -Infinity: the same ray then
+    // hit or missed a box depending on the sign of a zero.
+    const inverse = 1 / (direction[i] + 0);
     let near = (min[boundsOff + i] - origin[i]) * inverse;
     let far = (max[boundsOff + i] - origin[i]) * inverse;
     if (near > far) { const swap = near; near = far; far = swap; }

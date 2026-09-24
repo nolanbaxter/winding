@@ -13,15 +13,15 @@ import {
 
 import {
   quatCreate, quatIdentity, quatSetAxisAngle, quatMultiply,
-  quatNormalize, quatConjugate, quatSlerp,
+  quatNormalize, quatConjugate, quatSlerp, quatFromTo,
 } from '../src/core/math/quat.js';
 
 import {
   mat4Create, mat4Identity, mat4Copy, mat4Multiply, mat4FromQuatPosScale,
-  mat4Invert, mat4LookAt, mat4NormalMatrix, mat4PerspectiveReverseZInfinite, mat4MultiplyAffine,
+  mat4Invert, mat4LookAt, mat4NormalMatrix, mat4PerspectiveReverseZInfinite, mat4MultiplyAffine, mat4Decompose,
 } from '../src/core/math/mat4.js';
 
-import { rayTriangleDistance, aabbTransform } from '../src/core/math/aabb.js';
+import { rayTriangleDistance, aabbTransform, aabbRayDistance } from '../src/core/math/aabb.js';
 import {
   srgbToLinear, linearToSrgb, colorFromHex, colorFromBytes,
 } from '../src/core/color.js';
@@ -799,6 +799,71 @@ test('slerp with the square root agrees with sin(acos) to float32', () => {
       assert.ok(Math.abs(out[i] - Math.fround(want[i])) <= 2 ** -22, `slerp ${n}[${i}]: ${out[i]} vs ${want[i]}`);
     }
   }
+});
+
+// ------------------------------------------------------------ math edges
+
+console.log('\nmath edges');
+
+test('a ray answers the same for -0 and +0 in its direction', () => {
+  // -0 arises on its own from a local-space ray through a mirrored matrix, and
+  // 1 / -0 is -Infinity: the same ray used to hit or miss by the sign of zero.
+  const min = [0, 0, 0];
+  const max = [1, 1, 1];
+  for (const origin of [[0, 0.5, -1], [1, 0.5, -1]]) {
+    const plus = aabbRayDistance(min, max, origin, [0, 0, 1]);
+    const minus = aabbRayDistance(min, max, origin, [-0, 0, 1]);
+    assert.equal(minus, plus, `origin ${origin}`);
+    assert.equal(plus, 1);
+  }
+});
+
+test('decompose refuses a non-finite matrix and leaves its outputs untouched', () => {
+  const m = mat4Create();
+  m[12] = 1; m[13] = 2; m[14] = 3;
+  m[5] = NaN;
+  const pos = [9, 9, 9];
+  const rot = [9, 9, 9, 9];
+  const scale = [9, 9, 9];
+  assert.equal(mat4Decompose(pos, rot, scale, m), false);
+  assert.deepEqual([pos, rot, scale], [[9, 9, 9], [9, 9, 9, 9], [9, 9, 9]]);
+});
+
+test('decompose gives a unit quaternion even for a sheared matrix', () => {
+  const m = mat4Create();
+  m[4] = 0.5;                                   // shear: column 1 leans along x
+  const rot = [0, 0, 0, 1];
+  assert.equal(mat4Decompose([0, 0, 0], rot, [0, 0, 0], m), true);
+  close(Math.hypot(...rot), 1, 1e-12, 'unit length');
+});
+
+test('decompose keeps float64 precision for float64 input', () => {
+  const q = quatNormalize([0, 0, 0, 0], [0.1, 0.7, -0.2, 0.6]);   // float64, exactly unit
+  const m = new Float64Array(16);
+  mat4FromQuatPosScale(m, q, [1, 2, 3], [2, 3, 4]);
+  const rot = [0, 0, 0, 0];
+  mat4Decompose([0, 0, 0], rot, [0, 0, 0], m);
+  // The float32 scratch it used rounded this to about 1e-8.
+  for (let i = 0; i < 4; i++) close(rot[i], q[i], 1e-12, `component ${i}`);
+});
+
+test('an empty box transforms to an empty box, not NaN', () => {
+  const outMin = new Float32Array(3);
+  const outMax = new Float32Array(3);
+  aabbTransform(outMin, outMax, [Infinity, Infinity, Infinity], [-Infinity, -Infinity, -Infinity], mat4Create());
+  assert.deepEqual([...outMin], [Infinity, Infinity, Infinity]);
+  assert.deepEqual([...outMax], [-Infinity, -Infinity, -Infinity]);
+});
+
+test('quatFromTo is exact just short of a half turn', () => {
+  // The fallback used to take over at dot -0.999999 and answer with a half
+  // turn about an arbitrary axis, up to 0.08 degrees off.
+  const from = [0, 0, 1];
+  const angle = Math.PI - 1e-3;                  // dot = -0.9999995
+  const to = [Math.sin(angle), 0, Math.cos(angle)];
+  const q = quatFromTo(quatCreate(), from, to);
+  const moved = vec3TransformQuat(vec3Create(), from, q);
+  for (let i = 0; i < 3; i++) close(moved[i], to[i], 1e-6, `component ${i}`);
 });
 
 console.log(`\n${passed} checks passed\n`);

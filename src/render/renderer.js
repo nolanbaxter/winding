@@ -190,20 +190,20 @@ export class Renderer {
     // a frame. One entry per blended object, not per batch.
     this.transparentList = new DrawList(maxDraws);
     this._transparentOrder = new Uint32Array(maxDraws);
-    /**
-     * GPU milliseconds per pass, to sit beside the CPU phases below.
-     *
-     * On by default for the same reason those are: the cost is two timestamps
-     * per pass and an async copy, and a renderer that makes you remember to
-     * turn on the thing that says what is slow gets optimized by guesswork.
-     * Inert on a device without `timestamp-query`.
-     */
     /** Joint matrices for every skinned instance, rebuilt each frame. */
     this.skinPalette = new SkinPalette(rhi);
     /** Morph deltas (static, per primitive) and weights (per frame, per instance). */
     this.morph = new MorphStore(rhi);
     this._paletteRevision = 0;
 
+    /**
+     * GPU milliseconds per pass, to sit beside the CPU phases below.
+     *
+     * Off unless asked for (`gpuTiming: true`, or a Benchmark for the length of
+     * its run): every pass would stamp two timestamps and copy them back, for
+     * a number nothing in the engine reads. Switchable at any time through
+     * `gpuTiming.enabled`. Inert on a device without `timestamp-query`.
+     */
     this.gpuTiming = new GpuProfiler(rhi, { enabled: gpuTiming });
     this.graph = new RenderGraph(rhi, { profiler: this.gpuTiming });
     // Bound once: the graph holds a function per pass, and rebuilding these

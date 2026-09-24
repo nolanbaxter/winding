@@ -91,6 +91,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     number of triangles (tangents wrote NaN into the leftover vertex);
   - animation channels targeting a node that does not exist, unknown
     interpolation, and keyframe times that do not strictly increase.
+- **Math edge cases.** A ray with a -0 direction component now answers
+  like +0 (it could miss a box the same ray hit); decompose refuses a
+  non-finite matrix before writing anything, keeps float64 precision, and
+  returns a unit rotation for a sheared matrix; an empty box transforms to
+  an empty box instead of NaN; quatFromTo no longer snaps turns up to 0.08
+  degrees short of opposite onto an exact half turn.
+- **A non-looping clip played backwards never finished.** It clamped at 0
+  and reported itself playing forever.
 - **Lights without a range were cut off at 40% of their visible reach.** The
   radius assumed radiance reaches the display linearly; through sRGB and the
   ACES tonemap the cut still showed. It is now derived from both curves, so

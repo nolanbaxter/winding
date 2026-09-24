@@ -256,7 +256,9 @@ export class AnimationPlayer {
         this.time = duration;
         this.finished = true;
       } else if (this.time < 0) {
+        // Backwards, the end is the start.
         this.time = 0;
+        this.finished = true;
       }
     }
 

@@ -259,6 +259,19 @@ test('speed scales time, and a negative speed wraps backwards', () => {
   close(player.time, 1.5, EPS, 'wrapped to the end of the clip');
 });
 
+test('a clip played backwards without looping finishes at its start', () => {
+  // It clamped to 0 and kept reporting itself as playing, forever.
+  const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], ENTITY_OF, ENTITIES);
+  const t = recorder();
+  player.play(0, { loop: false, speed: -1, time: 1 });
+  player.advance(0.5, t);
+  assert.equal(player.finished, false, 'still going');
+  player.advance(1, t);
+  close(player.time, 0, EPS, 'clamped at the start');
+  assert.equal(player.finished, true);
+  assert.equal(player.advance(0.1, t), false, 'and reports itself done');
+});
+
 test('stop leaves the pose alone and halts further sampling', () => {
   const player = new AnimationPlayer([clip('translation', [0, 2], [0, 0, 0, 10, 0, 0])], ENTITY_OF, ENTITIES);
   const t = recorder();

@@ -12,7 +12,7 @@
 // (model, then view, then projection).
 
 import { DEBUG, assert, assertFinite } from '../assert.js';
-import { quatFromMat4 } from './quat.js';
+import { quatFromMat4, quatNormalize } from './quat.js';
 import { hypot3 } from './vec3.js';
 
 /** Startup-only. Allocates. Returns identity. */
@@ -316,7 +316,9 @@ export function mat4NormalMatrix(out, m, outOff = 0, mOff = 0) {
 
 // Scratch for mat4Decompose. Module-level rather than per-call: decompose runs
 // at asset load, but allocating a matrix per node would still be pointless.
-const decomposeScratch = new Float32Array(16);
+// Float64, so decomposing a Float64Array keeps its precision; a Float32Array
+// is rounded once, where it is written back.
+const decomposeScratch = new Float64Array(16);
 
 /**
  * Split a transform matrix back into translation, rotation and scale.
@@ -347,7 +349,13 @@ export function mat4Decompose(outPos, outRot, outScale, m, mOff = 0) {
   // already been copied out, so a caller trusting the documented contract kept
   // its previous rotation and scale and got the degenerate matrix's position --
   // a transform mixed from two different matrices, which is worse than either.
-  if (sx === 0 || sy === 0 || sz === 0) return false;
+  // Written as a test that must PASS, so NaN fails it: `sx === 0` let a NaN
+  // matrix through, and DEBUG then caught it only after writing outPos -- the
+  // outputs were no longer untouched, as the contract above says they are.
+  if (!(sx !== 0 && sy !== 0 && sz !== 0 && Number.isFinite(sx * sy * sz))) return false;
+  if (!(Number.isFinite(m[mOff + 12]) && Number.isFinite(m[mOff + 13]) && Number.isFinite(m[mOff + 14]))) {
+    return false;
+  }
 
   outPos[0] = m[mOff + 12];
   outPos[1] = m[mOff + 13];
@@ -362,6 +370,10 @@ export function mat4Decompose(outPos, outRot, outScale, m, mOff = 0) {
   s[12] = 0; s[13] = 0; s[14] = 0; s[15] = 1;
 
   quatFromMat4(outRot, s);
+  // Exactly unit for a pure rotation already. A sheared matrix has no exact
+  // TRS form, and its columns made a quaternion 0.7% short, which then read
+  // as a scale rather than a rotation.
+  quatNormalize(outRot, outRot);
 
   outScale[0] = sx;
   outScale[1] = sy;

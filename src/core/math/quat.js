@@ -226,7 +226,11 @@ export function quatFromTo(out, from, to) {
   // identity -- whereas a threshold SNAPS every rotation smaller than it to
   // identity and introduces the error it looks like it is avoiding. Only the
   // opposed case is genuinely singular.
-  if (dot < -0.999999) {
+  // Only at an exact or near-exact half turn, where the cross product is down
+  // at rounding noise and has no direction. The threshold was -0.999999, which
+  // snapped turns up to 0.08 degrees short of opposite onto an exact half
+  // turn about an arbitrary axis; the general form below is accurate there.
+  if (1 + dot < 1e-12) {
     const ax = Math.abs(from[0]);
     const ay = Math.abs(from[1]);
     const az = Math.abs(from[2]);
