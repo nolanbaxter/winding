@@ -604,10 +604,17 @@ fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
 
   let emissive = textureSample(emissiveMap, surfSampler, uvEmissive).rgb * material.emissive.rgb;
 
-  // Linear HDR, deliberately unclamped. Bloom needs to know a highlight was at
-  // 60x white, not that it was clipped to 1; the post stack tonemaps once at
+  // Linear HDR, deliberately not clamped to 1. Bloom needs to know a highlight
+  // was at 60x white, not that it was clipped; the post stack tonemaps once at
   // the end. Exposure lives there too, for the same reason.
-  return vec4<f32>(direct + ambient + emissive, sampled.a);
+  //
+  // Clamped to 65504 only, which is the largest finite value the rgba16float
+  // target holds. A near-mirror metal under a bright sun goes past it -- GGX
+  // peaks near 78,000 at the roughness floor. Chrome on Windows saturates the
+  // store on its own (measured: no change without this, even at 5,000x);
+  // a backend that rounds to infinity instead would hand bloom's blur an
+  // infinity to spread as NaN. One min per fragment, so it stays.
+  return vec4<f32>(min(direct + ambient + emissive, vec3<f32>(65504.0)), sampled.a);
 }
 
 @fragment

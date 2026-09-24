@@ -14,11 +14,17 @@ const PI = 3.14159265359;
 
 // GGX / Trowbridge-Reitz normal distribution. "roughness" is glTF's perceptual
 // roughness; squaring it once here is what makes the parameter feel linear.
+//
+// The floor on the divisor only guards a zero. d is smallest at NoH = 1, where
+// it equals a2, so PI d^2 is never below PI * 0.045^8 = 5.3e-11 with roughness
+// clamped at 0.045. This floor used to be 1e-7 -- ABOVE that -- and it capped
+// the peak of every lobe smoother than roughness 0.116: at the clamp, 41
+// instead of 77,625, and a glossy highlight kept 5% of its energy.
 fn distributionGGX(NoH : f32, roughness : f32) -> f32 {
   let a  = roughness * roughness;
   let a2 = a * a;
   let d  = NoH * NoH * (a2 - 1.0) + 1.0;
-  return a2 / max(PI * d * d, 1e-7);
+  return a2 / max(PI * d * d, 1e-30);
 }
 
 // Height-correlated Smith visibility (Heitz 2014). This is G / (4 NoL NoV), so

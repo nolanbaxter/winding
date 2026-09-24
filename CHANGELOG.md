@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scene had them depended on where it sat. No test checked that a shadow is
   ever cast; one does now, on the GPU, and a Node check covers the depth
   range. Found by two audits independently.
+- **Glossy highlights kept as little as 5% of their light.** GGX guarded its
+  divisor with a floor of 1e-7, above what a smooth lobe divides by, so
+  every surface smoother than roughness 0.116 had its highlight capped: at
+  the roughness floor the peak was 41 instead of 77,625, and a smoother
+  surface came out DIMMER than a rougher one. The floor is now far below
+  anything the clamped roughness reaches. The shader's output is also held
+  to 65504, the half-float target's largest value, which such a highlight
+  now exceeds. GPU check: a smoother highlight is brighter (fails with the
+  old floor).
 
 ## [0.9.1] - 2026-09-24
 

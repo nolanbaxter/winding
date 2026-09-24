@@ -448,6 +448,8 @@ export function buildMorphedGLB() {
 export function buildFeatureGLB({
   // A KHR_lights_punctual light on its own node: { translation, light }.
   lamp = null,
+  metallicFactor,
+  roughnessFactor,
   baseColorFactor = [0.9, 0.15, 0.1, 1],
   alphaMode,
   alphaCutoff,
@@ -507,6 +509,8 @@ export function buildFeatureGLB({
   accessors.forEach((a, i) => { a.bufferView = i; });
 
   const pbr = { baseColorFactor };
+  if (metallicFactor !== undefined) pbr.metallicFactor = metallicFactor;
+  if (roughnessFactor !== undefined) pbr.roughnessFactor = roughnessFactor;
   if (imageURI) {
     pbr.baseColorTexture = { index: 0 };
     if (baseColorTexCoord !== undefined) pbr.baseColorTexture.texCoord = baseColorTexCoord;

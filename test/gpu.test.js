@@ -837,6 +837,44 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       }
       results.push('a caster on the sun side of the origin casts a shadow');
 
+      // A SMOOTHER SURFACE HAS A BRIGHTER HIGHLIGHT. GGX's divisor floor used to
+      // sit above what a smooth lobe divides by, which inverted exactly this:
+      // at roughness 0.05 the peak was 62, below the 199 of roughness 0.2.
+      // Camera and sun both straight down the quad's normal, so the centre
+      // pixel is the peak of the lobe.
+      const highlight = async (roughnessFactor, intensity) => {
+        const scene = probe.createScene();
+        scene.sun.setDirection(0, 0, -1);
+        scene.sun.setLight({ intensity });
+        scene.add(await probe.load(buildFeatureGLB({
+          baseColorFactor: [0.5, 0.5, 0.5, 1], metallicFactor: 1, roughnessFactor,
+        })));
+        const cam = new Camera({ fovY: 1.0, near: 0.1 });
+        cam.position.set([0, 0, 2]);
+        cam.target.set([0, 0, 0]);
+        probe.renderFrame(scene, cam);
+        const pixels = await probe.rhi.readPixels();
+        const { width, height } = probe.rhi;
+        const i = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
+        return [pixels[i], pixels[i + 1], pixels[i + 2]];
+      };
+      const glossy = await highlight(0.05, 0.02);
+      const rough = await highlight(0.2, 0.02);
+      if (!(glossy[0] > rough[0] + 10)) {
+        throw new Error(`a smoother highlight was not brighter: rough ${show(rough)}, glossy ${show(glossy)}`);
+      }
+      results.push('a smoother highlight is brighter');
+
+      // And a near-mirror under a bright sun must come out white, not black.
+      // The highlight now reaches far past what the half-float target holds;
+      // where the store saturates this passes with or without the shader's
+      // clamp, and where it rounds to infinity it passes only with it.
+      const blown = await highlight(0.045, 50);
+      if (!(blown[0] > 200 && blown[1] > 200 && blown[2] > 200)) {
+        throw new Error(`a near-mirror under a bright sun did not come out white: ${show(blown)}`);
+      }
+      results.push('a mirror highlight saturates instead of overflowing');
+
       // Emissive with no texture. The default map was black, so this factor
       // used to be multiplied away entirely.
       const dim = await shoot({ baseColorFactor: [0.05, 0.05, 0.05, 1] });
