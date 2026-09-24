@@ -14,6 +14,7 @@
 
 import { Winding, Camera } from '../src/winding.js';
 import { Benchmark } from '../src/bench.js';
+import { CLUSTER_Z, MAX_LIGHTS_PER_CLUSTER } from '../src/render/clustered.js';
 import { shaderErrors } from '../src/rhi/shader.js';
 import { NOT_BATCHED, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
 import {
@@ -166,6 +167,86 @@ export async function run(canvas, onDone) {
     const gpuTop = top(report.gpu, 'mean');
     return `${report.cpu.length - 1} cpu phases, ${report.gpu.length} gpu passes; `
       + `slowest ${cpuTop.name} ${cpuTop.median.toFixed(3)}ms / ${gpuTop.name} ${gpuTop.mean.toFixed(3)}ms`;
+  });
+
+  await step('every cluster lists exactly the lights that overlap it', async () => {
+    // Light assignment runs from the lights: each finds the cells its sphere
+    // can reach and tests only those. The claim is that the lists are the same
+    // as testing every light against every cell, so that is what this does --
+    // on the CPU, against the cluster boxes the GPU built, for every cell.
+    const clusters = engine.renderer.clusters;
+    const lightScene = engine.createScene();
+    lightScene.add(await engine.load(await buildDemoGLB({ arms: 6 })));
+    // Big and small, near and far, some straddling the near plane.
+    for (let i = 0; i < 160; i++) {
+      const a = i * 2.399;
+      const r = 0.5 + (i % 7) * 1.3;
+      lightScene.addLight({ position: [Math.cos(a) * (i % 13), (i % 5) - 1, Math.sin(a) * (i % 13) - 4], radius: r, intensity: 2 });
+    }
+    const cam = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    cam.position.set([0, 2, 8]);
+    engine.renderFrame(lightScene, cam);
+
+    const device = engine.rhi.device;
+    const read = async (buffer, bytes) => {
+      const staging = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(buffer, 0, staging, 0, bytes);
+      device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const copy = staging.getMappedRange().slice(0);
+      staging.destroy();
+      return copy;
+    };
+    const cells = clusters.gridX * clusters.gridY * CLUSTER_Z;
+    const bounds = new Float32Array(await read(clusters.boundsBuffer, cells * 32));
+    const counts = new Uint32Array(await read(clusters.countBuffer, cells * 4));
+    const indices = new Uint32Array(await read(clusters.indexBuffer, cells * MAX_LIGHTS_PER_CLUSTER * 4));
+
+    const view = cam.view;
+    const lights = [];
+    for (let i = 0; i < lightScene.lightCount; i++) {
+      const o = i * 16;
+      const [x, y, z, r] = lightScene.lights.subarray(o, o + 4);
+      lights.push({
+        c: [
+          view[0] * x + view[4] * y + view[8] * z + view[12],
+          view[1] * x + view[5] * y + view[9] * z + view[13],
+          view[2] * x + view[6] * y + view[10] * z + view[14],
+        ],
+        r,
+      });
+    }
+
+    let pairs = 0;
+    let ambiguous = 0;
+    for (let cell = 0; cell < cells; cell++) {
+      const min = bounds.subarray(cell * 8, cell * 8 + 3);
+      const max = bounds.subarray(cell * 8 + 4, cell * 8 + 7);
+      const listed = new Set(indices.subarray(cell * MAX_LIGHTS_PER_CLUSTER,
+        cell * MAX_LIGHTS_PER_CLUSTER + Math.min(counts[cell], MAX_LIGHTS_PER_CLUSTER)));
+      let expected = 0;
+      for (let i = 0; i < lights.length; i++) {
+        const { c, r } = lights[i];
+        let d = 0;
+        for (let k = 0; k < 3; k++) {
+          const out = Math.max(min[k] - c[k], 0) + Math.max(c[k] - max[k], 0);
+          d += out * out;
+        }
+        // f32 on the GPU, f64 here: a sphere grazing a box is a coin toss for
+        // both, and saying which is right would be measuring the rounding.
+        if (Math.abs(d - r * r) < 1e-3 * r * r) { ambiguous++; continue; }
+        const overlaps = d < r * r;
+        if (overlaps) expected++;
+        if (overlaps && !listed.has(i) && counts[cell] <= MAX_LIGHTS_PER_CLUSTER) {
+          throw new Error(`cell ${cell}: light ${i} overlaps it and is not listed`);
+        }
+        if (!overlaps && listed.has(i)) throw new Error(`cell ${cell}: light ${i} is listed and does not overlap it`);
+      }
+      pairs += expected;
+    }
+    if (pairs === 0) throw new Error('no light overlapped any cell, so this checked nothing');
+    return `${pairs} light-cell pairs over ${cells} cells match a brute force (${ambiguous} grazing, skipped)`;
   });
 
   await step('blended geometry is held out of the batched path', async () => {

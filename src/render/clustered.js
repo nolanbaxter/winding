@@ -8,8 +8,16 @@
 //
 // Two compute passes per frame:
 //
-//   1. cluster bounds   view-space AABB for every cell
-//   2. light assignment for each cell, which lights overlap it
+//   1. cluster bounds   view-space AABB for every cell, and every count zeroed
+//   2. light assignment each light adds itself to the cells it overlaps
+//
+// Assignment runs FROM THE LIGHTS. It used to run from the cells: every cell
+// tested every light, cells x lights sphere tests whatever the lights' size,
+// which on a 1,700-object scene with 200 lights was 14% of the GPU frame. Now
+// each light works out the few cells its sphere can reach -- the tiles its
+// bounding box projects onto, the slices its depth range spans -- and runs the
+// same exact sphere-box test on those alone. Same lists; the work follows how
+// much of the view the lights cover instead of how many cells there are.
 //
 // The Z slicing is the part with a real design decision in it. Slicing depth
 // uniformly wastes almost every cell on the far half of the view, because
@@ -72,6 +80,10 @@ export function clusterGridFor(aspect) {
  * a crowded cell rather than as a crash. Nothing reports it: the count lives
  * only in a GPU buffer, and reading it back would cost the pipeline stall this
  * engine avoids everywhere else.
+ *
+ * Which lights drop is not fixed: lights add themselves concurrently, so a
+ * cell past the cap keeps whichever arrived first, and that can differ between
+ * frames. The count itself runs past the cap -- the fragment shader clamps it.
  */
 export const MAX_LIGHTS_PER_CLUSTER = 64;
 
@@ -94,6 +106,9 @@ struct Params {
   grid          : vec4<u32>,   // x, y, z cells; w = light count
   depth         : vec4<f32>,   // x near, y lightDistance, z farthest light reach
   screen        : vec4<f32>,   // x, y = screen size; z, w = tile size in pixels
+  // Forward projection, for the tiles a light's bounds land on. Last, so the
+  // layout above it is unchanged.
+  projection    : mat4x4<f32>,
 };
 
 struct Light {
@@ -112,7 +127,7 @@ struct Bounds {
 @group(0) @binding(1) var<storage, read_write> bounds  : array<Bounds>;
 @group(0) @binding(2) var<storage, read>       lights  : array<Light>;
 @group(0) @binding(3) var<storage, read_write> indices : array<u32>;
-@group(0) @binding(4) var<storage, read_write> counts  : array<u32>;
+@group(0) @binding(4) var<storage, read_write> counts  : array<atomic<u32>>;
 
 /** Screen pixel to a point on the near plane, in view space. */
 fn unproject(pixel : vec2<f32>, ndcZ : f32) -> vec3<f32> {
@@ -190,6 +205,28 @@ fn buildClusters(@builtin(global_invocation_id) id : vec3<u32>) {
 
   bounds[cluster].minPoint = vec4<f32>(min(min(a, b), min(c, d)), 0.0);
   bounds[cluster].maxPoint = vec4<f32>(max(max(a, b), max(c, d)), 0.0);
+
+  // Assignment appends to these, so every frame starts them at zero -- here,
+  // where there is already one invocation per cluster.
+  atomicStore(&counts[cluster], 0u);
+}
+
+/** The slice a view depth falls in: the fragment shader's mapping, clamped. */
+fn sliceOf(depth : f32) -> i32 {
+  let near = params.depth.x;
+  let ratio = log(params.depth.y / near);
+  let slices = f32(params.grid.z);
+  let raw = floor((log(max(depth, near)) - log(near)) * slices / ratio);
+  return i32(clamp(raw, 0.0, slices - 1.0));
+}
+
+/** A view-space point to the tile it lands on, as floating tile coordinates. */
+fn tileOf(point : vec3<f32>) -> vec2<f32> {
+  let clip = params.projection * vec4<f32>(point, 1.0);
+  let ndc = clip.xy / clip.w;
+  // Pixels from the top-left, the same convention unproject() reads back.
+  let pixel = vec2<f32>((ndc.x * 0.5 + 0.5) * params.screen.x, (0.5 - ndc.y * 0.5) * params.screen.y);
+  return pixel / params.screen.zw;
 }
 
 /** Squared distance from a point to an AABB; zero when inside. */
@@ -198,35 +235,100 @@ fn distanceSqToBox(point : vec3<f32>, boxMin : vec3<f32>, boxMax : vec3<f32>) ->
   return dot(outside, outside);
 }
 
-@compute @workgroup_size(4, 4, 4)
-fn assignLights(@builtin(global_invocation_id) id : vec3<u32>) {
-  if (id.x >= params.grid.x || id.y >= params.grid.y || id.z >= params.grid.z) { return; }
-  let cluster = (id.z * params.grid.y + id.y) * params.grid.x + id.x;
+/**
+ * One workgroup per light: its 128 lanes share out the block of cells the
+ * light's sphere can reach, and each adds the light to the ones it overlaps.
+ *
+ * CANDIDATES FIRST, THEN THE EXACT TEST. The tiles come from projecting the
+ * corners of the sphere's view-space bounding box, which contains the sphere,
+ * so the rectangle they span contains every tile it can touch -- under either
+ * projection, because the projection matrix does the work. A box reaching
+ * past the near plane has corners the projection cannot place, so it gets
+ * every tile. The slices come from its depth range. Every range is widened by
+ * one: they only decide what is TESTED, and rounding at a tile or slice edge
+ * must never decide what is lit. The sphere-box test that follows is the one
+ * every cell used to run against every light, so the lists are the same.
+ *
+ * WHY THIS SHAPE, measured -- GPU ms for this pass, in one page, alternating:
+ *
+ *                              every cell   thread/(light,slice)   this
+ *   200 lights, 1,700 objects     0.399           0.120            0.087
+ *   1,000 small lights            1.749           0.099            0.177
+ *   1 light filling the view      0.035           0.362            0.171
+ *   20 medium lights              0.080           0.254            0.129
+ *
+ * No shape wins everywhere, so this is the one whose worst case is least bad:
+ * one thread per (light, slice) walks a screen-filling light's cells in turn
+ * with the GPU otherwise idle, and one workgroup per (light, slice) launches
+ * two dozen per small light that mostly find nothing. Testing every cell is
+ * still cheapest for a handful of huge lights -- by at most 0.14ms -- and ten
+ * times dearer for a thousand small ones.
+ *
+ * Every lane works out the same range. That is redundant and deliberate:
+ * sharing it through workgroup memory would need a barrier, and a barrier may
+ * not follow the early returns above it. Lights index workgroup x, and y
+ * carries the overflow past the 65,535 workgroups a dimension may hold.
+ */
+@compute @workgroup_size(128)
+fn assignLights(
+  @builtin(workgroup_id) group : vec3<u32>,
+  @builtin(local_invocation_index) lane : u32,
+) {
+  let li = group.y * 65535u + group.x;
+  if (li >= params.grid.w) { return; }
 
-  let boxMin = bounds[cluster].minPoint.xyz;
-  let boxMax = bounds[cluster].maxPoint.xyz;
+  let light = lights[li];
+  // Lights arrive in world space; the cluster grid is view space.
+  let centre = (params.view * vec4<f32>(light.positionRadius.xyz, 1.0)).xyz;
+  let radius = light.positionRadius.w;
+  let depth = -centre.z;
+  let near = params.depth.x;
 
-  var found = 0u;
-  let base = cluster * ${MAX_LIGHTS_PER_CLUSTER}u;
+  // Entirely nearer than the near plane: nothing it lights is on screen.
+  if (depth + radius < near) { return; }
+  let zLo = max(sliceOf(depth - radius) - 1, 0);
+  let zHi = min(sliceOf(depth + radius) + 1, i32(params.grid.z) - 1);
 
-  for (var i = 0u; i < params.grid.w; i = i + 1u) {
-    let light = lights[i];
-    // Lights arrive in world space; the cluster grid is view space.
-    let centre = (params.view * vec4<f32>(light.positionRadius.xyz, 1.0)).xyz;
-    let radius = light.positionRadius.w;
+  var lo = vec2<i32>(0, 0);
+  var hi = vec2<i32>(i32(params.grid.x) - 1, i32(params.grid.y) - 1);
+  if (depth - radius > near) {
+    var tMin = vec2<f32>(1e30);
+    var tMax = vec2<f32>(-1e30);
+    for (var corner = 0u; corner < 8u; corner = corner + 1u) {
+      let side = vec3<f32>(
+        select(-1.0, 1.0, (corner & 1u) != 0u),
+        select(-1.0, 1.0, (corner & 2u) != 0u),
+        select(-1.0, 1.0, (corner & 4u) != 0u),
+      );
+      let t = tileOf(centre + side * radius);
+      tMin = min(tMin, t);
+      tMax = max(tMax, t);
+    }
+    // Clamped as floats, before the integer conversion: a corner far off one
+    // edge must land on the edge, not overflow.
+    let last = vec2<f32>(hi);
+    lo = vec2<i32>(clamp(floor(tMin) - 1.0, vec2<f32>(0.0), last));
+    hi = vec2<i32>(clamp(floor(tMax) + 1.0, vec2<f32>(0.0), last));
+  }
 
-    // A sphere-vs-AABB test. Conservative for spot lights, which are tested by
-    // their bounding sphere -- a cone's own test is much more work for a cell
-    // count this small.
-    if (distanceSqToBox(centre, boxMin, boxMax) <= radius * radius) {
-      if (found < ${MAX_LIGHTS_PER_CLUSTER}u) {
-        indices[base + found] = i;
-        found = found + 1u;
+  let radiusSq = radius * radius;
+  let width = hi.x - lo.x + 1;
+  let area = width * (hi.y - lo.y + 1);
+  let cells = area * (zHi - zLo + 1);
+  for (var n = i32(lane); n < cells; n = n + 128) {
+    let slice = zLo + n / area;
+    let inSlice = n % area;
+    let cluster = (u32(slice) * params.grid.y + u32(lo.y + inSlice / width)) * params.grid.x
+      + u32(lo.x + inSlice % width);
+    // A sphere-vs-AABB test. Conservative for spot lights, which are tested
+    // by their bounding sphere -- a cone's own test is much more work.
+    if (distanceSqToBox(centre, bounds[cluster].minPoint.xyz, bounds[cluster].maxPoint.xyz) <= radiusSq) {
+      let slot = atomicAdd(&counts[cluster], 1u);
+      if (slot < ${MAX_LIGHTS_PER_CLUSTER}u) {
+        indices[cluster * ${MAX_LIGHTS_PER_CLUSTER}u + slot] = li;
       }
     }
   }
-
-  counts[cluster] = found;
 }
 `;
 
@@ -266,21 +368,21 @@ export class ClusteredLights {
     this.boundsBuffer = device.createBuffer({
       label: 'cluster-bounds',
       size: CLUSTER_COUNT * 32,            // two vec4 per cluster
-      usage: GPUBufferUsage.STORAGE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,   // COPY_SRC: the GPU suite reads the lists back
     });
     this.indexBuffer = device.createBuffer({
       label: 'cluster-light-indices',
       size: CLUSTER_COUNT * MAX_LIGHTS_PER_CLUSTER * 4,
-      usage: GPUBufferUsage.STORAGE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     this.countBuffer = device.createBuffer({
       label: 'cluster-light-counts',
       size: CLUSTER_COUNT * 4,
-      usage: GPUBufferUsage.STORAGE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    // invProjection(64) + view(64) + grid(16) + depth(16) + screen(16)
-    this.paramsData = new ArrayBuffer(176);
+    // invProjection(64) + view(64) + grid(16) + depth(16) + screen(16) + projection(64)
+    this.paramsData = new ArrayBuffer(240);
     this.paramsF32 = new Float32Array(this.paramsData);
     this.paramsU32 = new Uint32Array(this.paramsData);
     this.paramsBuffer = device.createBuffer({
@@ -308,7 +410,7 @@ export class ClusteredLights {
 
     // Bound once, for the same reason the shadow cascades are.
     this._buildExecute = (pass) => this._dispatch(pass, this.buildPipeline);
-    this._assignExecute = (pass) => this._dispatch(pass, this.assignPipeline);
+    this._assignExecute = (pass) => this._dispatchAssign(pass);
   }
 
   async _init() {
@@ -448,6 +550,7 @@ export class ClusteredLights {
     f32[41] = this.rhi.height;
     f32[42] = this.tileSize[0];
     f32[43] = this.tileSize[1];
+    f32.set(camera.projection, 44);
 
     this.rhi.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
   }
@@ -463,7 +566,9 @@ export class ClusteredLights {
     graph.addPass({
       name: 'cluster-bounds',
       type: 'compute',
-      writes: [boundsResource],
+      // It zeroes the counts assignment appends to, so it writes them too --
+      // which is also what keeps it ordered before assignment.
+      writes: [boundsResource, countsResource],
       execute: this._buildExecute,
     });
     graph.addPass({
@@ -483,6 +588,15 @@ export class ClusteredLights {
     pass.dispatchWorkgroups(
       Math.ceil(this.gridX / 4), Math.ceil(this.gridY / 4), Math.ceil(CLUSTER_Z / 4),
     );
+  }
+
+  /** One workgroup per light; see assignLights. */
+  _dispatchAssign(pass) {
+    if (this.lightCount === 0) return;   // the counts are already zero
+    pass.setPipeline(this.assignPipeline);
+    pass.setBindGroup(0, this.bindGroup);
+    // 65,535 is WebGPU's guaranteed workgroups per dimension; past it, y.
+    pass.dispatchWorkgroups(Math.min(this.lightCount, 65535), Math.ceil(this.lightCount / 65535));
   }
 
   destroy() {

@@ -538,7 +538,9 @@ fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // somewhere else, and the lights that should reach them are simply absent.
   //
   let cluster = clusterFor(v.clip.xy, viewDepth);
-  let lightCount = clusterCounts[cluster];
+  // Lights append themselves concurrently, so a crowded cell's count can run
+  // past what its slice of the index list holds. Only that many are real.
+  let lightCount = min(clusterCounts[cluster], ${MAX_LIGHTS_PER_CLUSTER}u);
   let clusterBase = cluster * ${MAX_LIGHTS_PER_CLUSTER}u;
 
   for (var li = 0u; li < lightCount; li = li + 1u) {

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Lights find their clusters, instead of every cluster testing every
+  light.** Assignment was cells x lights sphere tests however small the
+  lights, 14% of the GPU frame on a 200-light scene. Now one workgroup per
+  light projects its bounding box to the tiles and depth slices it can
+  reach and runs the same exact sphere-box test on those alone, appending
+  with an atomic. The lists are the same -- a new GPU suite step checks
+  every cell's list against a brute force (70,668 pairs) -- and the image
+  differs from before by rounding only (17 pixels, one level each).
+  Measured in one page, alternating:
+
+  | GPU ms for assignment      | before | now   |
+  |----------------------------|--------|-------|
+  | 200 lights, 1,700 objects  | 0.31   | 0.07  |
+  | 1,000 small lights         | 1.75   | 0.18  |
+  | 1 light filling the view   | 0.035  | 0.17  |
+
+  The last row is the price: a handful of huge point lights now costs up to
+  0.14ms more. Four shapes were measured and this one's worst case is the
+  least bad; the others lost up to 1.65ms somewhere. Also: in a cell past
+  its 64-light cap, which lights drop can now vary between frames.
+
 - **Blended objects that draw alike are one instanced call.** Transparent
   geometry was one draw per object, on the reasoning that instancing would
   lose the back-to-front order. Not for NEIGHBOURS in that order: a GPU
