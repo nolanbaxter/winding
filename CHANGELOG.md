@@ -37,6 +37,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trades it back. The slice sphere's radius is now computed in the camera's
   own frame, so turning leaves it identical to the last bit rather than
   within a rounding error. Light clustering keeps the tight view depth.
+- **Destroying nodes could corrupt other nodes.** The scene kept a second
+  record of the hierarchy, a map of children, next to the transform store's
+  parent links, and it went stale: createNode({ parent }), add(asset,
+  { parent }) and setParent never wrote to it, and remove() never unlinked a
+  removed child from its parent's list. So destroying a child and then its
+  parent threw halfway through, or -- if the slot had been reused -- wiped an
+  unrelated node's transform; children made those three ways survived their
+  parent and jumped to the origin; and a node reparented away died with its
+  old parent. The map is gone and children are derived from the parent
+  links, listed in the order they were added.
+- **Destroying a node twice** could erase whatever reused its slot. A dead
+  node is now ignored.
+- **A failed add() broke every later one.** A skin naming a joint outside the
+  default scene threw after the walk, leaving the half-built instance in the
+  scene with no handle and its pending skin to throw again on every later
+  add(). add() is now all or nothing.
+- **Removed assets kept their skin palettes and morph weights**, which were
+  still multiplied and uploaded every frame -- a hundred add/remove cycles,
+  a hundred palettes. Each is now owned by its node and removed with it.
 
 ## [0.9.1] - 2026-09-24
 

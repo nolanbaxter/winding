@@ -92,6 +92,15 @@ export class HandleAllocator {
     return index < this.next && this.generations[index] === gen;
   }
 
+  /**
+   * The live handle for a slot: its index with the generation it has now.
+   * For turning a slot found in some other column -- a parent link, say --
+   * back into the handle that owns it. Meaningful only for a slot in use.
+   */
+  handleAt(index) {
+    return ((index << GEN_BITS) | this.generations[index]) >>> 0;
+  }
+
   /** Double-free and stale-free are rejected, not tolerated. */
   free(h) {
     if (!this.alive(h)) {

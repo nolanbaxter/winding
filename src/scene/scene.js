@@ -115,7 +115,6 @@ export class Scene {
     this.lightEntity = new Uint32Array(lightCapacity);
     this._lightOf = new Map();   // entity -> index into the packed arrays
 
-    this._childrenOf = new Map();   // entity -> [entity], asset declaration order
     /** Resolved skin instances: joint ENTITIES plus the bind pose. */
     this.skins = [];
     this._pendingSkins = [];
@@ -228,7 +227,7 @@ export class Scene {
         // Indexed against this.skins, which accumulates across every add() --
         // the pending list is only this call's tail of it.
         const skinIndex = node.skin >= 0 && asset.skins?.[node.skin] !== undefined
-          ? this.skins.length + this._pendingSkins.push({ skin: asset.skins[node.skin], created }) - 1
+          ? this.skins.length + this._pendingSkins.push({ skin: asset.skins[node.skin], created, owner: entity }) - 1
           : -1;
 
         // Weights come from the ASSET's node, which the importer already
@@ -237,7 +236,8 @@ export class Scene {
         let morphIndex = -1;
         if (asset.meshes[node.mesh].targetCount > 0 && node.weights) {
           morphIndex = this.morphs.length;
-          this.morphs.push({ weights: Float32Array.from(node.weights) });
+          // Owned by this node: removed with it (see _dropOwned).
+          this.morphs.push({ weights: Float32Array.from(node.weights), owner: entity });
           this._morphOf.set(entity, morphIndex);
           if (weightsOf === null) weightsOf = new Array(asset.nodes.length);
           weightsOf[nodeIndex] = this.morphs[morphIndex].weights;
@@ -268,41 +268,54 @@ export class Scene {
       const spec = node.camera >= 0 ? asset.cameras?.[node.camera] : null;
       if (spec) this.cameras.push(cameraFor(spec).follow(new Node(this, entity)));
 
-      const childEntities = [];
-      for (const child of node.children) childEntities.push(visit(child, entity));
-      if (childEntities.length > 0) this._childrenOf.set(entity, childEntities);
-
+      for (const child of node.children) visit(child, entity);
       return entity;
     };
 
     const parentEntity = parent ? parent.entity : NULL_HANDLE;
-    for (const root of asset.roots) roots.push(visit(root, parentEntity));
 
-    // Joints resolve now, not during the walk: a skin may name a node the walk
-    // had not reached yet, and `created` is only complete once it is done.
-    for (const pending of this._pendingSkins) {
-      const { skin, created: map } = pending;
-      const joints = new Uint32Array(skin.joints.length);
-      for (let j = 0; j < skin.joints.length; j++) {
-        const jointEntity = map[skin.joints[j]];
-        if (jointEntity === undefined || jointEntity === NULL_HANDLE) {
-          throw new Error(
-            `Scene.add: skin "${skin.name}" names node ${skin.joints[j]}, which is not in the ` +
-            'asset\'s default scene, so it has no entity to drive it',
-          );
+    // ALL OR NOTHING. A walk that throws -- an asset graph that is not a tree,
+    // a skin naming a joint outside the default scene -- used to leave behind
+    // everything built before the throw, with no handle to remove it by, and
+    // a pending skin that every later add() then tried to resolve and threw
+    // on. Now the scene is put back exactly as it was before the error goes on.
+    try {
+      for (const root of asset.roots) roots.push(visit(root, parentEntity));
+
+      // Joints resolve now, not during the walk: a skin may name a node the
+      // walk had not reached yet, and `created` is only complete once it is done.
+      for (const pending of this._pendingSkins) {
+        const { skin, created: map, owner } = pending;
+        const joints = new Uint32Array(skin.joints.length);
+        for (let j = 0; j < skin.joints.length; j++) {
+          const jointEntity = map[skin.joints[j]];
+          if (jointEntity === undefined || jointEntity === NULL_HANDLE) {
+            throw new Error(
+              `Scene.add: skin "${skin.name}" names node ${skin.joints[j]}, which is not in the ` +
+              'asset\'s default scene, so it has no entity to drive it',
+            );
+          }
+          joints[j] = jointEntity;
         }
-        joints[j] = jointEntity;
+        this.skins.push({
+          joints,
+          inverseBind: skin.inverseBind,
+          jointRadii: skin.jointRadii,
+          // Recomputed each frame from the joints' world positions. A skinned
+          // mesh's vertices move without its model matrix moving, so its
+          // bounds cannot come from transforming a static box.
+          boundsMin: new Float32Array(3),
+          boundsMax: new Float32Array(3),
+          // The mesh node this palette deforms, which it is removed with.
+          owner,
+        });
       }
-      this.skins.push({
-        joints,
-        inverseBind: skin.inverseBind,
-        jointRadii: skin.jointRadii,
-        // Recomputed each frame from the joints' world positions. A skinned
-        // mesh's vertices move without its model matrix moving, so its bounds
-        // cannot come from transforming a static box.
-        boundsMin: new Float32Array(3),
-        boundsMax: new Float32Array(3),
-      });
+    } catch (error) {
+      this._pendingSkins.length = 0;
+      for (const entity of created) {
+        if (entity !== NULL_HANDLE && this.entities.alive(entity)) this.remove(new Node(this, entity));
+      }
+      throw error;
     }
     this._pendingSkins.length = 0;
     // Multi-root assets get a wrapper so the caller always gets one handle back
@@ -314,7 +327,6 @@ export class Scene {
       handle = this.entities.alloc();
       this.transforms.add(handle, { parent: parentEntity });
       for (const root of roots) this.transforms.setParent(root, handle);
-      this._childrenOf.set(handle, roots);
     }
 
     // `created` maps the asset's node indices onto THIS instance's entities,
@@ -415,8 +427,9 @@ export class Scene {
   }
 
   childrenOf(node) {
-    const children = this._childrenOf.get(node.entity);
-    return children ? children.map((entity) => new Node(this, entity)) : [];
+    if (!node.alive) return [];
+    return this.transforms.childrenOf(handleIndex(node.entity))
+      .map((slot) => new Node(this, this.entities.handleAt(slot)));
   }
 
   /**
@@ -426,12 +439,15 @@ export class Scene {
    * renderable index across a remove.
    */
   remove(node) {
-    const doomed = [];
-    const collect = (entity) => {
-      doomed.push(entity);
-      for (const child of this._childrenOf.get(entity) ?? []) collect(child);
-    };
-    collect(node.entity);
+    // A stale handle names a slot something else may own by now. Acting on it
+    // erased that other node's transform before failing to free the handle.
+    if (!node.alive) return;
+
+    // Everything under it, from the transform hierarchy -- the only record of
+    // it, so a child added by createNode({ parent }), add(asset, { parent }) or
+    // setParent goes with its parent like any other.
+    const doomed = this.transforms.subtree(handleIndex(node.entity))
+      .map((slot) => this.entities.handleAt(slot));
 
     const dying = new Set(doomed);
     for (let i = this.renderableCount - 1; i >= 0; i--) {
@@ -470,6 +486,8 @@ export class Scene {
       this.cameras = this.cameras.filter((camera) => !dying.has(camera.following?.entity));
     }
 
+    this._dropOwned(dying);
+
     // Lights on any doomed entity go too. Before the entities are freed, so
     // the handles are still the ones the map was built from.
     for (const entity of doomed) {
@@ -480,9 +498,46 @@ export class Scene {
 
     for (const entity of doomed) {
       this.transforms.remove(entity);
-      this._childrenOf.delete(entity);
       this._players.delete(entity);
       this.entities.free(entity);
+    }
+  }
+
+  /**
+   * Remove the skin palettes and morph weights the dying nodes owned.
+   *
+   * They used to outlive their asset: a hundred add/remove cycles of a skinned
+   * character left a hundred palettes that were still multiplied and uploaded
+   * every frame. Swap-compacted like everything else here, and every index
+   * that pointed at a moved entry is pointed at its new place. The renderables
+   * that used the removed ones are already gone -- remove() drops them first.
+   */
+  _dropOwned(dying) {
+    for (let s = this.skins.length - 1; s >= 0; s--) {
+      if (!dying.has(this.skins[s].owner)) continue;
+      const last = this.skins.length - 1;
+      if (s !== last) {
+        this.skins[s] = this.skins[last];
+        for (let i = 0; i < this.renderableCount; i++) {
+          if (this.renderableSkin[i] === last) this.renderableSkin[i] = s;
+        }
+      }
+      this.skins.pop();
+    }
+
+    for (let m = this.morphs.length - 1; m >= 0; m--) {
+      const owner = this.morphs[m].owner;
+      if (!dying.has(owner)) continue;
+      this._morphOf.delete(owner);
+      const last = this.morphs.length - 1;
+      if (m !== last) {
+        this.morphs[m] = this.morphs[last];
+        this._morphOf.set(this.morphs[m].owner, m);
+        for (let i = 0; i < this.renderableCount; i++) {
+          if (this.renderableMorph[i] === last) this.renderableMorph[i] = m;
+        }
+      }
+      this.morphs.pop();
     }
   }
 
@@ -538,13 +593,6 @@ export class Scene {
       parent: parent ? parent.entity : NULL_HANDLE,
     });
     this._attachLight(entity, { type, color, intensity, radius, innerAngle, outerAngle });
-
-    // Children list, so removing a parent removes the light with it.
-    if (parent) {
-      const siblings = this._childrenOf.get(parent.entity) ?? [];
-      siblings.push(entity);
-      this._childrenOf.set(parent.entity, siblings);
-    }
     return new Node(this, entity);
   }
 

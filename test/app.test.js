@@ -983,4 +983,138 @@ test('an orbit controller stands aside while its camera follows, and takes back 
   vecClose(camera.position, [0, 0, 4], 1e-5, 'the controller adopted the pose');
 });
 
+// ------------------------------------------------ hierarchy and lifecycle
+
+console.log('\nhierarchy and lifecycle');
+
+/** A mesh node rigged to one joint, with one morph target. */
+function riggedAsset() {
+  const primitive = {
+    materialId: 0,
+    skinned: true,
+    morphExtent: Float32Array.from([0.5]),
+    bounds: { min: Float32Array.from([-1, -1, -1]), max: Float32Array.from([1, 1, 1]) },
+  };
+  return {
+    meshes: [{ targetCount: 1, primitives: [primitive] }],
+    nodes: [node('mesh', { mesh: 0, skin: 0, weights: [0.5], children: [1] }), node('joint')],
+    roots: [0],
+    skins: [{ name: 's', joints: [1], inverseBind: new Float32Array(16), jointRadii: Float32Array.from([1]) }],
+  };
+}
+
+test('destroying a child and then its parent frees everything, and nothing else', () => {
+  // The scene kept a second list of children that remove() never unlinked
+  // from, so the parent's removal walked a dead handle: it threw halfway, or
+  // -- once the slot was reused -- wiped an unrelated node's transform.
+  const scene = new Scene({ capacity: 16 });
+  const root = scene.add(fakeAsset({ nodes: [node('p', { children: [1] }), node('c', { mesh: 0 })], roots: [0] }));
+  root.children()[0].destroy();
+  const other = scene.createNode();            // takes the freed slot
+  other.setPosition(5, 0, 0);
+  root.destroy();
+
+  assert.ok(other.alive, 'the unrelated node survived');
+  scene.update();
+  vecClose(other.getWorldPosition(vec3Create()), [5, 0, 0], EPS, 'with its transform intact');
+});
+
+test('destroying a node twice does nothing the second time', () => {
+  const scene = new Scene({ capacity: 16 });
+  const a = scene.createNode();
+  a.destroy();
+  const b = scene.createNode();                // same slot, new generation
+  b.setPosition(1, 2, 3);
+  a.destroy();
+
+  assert.ok(b.alive);
+  scene.update();
+  vecClose(b.getWorldPosition(vec3Create()), [1, 2, 3], EPS, 'b was not touched');
+});
+
+test('every way of making a child makes one its parent takes with it', () => {
+  const scene = new Scene({ capacity: 16 });
+  const parent = scene.createNode();
+  const made = scene.createNode({ parent });
+  const added = scene.add(fakeAsset(), { parent });
+  const moved = scene.createNode();
+  moved.setParent(parent);
+
+  parent.destroy();
+  assert.equal(made.alive, false, 'createNode({ parent })');
+  assert.equal(added.alive, false, 'add(asset, { parent })');
+  assert.equal(moved.alive, false, 'setParent');
+  assert.equal(scene.renderableCount, 0, 'the added asset took its renderables');
+});
+
+test('a node reparented away is not destroyed with its old parent', () => {
+  const scene = new Scene({ capacity: 16 });
+  const first = scene.createNode();
+  const second = scene.createNode();
+  const lamp = scene.addLight({ parent: first });
+  lamp.setParent(second);
+  first.destroy();
+  assert.ok(lamp.alive);
+  assert.equal(scene.lightCount, 1);
+});
+
+test('children come back in the order they were added, even in reused slots', () => {
+  const scene = new Scene({ capacity: 16 });
+  const spare = scene.createNode();            // a low slot, freed below
+  const parent = scene.createNode();
+  const first = scene.createNode({ parent });
+  spare.destroy();
+  const second = scene.createNode({ parent }); // reuses the lower slot
+  assert.ok(handleIndex(second.entity) < handleIndex(first.entity), 'the setup puts second in a lower slot');
+  assert.deepEqual(parent.children().map((c) => c.entity), [first.entity, second.entity]);
+});
+
+test('a failed add leaves the scene exactly as it was', () => {
+  const scene = new Scene({ capacity: 16 });
+  const before = scene.entities.liveCount;
+
+  const badSkin = riggedAsset();
+  badSkin.skins[0].joints = [5];               // a node the default scene never reaches
+  badSkin.nodes.push(node('x'), node('x'), node('x'), node('x'));
+  assert.throws(() => scene.add(badSkin), /not in the asset's default scene/);
+
+  const notATree = fakeAsset({
+    nodes: [node('a', { mesh: 0, children: [2] }), node('b', { children: [2] }), node('c', { mesh: 0 })],
+    roots: [0, 1],
+  });
+  assert.throws(() => scene.add(notATree), /not a tree/);
+
+  assert.equal(scene.entities.liveCount, before, 'no entities left behind');
+  assert.equal(scene.renderableCount, 0);
+  assert.equal(scene.skins.length, 0);
+  assert.equal(scene.morphs.length, 0);
+  // And the next add is not poisoned by what the failed one left pending.
+  scene.add(fakeAsset());
+  assert.equal(scene.renderableCount, 1);
+});
+
+test('removing an asset frees its skins and morph weights', () => {
+  const scene = new Scene({ capacity: 16 });
+  for (let i = 0; i < 20; i++) scene.add(riggedAsset()).destroy();
+  assert.equal(scene.skins.length, 0);
+  assert.equal(scene.morphs.length, 0);
+});
+
+test('a survivor still reads its own skin and weights after another is removed', () => {
+  // Removal swap-compacts the skin and morph arrays. Whatever moves into a
+  // gap must take every index that pointed at it along.
+  const scene = new Scene({ capacity: 32 });
+  const doomed = scene.add(riggedAsset());
+  const survivor = scene.add(riggedAsset());
+  survivor.weights[0] = 0.9;
+  doomed.destroy();
+
+  assert.equal(scene.skins.length, 1);
+  assert.equal(scene.morphs.length, 1);
+  const r = [...Array(scene.renderableCount).keys()].find((i) => scene.renderableEntity[i] === survivor.entity);
+  assert.equal(scene.skins[scene.renderableSkin[r]].owner, survivor.entity, 'its own palette');
+  assert.equal(scene.morphs[scene.renderableMorph[r]].owner, survivor.entity, 'its own weights');
+  close(survivor.weights[0], 0.9, 1e-6, 'node.weights still finds them');
+});
+
 console.log(`\n${passed} checks passed\n`);

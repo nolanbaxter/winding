@@ -45,6 +45,14 @@ export class TransformStore {
 
     this.parent = sharedInt32Array(capacity).fill(NO_PARENT);
     this.used = new Uint8Array(capacity);
+    /**
+     * When each transform was added, as a running count. Children are listed
+     * in this order, which for an asset is the order it declared them: slot
+     * order would do until a freed slot is reused, and then a new node would
+     * sort ahead of its older siblings.
+     */
+    this.born = new Float64Array(capacity);
+    this._births = 0;
     this.dirty = sharedUint8Array(capacity);
     /** Set by update() for nodes it recomputed. Children read their parent's. */
     this.recomputed = sharedUint8Array(capacity);
@@ -111,6 +119,7 @@ export class TransformStore {
 
     this.parent[i] = NO_PARENT;
     this.used[i] = 1;
+    this.born[i] = ++this._births;
     this.dirty[i] = 1;
     this.recomputed[i] = 0;
     this.orderDirty = true;
@@ -145,6 +154,47 @@ export class TransformStore {
     this.recomputed[i] = 0;
     this.moved[i] = 0;
     this.orderDirty = true;
+  }
+
+  /**
+   * The slots whose parent is `index`, oldest first.
+   *
+   * The parent links are the ONLY record of the hierarchy. The scene used to
+   * keep a second one, a map of children per entity, and it went stale:
+   * createNode({ parent }) and setParent never wrote to it, remove() never
+   * unlinked from it, so a removed child stayed listed under its parent and a
+   * reparented node stayed listed under its old one. Derived from here, there
+   * is nothing to keep in step.
+   *
+   * ponytail: O(live nodes) scan, like remove(). A per-node child list would
+   * make it O(children) at the cost of the second record this replaced.
+   */
+  childrenOf(index) {
+    const children = [];
+    for (let c = 0; c < this._high; c++) {
+      if (this.used[c] && this.parent[c] === index) children.push(c);
+    }
+    return children.sort((a, b) => this.born[a] - this.born[b]);
+  }
+
+  /** `index` and every slot under it: one pass over the links, then a walk. */
+  subtree(index) {
+    const childrenOf = new Map();
+    for (let c = 0; c < this._high; c++) {
+      if (!this.used[c] || this.parent[c] === NO_PARENT) continue;
+      let list = childrenOf.get(this.parent[c]);
+      if (!list) childrenOf.set(this.parent[c], (list = []));
+      list.push(c);
+    }
+    const slots = [];
+    const stack = [index];
+    while (stack.length > 0) {
+      const slot = stack.pop();
+      slots.push(slot);
+      const list = childrenOf.get(slot);
+      if (list) for (const child of list) stack.push(child);
+    }
+    return slots;
   }
 
   /** Pass NULL_HANDLE to detach to the root. */
@@ -280,6 +330,7 @@ export class TransformStore {
     this.parent = parent;
 
     this.used = growArray(this.used, capacity);
+    this.born = growArray(this.born, capacity);
     this.dirty = growShared(this.dirty, capacity, sharedUint8Array);
     this.recomputed = growShared(this.recomputed, capacity, sharedUint8Array);
     this.moved = growShared(this.moved, capacity, sharedUint8Array);
