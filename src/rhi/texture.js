@@ -15,6 +15,8 @@
 
 import { DEBUG, assert } from '../core/assert.js';
 import { compileShaderSync } from './shader.js';
+import { sharedPipelines } from './pipeline.js';
+import { createPipelineLayout } from './bindgroups.js';
 
 /** Fullscreen-triangle blit, used to build each mip from the level above it. */
 const MIP_SHADER = /* wgsl */ `
@@ -46,6 +48,28 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
 
 export function mipLevelCountFor(width, height) {
   return Math.floor(Math.log2(Math.max(width, height))) + 1;
+}
+
+/**
+ * Any texture, checked against the device first. WebGPU does not throw for
+ * an oversized descriptor: it hands back an invalid texture, and every pass
+ * that touches it becomes a silent no-op. Every texture made outside this
+ * folder comes through here, so the check is in one place.
+ */
+export function createTexture(rhi, descriptor) {
+  const size = descriptor.size;
+  const [width, height = 1, layers = 1] = Array.isArray(size)
+    ? size
+    : [size.width, size.height, size.depthOrArrayLayers];
+  const limits = rhi.limits ?? {};
+  const max = limits.maxTextureDimension2D ?? Infinity;
+  if (width > max || height > max) {
+    throw new RangeError(`createTexture: ${descriptor.label ?? 'texture'} is ${width}x${height}, past this device's ${max}`);
+  }
+  if (layers > (limits.maxTextureArrayLayers ?? Infinity)) {
+    throw new RangeError(`createTexture: ${descriptor.label ?? 'texture'} has ${layers} layers, past this device's ${limits.maxTextureArrayLayers}`);
+  }
+  return rhi.device.createTexture(descriptor);
 }
 
 /**
@@ -101,7 +125,7 @@ export function uploadImage(rhi, texture, source) {
 export function generateMipmaps(rhi, texture) {
   if (texture.mipLevelCount <= 1) return;
 
-  const pipeline = mipPipelineFor(rhi, texture.format);
+  const { pipeline, layout } = mipPipelineFor(rhi, texture.format);
   const sampler = linearSampler(rhi);
   const encoder = rhi.device.createCommandEncoder({ label: 'mipmaps' });
 
@@ -124,7 +148,7 @@ export function generateMipmaps(rhi, texture) {
       });
 
       const bindGroup = rhi.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
+        layout,
         entries: [
           { binding: 0, resource: sourceView },
           { binding: 1, resource: sampler },
@@ -145,29 +169,39 @@ export function generateMipmaps(rhi, texture) {
   rhi.queue.submit([encoder.finish()]);
 }
 
-// One blit pipeline per (device, format). Building it per texture would be the
-// pipeline-creation stall this engine spends a whole cache avoiding.
-const mipPipelines = new WeakMap();
-
-function mipPipelineFor(rhi, format) {
-  let byFormat = mipPipelines.get(rhi.device);
-  if (!byFormat) {
-    byFormat = new Map();
-    mipPipelines.set(rhi.device, byFormat);
-  }
-  let pipeline = byFormat.get(format);
-  if (!pipeline) {
-    const module = compileShaderSync(rhi.device, MIP_SHADER, 'mipmap.wgsl').module;
-    pipeline = rhi.device.createRenderPipeline({
-      label: `mipmap:${format}`,
-      layout: 'auto',
-      vertex: { module, entryPoint: 'vs' },
-      fragment: { module, entryPoint: 'fs', targets: [{ format }] },
-      primitive: { topology: 'triangle-list' },
+/**
+ * The mip pipeline for a format, and the layout its bind groups use. One per
+ * (device, format), from the shared cache: building it per texture would be
+ * the pipeline-creation stall this engine spends a whole cache avoiding. An
+ * explicit layout, not 'auto', so it is a plain descriptor like the rest.
+ */
+export function mipPipelineFor(rhi, format) {
+  const device = rhi.device;
+  const { shader, layout, pipelineLayout } = cached(rhi, 'mip', () => {
+    const layout = device.createBindGroupLayout({
+      label: 'mipmap',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+      ],
     });
-    byFormat.set(format, pipeline);
-  }
-  return pipeline;
+    return {
+      shader: compileShaderSync(device, MIP_SHADER, 'mipmap.wgsl'),
+      layout,
+      pipelineLayout: createPipelineLayout(device, { 0: layout }, 'mipmap'),
+    };
+  });
+  const pipeline = sharedPipelines(device).get({
+    label: `mipmap:${format}`,
+    layout: pipelineLayout,
+    shader,
+    targets: [{ format }],
+    // The full-screen triangle winds clockwise, and the cache culls back faces
+    // unless told otherwise.
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depth: null,
+  });
+  return { pipeline, layout };
 }
 
 // Per-device cache for anything created once and shared: samplers, and the 1x1
@@ -257,7 +291,9 @@ export function createCubemap(rhi, { size, mipLevelCount = 1, format = 'rgba16fl
     mipLevelCount,
     usage: GPUTextureUsage.TEXTURE_BINDING
       | GPUTextureUsage.RENDER_ATTACHMENT
-      | GPUTextureUsage.COPY_DST,
+      | GPUTextureUsage.COPY_DST
+      // Copied from: a reflection probe's prefilter goes into its scene's array.
+      | GPUTextureUsage.COPY_SRC,
   });
 }
 

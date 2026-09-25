@@ -7,6 +7,9 @@
 import assert from 'node:assert/strict';
 
 import { Scene, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
+import { packSprites, SPRITE_FLOATS } from '../src/render/sprites.js';
+import { ringCapacity, packEmitter } from '../src/render/particles.js';
+import { packDecals, DECAL_FLOATS } from '../src/render/decals.js';
 import { Node } from '../src/scene/node.js';
 import { Camera } from '../src/scene/camera.js';
 import { OrbitController } from '../src/app/controllers.js';
@@ -61,7 +64,7 @@ function fakeAsset({ nodes, roots, meshCount = 1, primitivesPerMesh = 1 } = {}) 
 }
 
 /**
- * Entities a scene holds before anything is added: its sun, which is a node.
+ * Entities a scene holds before anything is added.
  * Measured rather than written down, so a count that means "what the asset
  * made" stays right whatever a fresh scene starts with.
  */
@@ -82,6 +85,200 @@ function node(name, extra = {}) {
 // ------------------------------------------------------------------ scene
 
 console.log('\nscene');
+
+test('an LOD group: each level draws its own coverage, all measured on one sphere', () => {
+  // Three levels on three nodes, the lower two listed only by MSFT_lod.
+  // Node 2 is exported where node 0 is; node 1 a unit to the side.
+  const asset = fakeAsset({
+    meshCount: 3,
+    nodes: [
+      node('high', { mesh: 0, position: [5, 0, 0], lod: { ids: [1, 2], coverage: [0.5, 0.2, 0.01] } }),
+      node('medium', { mesh: 1, position: [6, 0, 0] }),
+      node('low', { mesh: 2, position: [5, 0, 0] }),
+    ],
+    roots: [0, 1],   // a file that ALSO lists a level as a root must not draw it twice
+  });
+  const scene = new Scene({ capacity: 8 });
+  const root = scene.add(asset);
+  scene.update();
+  assert.equal(scene.renderableCount, 3, 'one renderable a level, none twice');
+  const byMaterial = (m) => [...Array(scene.renderableCount).keys()].find((i) => scene.renderableMaterial[i] === m);
+  const range = (i) => [...scene.renderableCoverage.subarray(i * 2, i * 2 + 2)];
+  assert.deepEqual(range(byMaterial(0)).slice(0, 1), [0.5]);
+  assert.ok(range(byMaterial(0))[1] > 1e38, 'the finest has no upper bound');
+  vecClose(range(byMaterial(1)), [0.2, 0.5]);
+  vecClose(range(byMaterial(2)), [0.01, 0.2]);
+  const slot = scene.renderableLodSlot[byMaterial(0)];
+  for (let m = 0; m < 3; m++) {
+    assert.equal(scene.renderableLodSlot[byMaterial(m)], slot, 'all measured on the group node');
+    vecClose(scene.renderableLodSphere.subarray(byMaterial(m) * 4, byMaterial(m) * 4 + 4), [0, 0, 0, Math.sqrt(3)]);
+  }
+  // Each level where the file put it, and moving the group moves them all.
+  const worldX = (m) => scene.transforms.world[scene.renderableMatrixSlot[byMaterial(m)] * 16 + 12];
+  vecClose([worldX(0), worldX(1), worldX(2)], [5, 6, 5]);
+  root.setPosition(0, 0, 0);
+  scene.update();
+  vecClose([worldX(0), worldX(1), worldX(2)], [0, 1, 0]);
+
+  // Removing a renderable keeps every survivor's LOD with it.
+  scene.remove(root);
+  assert.equal(scene.renderableCount, 0);
+});
+
+test('without coverage hints only the finest level draws, as a client without MSFT_lod would', () => {
+  const scene = new Scene({ capacity: 8 });
+  scene.add(fakeAsset({
+    meshCount: 2,
+    nodes: [node('high', { mesh: 0, lod: { ids: [1], coverage: null } }), node('low', { mesh: 1 })],
+    roots: [0],
+  }));
+  assert.equal(scene.renderableCount, 1);
+  assert.equal(scene.renderableLodSlot[0], -1, 'and it is in no group');
+});
+
+test('a sprite takes the aspect of its texture, or its pixels, and names a bad option', () => {
+  const texture = { view: {}, width: 64, height: 32 };
+  const scene = new Scene({ capacity: 8 });
+  const node = scene.addSprite({ texture, position: [1, 2, 3] });
+  const sprite = scene.spriteOf(node);
+  assert.deepEqual([...sprite.size], [1, 0.5], 'one unit wide, at the aspect of the texture');
+  assert.deepEqual([sprite.facing, sprite.blend, sprite.cutoff, sprite.pixels], ['camera', 'alpha', 0.5, false]);
+  scene.setSprite(node, { pixels: true });
+  assert.deepEqual([...scene.spriteOf(node).size], [64, 32], 'in pixels, the size of the texture');
+  scene.setSprite(node, { size: [10, 10] });
+  scene.setSprite(node, { texture: { view: {}, width: 8, height: 8 } });
+  assert.deepEqual([...scene.spriteOf(node).size], [10, 10], 'a size asked for stays');
+  for (const [options, why] of [
+    [{}, /texture must be/], [{ texture, size: [1, 0] }, /size must be positive/],
+    [{ texture, facing: 'down' }, /facing/], [{ texture, blend: 'multiply' }, /blend/],
+    [{ texture, cutoff: 2 }, /cutoff/], [{ texture, color: [1, 1, 1] }, /color must be 4/],
+  ]) assert.throws(() => scene.addSprite(options), why);
+  scene.remove(node);
+  assert.equal(scene.sprites.size, 0, 'removed with its node');
+});
+
+test('sprites draw cutouts, then additive, then alpha from far to near, in runs of one texture', () => {
+  const a = { view: {}, width: 4, height: 4 };
+  const b = { view: {}, width: 4, height: 4 };
+  const scene = new Scene({ capacity: 8 });
+  const near = scene.addSprite({ texture: a, position: [0, 0, -2] });
+  scene.addSprite({ texture: a, position: [0, 0, -9] });                         // alpha, far
+  scene.addSprite({ texture: b, position: [0, 0, -5], blend: 'additive' });
+  scene.addSprite({ texture: a, position: [0, 0, -4], blend: 'cutout' });
+  scene.addSprite({ texture: a, position: [0, 0, -6], blend: 'additive' });
+  near.setScale(2, 3, 1);
+  scene.update();
+  const camera = new Camera({ fovY: 1, near: 0.1 });
+  camera.position.set([0, 0, 0]);
+  camera.target.set([0, 0, -1]);
+  camera.update(1);
+  const out = new Float32Array(8 * SPRITE_FLOATS);
+  const { count, runs } = packSprites(scene, camera, out);
+  assert.equal(count, 5);
+  const z = [...Array(count).keys()].map((k) => out[k * SPRITE_FLOATS + 2]);
+  assert.equal(z[0], -4, 'the cutout first');
+  assert.deepEqual(z.slice(3), [-9, -2], 'alpha last, far to near');
+  assert.deepEqual(runs.map((r) => [r.blend, r.count]), [['cutout', 1], ['additive', 1], ['additive', 1], ['alpha', 2]],
+    'additive grouped by texture, one run each');
+  assert.deepEqual([out[4 * SPRITE_FLOATS + 4], out[4 * SPRITE_FLOATS + 5]], [2, 3], 'scaled by its node');
+});
+
+test('an emitter owes particles by its rate and carries time until a frame settles them', () => {
+  const scene = new Scene({ capacity: 8 });
+  const node = scene.addEmitter({ rate: 30, lifetime: [0.5, 2], size: [0.2, 0] });
+  const record = scene.emitters.get(node.entity);
+  assert.deepEqual([...record.lifetime, ...record.speed, record.blend], [0.5, 2, 0, 0, 'additive']);
+  assert.deepEqual([...record.colorEnd], [...record.color], 'the end colour is the start unless given');
+  scene.advanceParticles(0.25);
+  scene.advanceParticles(0.25);
+  assert.deepEqual([record.owed, record.time], [15, 0.5]);
+  scene.burst(node, 7);
+  assert.equal(record.owed, 22);
+  scene.setEmitter(node, { rate: 0 });
+  const after = scene.emitters.get(node.entity);
+  assert.deepEqual([after.owed, after.time, after.seed, after.rate], [22, 0.5, record.seed, 0], 'what it owes survives a change');
+  assert.equal(ringCapacity(record, 22), 30 * 2 + 22, 'rate times the longest life, plus what is being born');
+  assert.equal(ringCapacity(after, 0), 1);
+  for (const [options, why] of [
+    [{ size: 1 }, /lifetime is required/], [{ lifetime: 1 }, /size is required/],
+    [{ lifetime: [2, 1], size: 1 }, /lifetime/], [{ lifetime: 0, size: 1 }, /lifetime must be a positive/],
+    [{ lifetime: 1, size: 1, spread: 4 }, /spread/], [{ lifetime: 1, size: 1, direction: [0, 0, 0] }, /direction/],
+    [{ lifetime: 1, size: 1, blend: 'cutout' }, /blend/], [{ lifetime: 1, size: 1, rate: -1 }, /rate/],
+  ]) assert.throws(() => scene.addEmitter(options), why);
+  assert.throws(() => scene.burst(node, 1.5), /whole number/);
+  scene.remove(node);
+  assert.equal(scene.emitters.size, 0, 'removed with its node');
+});
+
+test('the emitter uniform lands where the WGSL struct reads it', () => {
+  const scene = new Scene({ capacity: 4 });
+  const node = scene.addEmitter({
+    lifetime: [1, 3], size: [0.5, 0.25], speed: [2, 4], spread: 0.5, radius: 0.75, drag: 0.1,
+    direction: [0, 0, 1], acceleration: [0, -9, 0], color: [1, 2, 3, 4], colorEnd: [5, 6, 7, 8],
+  });
+  const record = scene.emitters.get(node.entity);
+  const out = new Uint8Array(256 + 192);
+  const world = new Float32Array(16).map((_, i) => i);
+  packEmitter(out, 256, record, world, 0, { offset: 10, capacity: 20, head: 3 }, 4, 0.016, 99);
+  const f = new Float32Array(out.buffer, 256, 48);
+  const u = new Uint32Array(out.buffer, 256, 48);
+  // Offsets from the struct: 64 offset.., 80 dt.., 96 direction, 112 speed,
+  // 120 lifetime, 128 acceleration (w drag), 144 size, 160 and 176 colours.
+  assert.deepEqual([...f.subarray(0, 16)], [...world]);
+  assert.deepEqual([...u.subarray(16, 20)], [10, 20, 3, 4]);
+  assert.deepEqual([Math.fround(0.016), 99, 0.75, 0.5], [f[20], u[21], f[22], f[23]]);
+  assert.deepEqual([...f.subarray(24, 28)], [0, 0, 1, 0], 'no texture');
+  assert.deepEqual([...f.subarray(28, 32)], [2, 4, 1, 3]);
+  assert.deepEqual([...f.subarray(32, 36)], [0, -9, 0, Math.fround(0.1)]);
+  assert.deepEqual([...f.subarray(36, 38)], [0.5, 0.25]);
+  assert.deepEqual([...f.subarray(40, 48)], [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test('a decal maps its box onto [-1, 1] and faces along its +Z', () => {
+  const texture = { view: {}, width: 8, height: 8 };
+  const scene = new Scene({ capacity: 8 });
+  // A 4 x 2 x 1 box at (5, 0, 0), turned to project straight down.
+  const node = scene.addDecal({ texture, size: [4, 2, 1], color: [1, 0.5, 0.25, 0.75], position: [5, 0, 0] });
+  node.setRotationAxisAngle([1, 0, 0], -Math.PI / 2);
+  scene.addDecal({ texture, size: [1, 1, 1] });
+  scene.update();
+  const out = new Float32Array(2 * DECAL_FLOATS);
+  const spheres = new Float32Array(8);
+  assert.equal(packDecals(scene, out, new Map([[texture, 3]]), spheres), 2);
+  const apply = (p) => [0, 1, 2].map((r) => out[r] * p[0] + out[4 + r] * p[1] + out[8 + r] * p[2] + out[12 + r]);
+  // Its x runs along world x; its y, after the turn, along world -z.
+  vecClose(apply([7, 0, 0]), [1, 0, 0], 1e-6, 'the far x face');
+  vecClose(apply([5, 0, -1]), [0, 1, 0], 1e-6, 'the far y face');
+  vecClose(apply([5, -0.5, 0]), [0, 0, -1], 1e-6, 'down, along its -Z, half its depth: the box is centred on the node');
+  vecClose(out.subarray(20, 23), [0, 1, 0], 1e-6, 'it paints what faces up');
+  assert.equal(out[23], 3, 'its texture layer');
+  vecClose(out.subarray(16, 20), [1, 0.5, 0.25, 0.75]);
+  // Clustered by the sphere through its corners: half of the 4 x 2 x 1 diagonal.
+  vecClose(spheres.subarray(0, 4), [5, 0, 0, Math.hypot(2, 1, 0.5)], 1e-6, 'its bounding sphere');
+  // Sheared by a non-uniform scale under a turned parent, the farthest corner
+  // is not the axis-aligned half-diagonal; all eight corners bound it.
+  const parent = scene.createNode();
+  parent.setScale(3, 1, 1);
+  const sheared = scene.addDecal({ texture, size: [1, 2, 0.5], parent });
+  sheared.setRotationAxisAngle([0, 0, 1], Math.PI / 5);
+  scene.update();
+  const three = new Float32Array(12);
+  packDecals(scene, new Float32Array(3 * DECAL_FLOATS), new Map([[texture, 0]]), three);
+  const w = scene.transforms.world.subarray(handleIndex(sheared.entity) * 16);
+  let farthest = 0;
+  for (let corner = 0; corner < 8; corner++) {
+    const h = [0.5, 1, 0.25].map((v, a) => (corner >> a) & 1 ? v : -v);
+    farthest = Math.max(farthest, Math.hypot(...[0, 1, 2].map((c) => w[c] * h[0] + w[4 + c] * h[1] + w[8 + c] * h[2])));
+  }
+  assert.ok(Math.abs(three[11] - farthest) < 1e-5, `sheared: ${three[11]} against ${farthest}`);
+  scene.remove(sheared);
+  for (const [options, why] of [
+    [{ size: [1, 1, 1] }, /texture must be/], [{ texture, size: [1, 1] }, /size must be/],
+    [{ texture, size: [1, 0, 1] }, /size must be/], [{ texture, size: [1, 1, 1], color: [1, 1, 1] }, /color/],
+  ]) assert.throws(() => scene.addDecal(options), why);
+  scene.remove(node);
+  assert.equal(scene.decals.size, 1, 'removed with its node');
+});
 
 test('adding an asset creates entities, transforms and renderables', () => {
   const scene = new Scene({ capacity: 64 });
@@ -770,111 +967,95 @@ test('an unknown light type in an asset is skipped, not misread', () => {
   assert.equal(scene.lightCount, 0);
 });
 
-// ---------------------------------------------------------------------- sun
+// ------------------------------------------------------------ directional lights
 
-console.log('\nthe sun is a node');
+console.log('\ndirectional lights');
 
-/** Compose and refresh, as a frame would before reading the sun. */
-function settleSun(scene) {
+/** Compose and refresh, as a frame would before reading the lights. */
+function settleLights(scene) {
   scene.update();
   scene.refreshLights();
 }
 
-test('a new scene has a sun, and it is a node', () => {
+test('a new scene has no lights: its environment lights it until one is added', () => {
   const scene = new Scene({ capacity: 16 });
-  const sun = scene.sun;
-  assert.ok(sun instanceof Node && sun.alive);
-  settleSun(scene);
-  const d = [-0.35, -0.55, -0.45];
-  const length = Math.hypot(...d);
-  vecClose(scene.sunDirection, d.map((v) => v / length), 1e-5, 'the default direction');
-  vecClose(scene.sunColor, [3.2, 3.0, 2.7], 1e-5, 'the default colour, as before');
-  assert.equal(scene.lightCount, 0, 'the sun is not a clustered light');
+  settleLights(scene);
+  assert.equal(scene.directionalCount, 0);
+  assert.equal(scene.lightCount, 0);
+  assert.equal(scene.entities.liveCount, 0, 'no node made on its behalf');
+  assert.equal('sun' in scene, false, 'and nothing called the sun');
 });
 
-test('aiming and recolouring the sun is aiming and recolouring its node', () => {
+test('aiming and recolouring a directional light is aiming and recolouring its node', () => {
   const scene = new Scene({ capacity: 16 });
-  scene.sun.setDirection(0, -1, 0);
-  assert.equal(scene.sun.setLight({ color: [1, 0.5, 0.25], intensity: 2 }), true);
-  settleSun(scene);
-  vecClose(scene.sunDirection, [0, -1, 0], 1e-6, 'straight down: the degenerate look-along case');
-  vecClose(scene.sunColor, [2, 1, 0.5], 1e-6);
+  const light = scene.addLight({ type: 'directional', direction: [-0.35, -0.55, -0.45], intensity: 3 });
+  light.setDirection(0, -1, 0);
+  assert.equal(light.setLight({ color: [1, 0.5, 0.25], intensity: 2 }), true);
+  settleLights(scene);
+  vecClose(scene.directionals.subarray(0, 3), [0, -1, 0], 1e-6, 'straight down: the degenerate look-along case');
+  vecClose(scene.directionals.subarray(4, 7), [2, 1, 0.5], 1e-6, 'colour at intensity');
+  assert.equal(scene.lightCount, 0, 'not a clustered light');
 
-  scene.sun.setLight({ intensity: 4 });
-  settleSun(scene);
-  vecClose(scene.sunColor, [4, 2, 1], 1e-6, 'partial: the colour stayed');
+  light.setLight({ intensity: 4 });
+  settleLights(scene);
+  vecClose(scene.directionals.subarray(4, 7), [4, 2, 1], 1e-6, 'partial: the colour stayed');
 });
 
-test('a sun turns with its parent, so a day cycle is one rotating node', () => {
+test('a directional light turns with its parent, so a day cycle is one rotating node', () => {
   const scene = new Scene({ capacity: 16 });
   const sky = scene.createNode();
-  scene.sun.setDirection(0, 0, -1);
-  scene.sun.setParent(sky);
+  const light = scene.addLight({ type: 'directional', direction: [0, 0, -1] });
+  light.setParent(sky);
   sky.setRotationAxisAngle([1, 0, 0], -Math.PI / 2);   // tip -Z down to -Y
-  settleSun(scene);
-  vecClose(scene.sunDirection, [0, -1, 0], 1e-5);
+  settleLights(scene);
+  vecClose(scene.directionals.subarray(0, 3), [0, -1, 0], 1e-5);
 });
 
-test('every directional light lights the scene, and the brightest has the shadow', () => {
-  // No light is the sun by kind or by order. The shadow map goes to whichever
-  // is brightest by luminance; every other one is packed for the shader.
+test('every light casts or not by the same switch, defaulting by what it costs', () => {
+  // No light is the sun, by kind, order or brightness. A directional light
+  // casts unless told not to; a point or spot light does not unless told to.
+  // A file's lights take the same defaults, since glTF has no say in it.
   const scene = new Scene({ capacity: 16 });
-  const original = scene.sun;
-  scene.sun.setDirection(0, -1, 0);
-
-  // Red at 5 is luminance 1.06; the default sun is 3.02. The file's light is
-  // dimmer, so it lights -- and the default keeps the shadow.
-  const dim = scene.add(carrierAsset({ light: 0 }, {
+  const key = scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity: 10 });
+  const fill = scene.addLight({ type: 'directional', direction: [1, -1, 0], intensity: 1, castShadow: false });
+  const lamp = scene.addLight({ position: [0, 2, 0] });
+  const torch = scene.addLight({ position: [1, 2, 0], castShadow: true });
+  const imported = scene.add(carrierAsset({ light: 0 }, {
     lights: [{ type: 'directional', color: [1, 0, 0], intensity: 5 }],
   }));
-  settleSun(scene);
-  assert.equal(scene.sun.entity, original.entity, 'the brighter one keeps the shadow');
-  assert.equal(scene.directionalCount, 1, 'the dimmer one still lights');
-  vecClose(scene.directionals.subarray(0, 3), [0, 0, -1], 1e-6, 'aimed by its node');
-  vecClose(scene.directionals.subarray(4, 7), [5, 0, 0], 1e-6, 'colour at intensity');
+  const casters = scene.shadowCasters;
+  assert.ok(casters.has(key.entity), 'a directional light casts by default');
+  assert.ok(!casters.has(fill.entity), 'unless told not to');
+  assert.ok(!casters.has(lamp.entity), 'a point light does not by default');
+  assert.ok(casters.has(torch.entity), 'unless told to');
+  // The light is on the asset's child, the carrier node.
+  const carrier = scene.childrenOf(imported)[0];
+  assert.ok(casters.has(carrier.entity), 'a file\'s directional light casts, as one added by hand does');
 
-  // A brighter one takes the shadow, and the default joins the others.
-  const bright = scene.addLight({ type: 'directional', direction: [1, -1, 0], intensity: 10 });
-  settleSun(scene);
-  assert.equal(scene.sun.entity, bright.entity);
-  vecClose(scene.sunColor, [10, 10, 10], 1e-6);
-  assert.equal(scene.directionalCount, 2);
+  fill.setLight({ castShadow: true });
+  key.setLight({ castShadow: false });
+  assert.ok(casters.has(fill.entity) && !casters.has(key.entity), 'and the switch works both ways, for every kind');
 
-  // Removing lights never needs restoring anything: the rule just re-reads.
-  bright.destroy();
-  dim.destroy();
-  settleSun(scene);
-  assert.equal(scene.sun.entity, original.entity);
+  settleLights(scene);
+  assert.equal(scene.directionalCount, 3, 'every directional light lights, casting or not');
+  key.destroy();
+  fill.destroy();
+  imported.destroy();
+  settleLights(scene);
   assert.equal(scene.directionalCount, 0);
-  vecClose(scene.sunDirection, [0, -1, 0], 1e-6, 'with the aim it had');
+  assert.equal(casters.size, 1, 'only the torch is left casting');
 });
 
-test('brightening a light moves the shadow to it', () => {
+test('the packed directionals grow past their starting size, with their entities', () => {
   const scene = new Scene({ capacity: 16 });
-  const other = scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity: 1 });
-  settleSun(scene);
-  assert.notEqual(scene.sun.entity, other.entity);
-  other.setLight({ intensity: 50 });
-  settleSun(scene);
-  assert.equal(scene.sun.entity, other.entity, 'derived from the lights, every frame');
-});
-
-test('the packed directionals grow past their starting size', () => {
-  const scene = new Scene({ capacity: 16 });
+  const lights = [];
   for (let i = 0; i < 9; i++) {
-    scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity: 0.1 * (i + 1) });
+    lights.push(scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity: 0.1 * (i + 1) }));
   }
-  settleSun(scene);
-  assert.equal(scene.directionalCount, 9, 'ten directionals, one of them the sun');
+  settleLights(scene);
+  assert.equal(scene.directionalCount, 9);
   assert.ok(scene.directionals.length >= 9 * DIRECTIONAL_FLOATS);
-});
-
-test('no sun at all is allowed, and lights nothing', () => {
-  const scene = new Scene({ capacity: 16 });
-  scene.sun.destroy();
-  settleSun(scene);
-  assert.equal(scene.sun, null);
-  vecClose(scene.sunColor, [0, 0, 0], 0);
+  assert.deepEqual(scene.directionalEntity, lights.map((l) => l.entity), 'in the order they were added');
 });
 
 test('addLight refuses a type it does not have', () => {

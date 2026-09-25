@@ -19,8 +19,12 @@ import {
 } from './bounds.js';
 import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
+import { unboundedLightRadius, uvTransformRows } from './gltf/parse.js';
+import { layoutText } from '../render/text.js';
 import { hypot3, vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
-import { mat4Create, mat4Copy, mat4Invert, mat4Multiply } from '../core/math/mat4.js';
+import {
+  mat4Create, mat4Copy, mat4Invert, mat4Multiply, mat4FromQuatPosScale, mat4Decompose,
+} from '../core/math/mat4.js';
 import { quatCreate, quatLookAlong } from '../core/math/quat.js';
 import { grownCapacity, growArray } from '../core/grow.js';
 
@@ -42,6 +46,214 @@ let nextSceneId = 1;
  * did, so rendering a second scene kept the first one's draw list.
  */
 let nextRevision = 1;
+
+/**
+ * An emitter's options, checked, with each range as [min, max]; see
+ * Scene.addEmitter. `owed` is particles owed but not yet born, `time` the
+ * seconds not yet simulated, `seed` what makes its randomness its own.
+ */
+export function emitterRecord(options = {}) {
+  const {
+    rate = 0, lifetime, size, speed = 0, direction = [0, 1, 0], spread = 0, radius = 0,
+    acceleration = [0, 0, 0], drag = 0, color = [1, 1, 1, 1], colorEnd, texture = null, blend = 'additive',
+  } = options;
+  const range = (v, what, positive = false) => {
+    const r = typeof v === 'number' ? [v, v] : v;
+    if (!(r?.length === 2 && r.every(Number.isFinite) && r[0] <= r[1] && r[0] >= 0 && (!positive || r[0] > 0))) {
+      throw new Error(`addEmitter: ${what} must be ${positive ? 'a positive' : 'a non-negative'} number or [min, max], got ${v}`);
+    }
+    return Float32Array.from(r);
+  };
+  const numbers = (v, n, what) => {
+    if (!(v?.length === n && [...v].every(Number.isFinite))) throw new Error(`addEmitter: ${what} must be ${n} finite numbers, got ${v}`);
+    return Float32Array.from(v);
+  };
+  if (!(rate >= 0 && Number.isFinite(rate))) throw new Error(`addEmitter: rate must be 0 or more, got ${rate}`);
+  if (lifetime === undefined) throw new Error('addEmitter: lifetime is required: how long a particle lives, in seconds');
+  if (size === undefined) throw new Error('addEmitter: size is required: how wide a particle is, in world units');
+  const sizes = typeof size === 'number' ? [size, size] : size;
+  if (!(sizes?.length === 2 && sizes.every((x) => Number.isFinite(x) && x >= 0))) {
+    throw new Error(`addEmitter: size must be a number or [birth, death], got ${size}`);
+  }
+  const dir = numbers(direction, 3, 'direction');
+  if (Math.hypot(...dir) === 0) throw new Error('addEmitter: direction must not be zero');
+  if (!(spread >= 0 && spread <= Math.PI)) throw new Error(`addEmitter: spread must be between 0 and pi, got ${spread}`);
+  if (!(radius >= 0 && Number.isFinite(radius))) throw new Error(`addEmitter: radius must be 0 or more, got ${radius}`);
+  if (!(drag >= 0 && Number.isFinite(drag))) throw new Error(`addEmitter: drag must be 0 or more, got ${drag}`);
+  if (texture !== null && !(texture?.view && texture.width > 0)) {
+    throw new Error('addEmitter: texture must be one engine.loadTexture returned');
+  }
+  if (!['additive', 'alpha'].includes(blend)) throw new Error(`addEmitter: blend is 'additive' or 'alpha', got ${blend}`);
+  const start = numbers(color, 4, 'color');
+  return {
+    options: { ...options },
+    rate,
+    lifetime: range(lifetime, 'lifetime', true),
+    size: Float32Array.from(sizes),
+    speed: range(speed, 'speed'),
+    direction: dir,
+    spread,
+    radius,
+    acceleration: numbers(acceleration, 3, 'acceleration'),
+    drag,
+    color: start,
+    colorEnd: colorEnd === undefined ? start : numbers(colorEnd, 4, 'colorEnd'),
+    texture,
+    blend,
+    owed: 0,
+    time: 0,
+    seed: (nextEmitterSeed++ * 0x9e3779b9) >>> 0,
+  };
+}
+let nextEmitterSeed = 1;
+
+/** A decal's options, checked; see Scene.addDecal. */
+export function decalRecord({ texture, size, color = [1, 1, 1, 1] } = {}) {
+  if (!(texture?.view && texture.width > 0 && texture.height > 0)) {
+    throw new Error('addDecal: texture must be one engine.loadTexture returned');
+  }
+  if (!(size?.length === 3 && [...size].every((v) => Number.isFinite(v) && v > 0))) {
+    throw new Error(`addDecal: size must be [width, height, depth], all positive, got ${size}`);
+  }
+  if (!(color?.length === 4 && [...color].every(Number.isFinite))) {
+    throw new Error(`addDecal: color must be 4 finite numbers, got ${color}`);
+  }
+  return { texture, size: Float32Array.from(size), color: Float32Array.from(color) };
+}
+
+/**
+ * A text's options, checked, and its glyphs laid out; see Scene.addText.
+ * Rasterises any glyphs its font does not have yet.
+ */
+export function textRecord(options = {}) {
+  const {
+    font, text = '', size, color = [1, 1, 1, 1], align = 'left', anchor = [0.5, 0.5], lineHeight,
+    facing = 'camera', pixels = false,
+  } = options;
+  if (!(font?.metrics && typeof font.ensure === 'function')) throw new Error('addText: font must be one engine.loadFont returned');
+  if (!(size > 0 && Number.isFinite(size))) throw new Error(`addText: size must be positive, got ${size}`);
+  if (!(color?.length === 4 && [...color].every(Number.isFinite))) throw new Error(`addText: color must be 4 finite numbers, got ${color}`);
+  if (!['camera', 'upright', 'plane'].includes(facing)) throw new Error(`addText: facing is 'camera', 'upright' or 'plane', got ${facing}`);
+  if (!(anchor?.length === 2 && anchor.every(Number.isFinite))) throw new Error(`addText: anchor must be [x, y], got ${anchor}`);
+  font.ensure(String(text));
+  return {
+    options: { ...options },
+    font,
+    text: String(text),
+    size,
+    color: Float32Array.from(color),
+    facing,
+    pixels: pixels === true,
+    boxes: layoutText(text, font.metrics, { align, lineHeight, anchor }),
+  };
+}
+
+const SPRITE_FACINGS = ['camera', 'upright', 'plane'];
+const SPRITE_BLENDS = ['alpha', 'additive', 'cutout'];
+
+/**
+ * A sprite's options, checked and filled in; see Scene.addSprite. `sizeGiven`
+ * remembers whether the size was asked for or derived from the texture, so a
+ * new texture re-derives a derived one.
+ */
+export function spriteRecord({
+  texture, size, color = [1, 1, 1, 1], rect = [0, 0, 1, 1], pivot = [0.5, 0.5], rotation = 0,
+  facing = 'camera', blend = 'alpha', cutoff = 0.5, pixels = false, sizeGiven = size !== undefined,
+} = {}) {
+  if (!(texture?.view && texture.width > 0 && texture.height > 0)) {
+    throw new Error('addSprite: texture must be one engine.loadTexture returned');
+  }
+  const numbers = (v, n, what) => {
+    if (!(v?.length === n && [...v].every(Number.isFinite))) {
+      throw new Error(`addSprite: ${what} must be ${n} finite numbers, got ${v}`);
+    }
+    return Float32Array.from(v);
+  };
+  const derived = pixels ? [texture.width, texture.height] : [1, texture.height / texture.width];
+  const sized = numbers(sizeGiven ? size : derived, 2, 'size');
+  if (!(sized[0] > 0 && sized[1] > 0)) throw new Error('addSprite: size must be positive');
+  if (!SPRITE_FACINGS.includes(facing)) throw new Error(`addSprite: facing is 'camera', 'upright' or 'plane', got ${facing}`);
+  if (!SPRITE_BLENDS.includes(blend)) throw new Error(`addSprite: blend is 'alpha', 'additive' or 'cutout', got ${blend}`);
+  if (!(cutoff >= 0 && cutoff <= 1)) throw new Error(`addSprite: cutoff must be between 0 and 1, got ${cutoff}`);
+  if (!Number.isFinite(rotation)) throw new Error(`addSprite: rotation must be a finite number, got ${rotation}`);
+  return {
+    texture,
+    size: sized,
+    sizeGiven,
+    color: numbers(color, 4, 'color'),
+    rect: numbers(rect, 4, 'rect'),
+    pivot: numbers(pivot, 2, 'pivot'),
+    rotation,
+    facing,
+    blend,
+    cutoff,
+    pixels: pixels === true,
+  };
+}
+
+/**
+ * A reflection probe's description, checked; see Scene.addReflectionProbe.
+ */
+export function probeRecord({ min, max, position, blend = 0 } = {}) {
+  const three = (v, what) => {
+    if (!(v?.length === 3 && [...v].every(Number.isFinite))) {
+      throw new Error(`addReflectionProbe: ${what} must be three finite numbers, got ${v}`);
+    }
+    return Float32Array.from(v);
+  };
+  const lo = three(min, 'min');
+  const hi = three(max, 'max');
+  if (!(hi[0] > lo[0] && hi[1] > lo[1] && hi[2] > lo[2])) {
+    throw new Error('addReflectionProbe: max must be above min on every axis');
+  }
+  const at = position === undefined
+    ? Float32Array.from([0, 1, 2].map((a) => (lo[a] + hi[a]) / 2))
+    : three(position, 'position');
+  if (![0, 1, 2].every((a) => at[a] >= lo[a] && at[a] <= hi[a])) {
+    throw new Error('addReflectionProbe: position must be inside the box');
+  }
+  if (!(blend >= 0 && Number.isFinite(blend))) throw new Error(`addReflectionProbe: blend must be 0 or more, got ${blend}`);
+  return { min: lo, max: hi, position: at, blend, captured: false };
+}
+
+/** The largest finite f32: coverage with no upper bound. */
+export const F32_MAX = 3.4028234663852886e38;
+
+/** A mesh's bounding sphere in its node's space: the box's centre and half diagonal. */
+function meshSphere(mesh) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const { bounds } of mesh.primitives) {
+    for (let a = 0; a < 3; a++) {
+      min[a] = Math.min(min[a], bounds.min[a]);
+      max[a] = Math.max(max[a], bounds.max[a]);
+    }
+  }
+  return [
+    (min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2,
+    Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2,
+  ];
+}
+
+/**
+ * An LOD level's transform under the finest level's node: the finest's
+ * transform undone, then the level's own. Both are in the same parent space,
+ * so a level exported where the finest one is -- the usual case -- lands on
+ * the identity, and exactly, without a round trip through a matrix.
+ */
+function relativeTRS(finest, level) {
+  const same = (a, b) => a.every((v, k) => v === b[k]);
+  if (same(finest.position, level.position) && same(finest.rotation, level.rotation) && same(finest.scale, level.scale)) {
+    return { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] };
+  }
+  const trs = (node) => mat4FromQuatPosScale(mat4Create(), node.rotation, node.position, node.scale);
+  const relative = mat4Multiply(mat4Create(), mat4Invert(mat4Create(), trs(finest)), trs(level));
+  const position = new Float32Array(3);
+  const rotation = new Float32Array(4);
+  const scale = new Float32Array(3);
+  mat4Decompose(position, rotation, scale, relative);
+  return { position, rotation, scale };
+}
 
 export class Scene {
   constructor({ capacity = DEFAULT_CAPACITY, renderableCapacity = capacity, lightCapacity = 256 } = {}) {
@@ -82,6 +294,16 @@ export class Scene {
     /** Last frame's morph padding, so a weight change is detectable at all. */
     this.renderableMorphPad = new Float32Array(renderableCapacity);
 
+    /**
+     * Level of detail. The transform slot of the LOD group's node, or -1 for
+     * a renderable in no group; that group's bounding sphere in the node's
+     * space, centre and radius; and the screen coverage this renderable
+     * draws between, [lowest, highest).
+     */
+    this.renderableLodSlot = new Int32Array(renderableCapacity).fill(-1);
+    this.renderableLodSphere = new Float32Array(renderableCapacity * 4);
+    this.renderableCoverage = new Float32Array(renderableCapacity * 2);
+
     this.localMin = new Float32Array(renderableCapacity * 3);
     this.localMax = new Float32Array(renderableCapacity * 3);
     this.worldMin = new Float32Array(renderableCapacity * 3);
@@ -91,20 +313,16 @@ export class Scene {
     // Plain mutable fields: they are per-scene data the renderer reads when it
     // is handed this scene, not hidden state a function reaches for.
     /**
-     * The shadow-casting directional light -- the brightest one, see `sun` --
-     * as the direction its light travels and its colour times intensity.
-     * DERIVED: refreshLights copies them out of the light's node every frame,
+     * Every directional light, packed for the GPU: the direction its light
+     * travels, then colour times intensity, a vec4 each. The first vec4's w is
+     * the light's shadow slot plus one, written by the renderer; zero for none.
+     * DERIVED: refreshLights copies them out of the lights' nodes every frame,
      * so read them and never write them. To change a light, change its node.
-     */
-    this.sunDirection = new Float32Array(3);
-    this.sunColor = new Float32Array(3);
-    /**
-     * Every OTHER directional light, packed for the GPU: direction then
-     * colour times intensity, a vec4 each. They light the scene exactly as the
-     * sun does, minus the shadow, because there is one shadow map.
      */
     this.directionals = new Float32Array(DIRECTIONAL_FLOATS);
     this.directionalCount = 0;
+    /** The entity each packed directional light belongs to, in the same order. */
+    this.directionalEntity = [];
     this._directional = new Map();   // entity -> { color, intensity }, in the order added
     /** Set by the engine. Drives ambient light and the skybox. */
     this.environment = null;
@@ -140,6 +358,36 @@ export class Scene {
     this._morphOf = new Map();   // entity -> index into this.morphs
     /** Root entity -> AnimationPlayer, for asset instances that have clips. */
     this._players = new Map();
+    /**
+     * The lights that cast shadows. A choice per light, the same switch for
+     * every kind. glTF has no say in it, so the default is the engine's, by
+     * cost: a directional light casts, because its shadow is in view almost
+     * everywhere and it is one set of cascades; a point or spot light does
+     * not, because it is local and a point light is six maps.
+     */
+    this.shadowCasters = new Set();
+    /**
+     * Reflection probes (render/probes.js): { min, max, position, blend,
+     * captured }. engine.captureReflectionProbes renders them; the revision
+     * tells the renderer the set changed.
+     */
+    this.reflectionProbes = [];
+    this.probeRevision = 0;
+    /** Sprites (see addSprite), by the entity each hangs off. */
+    this.sprites = new Map();
+    /** Particle emitters (see addEmitter), by the entity each hangs off. */
+    this.emitters = new Map();
+    /** Decals (see addDecal), by the entity each hangs off, in the order added. */
+    this.decals = new Map();
+    /** Text (see addText), by the entity each hangs off. */
+    this.texts = new Map();
+    /**
+     * Material id -> the importer's record, for materials a clip changed since
+     * the renderer last uploaded them. A material belongs to the asset, not to
+     * one instance of it, exactly as in glTF: animating one animates it on
+     * every copy.
+     */
+    this.changedMaterials = new Map();
 
     /**
      * Cameras that came in with assets, in the order they were added. Each
@@ -148,42 +396,9 @@ export class Scene {
      */
     this.cameras = [];
 
-    // The sun a new scene starts with. A light node like any other, so it can
-    // be aimed, recoloured, parented, animated -- or destroyed, for none.
-    this.addLight({
-      type: 'directional',
-      direction: [-0.35, -0.55, -0.45],
-      color: [1, 0.9375, 0.84375],
-      intensity: 3.2,
-    });
-  }
-
-  /**
-   * The brightest directional light, as a Node, or null if there are none.
-   *
-   * NOT A SLOT. Every directional light lights the scene, and none of them is
-   * special by kind. The one thing only one of them can have is the shadow
-   * map, and it goes to the brightest -- by luminance, the shadow you would
-   * actually see; a dim fill light's shadow is the one nobody misses. So this
-   * is a question about the lights there are, not a place a light is put.
-   * Equal brightness goes to the one added first.
-   */
-  get sun() {
-    const entity = this._brightestDirectional();
-    return entity === undefined ? null : new Node(this, entity);
-  }
-
-  _brightestDirectional() {
-    let brightest;
-    let best = -Infinity;
-    for (const [entity, { color, intensity }] of this._directional) {
-      const luminance = intensity * (0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]);
-      if (luminance > best) {
-        best = luminance;
-        brightest = entity;
-      }
-    }
-    return brightest;
+    // No lights. A scene is lit by its environment until one is added: the
+    // directional light a scene used to start with was the procedural sky's
+    // sun under another name, which is a special case this no longer has.
   }
 
   /**
@@ -202,8 +417,20 @@ export class Scene {
     // shape as `created` and built beside it, because a weights channel names
     // a node exactly the way a translation channel does.
     let weightsOf = null;
+    // Light and camera index -> what this instance made of it, for clips that
+    // animate them by pointer. One light can sit on several nodes.
+    const lightsOf = [];
+    const camerasOf = [];
 
-    const visit = (nodeIndex, parentEntity) => {
+    // Nodes that stand in for another at lower detail (MSFT_lod). They are
+    // placed by the node they stand in for, never walked into on their own:
+    // a file that also lists one as a child or root would draw it twice.
+    const alternates = new Set();
+    for (const node of asset.nodes) for (const id of node.lod?.ids ?? []) alternates.add(id);
+
+    // `lod` is the group a node's renderables are a level of, or null; `trs`
+    // replaces the node's own transform, for a level placed under the finest.
+    const visit = (nodeIndex, parentEntity, lod = null, trs = null) => {
       const node = asset.nodes[nodeIndex];
       // Unconditional, not DEBUG-only. glTF node graphs must be forests, and a
       // node reached twice is a diamond or a cycle. A cycle does not return; a
@@ -223,11 +450,18 @@ export class Scene {
       const entity = this.entities.alloc();
       created[nodeIndex] = entity;
       this.transforms.add(entity, {
-        position: node.position,
-        rotation: node.rotation,
-        scale: node.scale,
+        position: trs?.position ?? node.position,
+        rotation: trs?.rotation ?? node.rotation,
+        scale: trs?.scale ?? node.scale,
         parent: parentEntity,
       });
+
+      // The finest level of an LOD group: its renderables draw above the
+      // first coverage, and every level measures this node's sphere.
+      const coverage = node.lod?.coverage ?? null;
+      const group = coverage !== null && node.mesh >= 0
+        ? { slot: handleIndex(entity), sphere: meshSphere(asset.meshes[node.mesh]), low: coverage[0], high: F32_MAX }
+        : lod;
 
       if (node.mesh >= 0) {
         // A skin instance per (node, skin), because `created` is this
@@ -266,7 +500,7 @@ export class Scene {
           // node that carries weights -- the importer refuses a mesh whose
           // primitives disagree, so in practice this is all or none.
           const morphed = primitive.morphExtent ? morphIndex : -1;
-          this._addRenderable(entity, primitive, skinned, morphed);
+          this._addRenderable(entity, primitive, skinned, morphed, group);
         }
       }
 
@@ -274,12 +508,28 @@ export class Scene {
       // it is and which way it points are the node's transform. A directional
       // light joins the others; whether it casts the shadow is `sun`'s call.
       const light = node.light >= 0 ? asset.lights?.[node.light] : null;
-      if (light) this._attachLight(entity, light);
+      if (light) {
+        this._attachLight(entity, light);
+        (lightsOf[node.light] ??= []).push(entity);
+      }
 
       const spec = node.camera >= 0 ? asset.cameras?.[node.camera] : null;
-      if (spec) this.cameras.push(cameraFor(spec).follow(new Node(this, entity)));
+      if (spec) {
+        const camera = cameraFor(spec).follow(new Node(this, entity));
+        this.cameras.push(camera);
+        (camerasOf[node.camera] ??= []).push(camera);
+      }
 
-      for (const child of node.children) visit(child, entity);
+      for (const child of node.children) if (!alternates.has(child)) visit(child, entity, lod);
+
+      // The lower levels, under this node so they go where it goes. Each is
+      // placed where the file puts it -- beside this node, in the same parent
+      // space -- which is this node's transform undone, then its own.
+      if (group !== lod) {
+        node.lod.ids.forEach((id, k) => {
+          visit(id, entity, { ...group, low: coverage[k + 1], high: coverage[k] }, relativeTRS(node, asset.nodes[id]));
+        });
+      }
       return entity;
     };
 
@@ -291,7 +541,7 @@ export class Scene {
     // a pending skin that every later add() then tried to resolve and threw
     // on. Now the scene is put back exactly as it was before the error goes on.
     try {
-      for (const root of asset.roots) roots.push(visit(root, parentEntity));
+      for (const root of asset.roots) if (!alternates.has(root)) roots.push(visit(root, parentEntity));
 
       // Joints resolve now, not during the walk: a skin may name a node the
       // walk had not reached yet, and `created` is only complete once it is done.
@@ -347,15 +597,18 @@ export class Scene {
     // which is the whole reason two copies of one asset can play the same clip
     // at different times. It is kept only when there is something to play.
     if (asset.animations?.length > 0) {
-      this._players.set(
-        handle, new AnimationPlayer(asset.animations, created, this.entities, weightsOf),
-      );
+      const player = new AnimationPlayer(asset.animations, created, this.entities, weightsOf, asset.nodes,
+        this._propertiesFor(asset, lightsOf, camerasOf));
+      // What root motion moves: the handle this instance is placed by.
+      player.instance = handle;
+      this._players.set(handle, player);
     }
 
     return new Node(this, handle);
   }
 
-  _addRenderable(entity, primitive, skin = -1, morph = -1) {
+  /** `lod`: { slot, sphere, low, high } for a level of an LOD group; see add(). */
+  _addRenderable(entity, primitive, skin = -1, morph = -1, lod = null) {
     if (this.renderableCount >= this.renderableCapacity) {
       this._growRenderables(this.renderableCount + 1);
     }
@@ -374,6 +627,11 @@ export class Scene {
     this.renderableMorph[i] = morph;
     this.renderableMorphExtent[i] = morph >= 0 ? primitive.morphExtent : null;
 
+    this.renderableLodSlot[i] = lod === null ? -1 : lod.slot;
+    if (lod !== null) this.renderableLodSphere.set(lod.sphere, i * 4);
+    this.renderableCoverage[i * 2] = lod === null ? 0 : lod.low;
+    this.renderableCoverage[i * 2 + 1] = lod === null ? F32_MAX : lod.high;
+
     this.localMin.set(primitive.bounds.min, i * 3);
     this.localMax.set(primitive.bounds.max, i * 3);
     return i;
@@ -391,6 +649,9 @@ export class Scene {
     this.renderableMorph = growArray(this.renderableMorph, capacity);
     this.renderableMorphExtent.length = capacity;
     this.renderableMorphPad = growArray(this.renderableMorphPad, capacity);
+    this.renderableLodSlot = growArray(this.renderableLodSlot, capacity);
+    this.renderableLodSphere = growArray(this.renderableLodSphere, capacity, 4);
+    this.renderableCoverage = growArray(this.renderableCoverage, capacity, 2);
     this.localMin = growArray(this.localMin, capacity, 3);
     this.localMax = growArray(this.localMax, capacity, 3);
     // World bounds are recomputed from local every time they are read, so these
@@ -485,6 +746,9 @@ export class Scene {
         this.renderableMorph[i] = this.renderableMorph[last];
         this.renderableMorphExtent[i] = this.renderableMorphExtent[last];
         this.renderableMorphPad[i] = this.renderableMorphPad[last];
+        this.renderableLodSlot[i] = this.renderableLodSlot[last];
+        this.renderableLodSphere.copyWithin(i * 4, last * 4, last * 4 + 4);
+        this.renderableCoverage.copyWithin(i * 2, last * 2, last * 2 + 2);
         this.localMin.copyWithin(i * 3, last * 3, last * 3 + 3);
         this.localMax.copyWithin(i * 3, last * 3, last * 3 + 3);
         // World bounds move with their renderable too. Without this the
@@ -510,9 +774,14 @@ export class Scene {
     // Lights on any doomed entity go too. Before the entities are freed, so
     // the handles are still the ones the map was built from.
     for (const entity of doomed) {
+      this.sprites.delete(entity);
+      this.emitters.delete(entity);
+      this.decals.delete(entity);
+      this.texts.delete(entity);
       const index = this._lightOf.get(entity);
       if (index !== undefined) this._removeLightAt(index);
       this._directional.delete(entity);
+      this.shadowCasters.delete(entity);
     }
 
     for (const entity of doomed) {
@@ -560,6 +829,217 @@ export class Scene {
     }
   }
 
+  // --------------------------------------------------------------- sprites
+
+  /**
+   * A sprite: a textured quad that turns to face the camera, as a node in the
+   * scene -- so it moves, parents and is removed like any other. Returns the
+   * Node.
+   *
+   *   const marker = scene.addSprite({ texture: await engine.loadTexture('pin.png'), parent: npc });
+   *   marker.setPosition(0, 2.2, 0);
+   *
+   *   texture      from engine.loadTexture
+   *   size         [width, height], in world units -- or in pixels, with
+   *                `pixels: true`, for a marker that stays one size on screen.
+   *                One unit wide at the texture's aspect by default, or the
+   *                texture's own pixel size.
+   *   color        multiplies the texture; linear, and may pass 1 to glow
+   *   rect         [u0, v0, u1, v1], the part of the texture to show
+   *   pivot        [x, y] in the quad, the point placed at the node; its centre
+   *   rotation     radians, about the view direction
+   *   facing       'camera', turning every way; 'upright', turning about Y
+   *                only, for trees and people seen from the side; or 'plane',
+   *                not turning at all -- in the node's own x-y plane, a sign
+   *   blend        'alpha' (sorted back to front), 'additive' (light: no order
+   *                needed), or 'cutout' (drawn or not, by `cutoff`)
+   *
+   * Unlit: the colour is the colour, lit by nothing. Scaled by the node.
+   */
+  addSprite({ texture, position = [0, 0, 0], parent = null, ...options } = {}) {
+    const record = spriteRecord({ texture, ...options });
+    const node = this.createNode({ parent });
+    node.setPosition(...position);
+    this.sprites.set(node.entity, record);
+    return node;
+  }
+
+  /** Change a sprite's options; the same names addSprite takes. */
+  setSprite(node, changes) {
+    const current = this.sprites.get(node.entity);
+    if (current === undefined) throw new Error('setSprite: this node has no sprite');
+    this.sprites.set(node.entity, spriteRecord({ ...current, ...changes, sizeGiven: changes.size !== undefined || current.sizeGiven }));
+  }
+
+  /** A sprite's options, or null. A copy: change it through setSprite. */
+  spriteOf(node) {
+    const record = this.sprites.get(node.entity);
+    return record === undefined ? null : { ...record };
+  }
+
+  // ------------------------------------------------------------- particles
+
+  /**
+   * A particle emitter, as a node: particles leave it along its +Y (turned by
+   * its rotation), live their lifetime, and are drawn as camera-facing
+   * quads. Simulated on the GPU. Returns the Node.
+   *
+   *   const sparks = scene.addEmitter({
+   *     rate: 200, lifetime: [0.4, 0.8], size: [0.05, 0], speed: [2, 4], spread: 0.4,
+   *     acceleration: [0, -9.81, 0], color: [4, 2, 0.5, 1],
+   *   });
+   *
+   *   rate          particles a second; 0 for bursts only (scene.burst)
+   *   lifetime      seconds: one value, or [min, max] for each particle to draw from
+   *   size          world units across: one value, or [at birth, at death]
+   *   speed         at birth: one value, or [min, max]; 0 by default
+   *   direction     in the node's space; its +Y by default
+   *   spread        radians off the direction a particle may leave at: 0 is a
+   *                 line, pi every way
+   *   radius        they are born anywhere in this sphere around the node; 0, a point
+   *   acceleration  world space, per second per second: gravity, if you want it
+   *   drag          the share of speed lost per second, as a rate: v' = -drag v
+   *   color         linear, may pass 1 to glow; colorEnd is what it becomes at
+   *                 death, the same unless given
+   *   texture       from engine.loadTexture; without one, a soft round dot
+   *   blend         'additive' (by default: needs no order, which particles
+   *                 are not drawn in) or 'alpha'
+   *
+   * Particles live in world space once born: a moving emitter leaves a trail.
+   * Advance them with scene.advanceParticles(dt) -- engine.run does.
+   */
+  addEmitter({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    const record = emitterRecord(options);
+    const node = this.createNode({ parent });
+    node.setPosition(...position);
+    this.emitters.set(node.entity, record);
+    return node;
+  }
+
+  /** Change an emitter's options; the same names addEmitter takes. Its particles live on. */
+  setEmitter(node, changes) {
+    const current = this.emitters.get(node.entity);
+    if (current === undefined) throw new Error('setEmitter: this node has no emitter');
+    const next = emitterRecord({ ...current.options, ...changes });
+    next.owed = current.owed;
+    next.time = current.time;
+    next.seed = current.seed;
+    this.emitters.set(node.entity, next);
+  }
+
+  /** Emit `count` particles at once, on the next frame. */
+  burst(node, count) {
+    const record = this.emitters.get(node.entity);
+    if (record === undefined) throw new Error('burst: this node has no emitter');
+    if (!(Number.isInteger(count) && count >= 0)) throw new Error(`burst: count must be a whole number, got ${count}`);
+    record.owed += count;
+  }
+
+  /**
+   * Move every emitter's clock on by `dt` seconds: what it owes in new
+   * particles, and the time its particles have to be carried through. The
+   * renderer settles both on the next frame.
+   */
+  advanceParticles(dt) {
+    if (!(dt >= 0)) return;
+    for (const record of this.emitters.values()) {
+      record.owed += record.rate * dt;
+      record.time += dt;
+    }
+  }
+
+  // ------------------------------------------------------------------ text
+
+  /**
+   * Text, as a node: a string in a font from engine.loadFont, drawn as a
+   * quad a glyph and sharp at any size. Returns the Node.
+   *
+   *   const label = scene.addText({ font, text: 'Gate 3', size: 0.4, parent: gate });
+   *   scene.addText({ font, text: 'EXIT', size: 32, pixels: true, color: [0, 4, 0, 1] });
+   *
+   *   size        the font's em, in world units -- or in pixels, with pixels: true
+   *   color       linear; may pass 1 to glow
+   *   align       'left', 'center' or 'right', for more than one line
+   *   anchor      [x, y] in the block, 0..1, placed at the node; its centre
+   *   lineHeight  in ems; the font's own by default
+   *   facing      'camera' (by default), 'upright' or 'plane', as for sprites
+   */
+  addText({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    const record = textRecord(options);
+    const node = this.createNode({ parent });
+    node.setPosition(...position);
+    this.texts.set(node.entity, record);
+    return node;
+  }
+
+  /** Change a text's options -- its string, say; the same names addText takes. */
+  setText(node, changes) {
+    const current = this.texts.get(node.entity);
+    if (current === undefined) throw new Error('setText: this node has no text');
+    this.texts.set(node.entity, textRecord({ ...current.options, ...changes }));
+  }
+
+  // ---------------------------------------------------------------- decals
+
+  /**
+   * A decal: a texture projected onto whatever surfaces lie in a box, along
+   * the box's -Z -- a scorch mark, a poster, a puddle. As a node, so it is
+   * placed, turned and parented like one. Returns the Node.
+   *
+   *   const scorch = scene.addDecal({ texture: burn, size: [2, 2, 0.5] });
+   *   scorch.setPosition(0, 0.01, 0).setRotationAxisAngle([1, 0, 0], -Math.PI / 2);
+   *
+   *   texture  from engine.loadTexture; its alpha is how much it covers
+   *   size     the box: [width, height] across the image, and depth along
+   *            the projection, in the node's units. Scaled by the node.
+   *   color    multiplies the texture; its alpha scales the cover
+   *
+   * It changes the surface's base colour before lighting, so it is lit,
+   * shadowed and fogged as the surface is. A surface facing away from it is
+   * not painted. Decals added later paint over earlier ones.
+   */
+  addDecal({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    const record = decalRecord(options);
+    const node = this.createNode({ parent });
+    node.setPosition(...position);
+    this.decals.set(node.entity, record);
+    return node;
+  }
+
+  /** Change a decal's options; the same names addDecal takes. */
+  setDecal(node, changes) {
+    const current = this.decals.get(node.entity);
+    if (current === undefined) throw new Error('setDecal: this node has no decal');
+    this.decals.set(node.entity, decalRecord({ ...current, ...changes }));
+  }
+
+  // ----------------------------------------------------------- reflections
+
+  /**
+   * A reflection probe: the scene seen from `position`, reflected by the
+   * surfaces inside the box from `min` to `max` (world space) in place of the
+   * sky. Nothing shows until it is captured -- engine.captureReflectionProbes.
+   *
+   *   const hall = scene.addReflectionProbe({ min: [-5, 0, -8], max: [5, 4, 8] });
+   *
+   * `position` is the box's centre unless given, and must be inside it.
+   * `blend` is how far in from the box's faces the probe fades in: 0, the
+   * default, is a hard edge; more hides the seam between neighbours.
+   */
+  addReflectionProbe(options) {
+    const probe = probeRecord(options);
+    this.reflectionProbes.push(probe);
+    this.probeRevision++;
+    return probe;
+  }
+
+  removeReflectionProbe(probe) {
+    const at = this.reflectionProbes.indexOf(probe);
+    if (at < 0) return;
+    this.reflectionProbes.splice(at, 1);
+    this.probeRevision++;
+  }
+
   // ------------------------------------------------------------------ lights
 
   /**
@@ -598,6 +1078,7 @@ export class Scene {
     innerAngle = 0.2,
     outerAngle = 0.5,
     parent = null,
+    castShadow,
   } = {}) {
     if (type !== 'point' && type !== 'spot' && type !== 'directional') {
       throw new Error(`Scene.addLight: type must be point, spot or directional, got ${type}`);
@@ -611,7 +1092,7 @@ export class Scene {
       rotation,
       parent: parent ? parent.entity : NULL_HANDLE,
     });
-    this._attachLight(entity, { type, color, intensity, radius, innerAngle, outerAngle });
+    this._attachLight(entity, { type, color, intensity, radius, innerAngle, outerAngle, castShadow });
     return new Node(this, entity);
   }
 
@@ -624,8 +1105,11 @@ export class Scene {
    */
   setLight(entity, changes) {
     const directional = this._directional.get(entity);
+    if (changes.castShadow !== undefined && (directional || this._lightOf.has(entity))) {
+      if (changes.castShadow) this.shadowCasters.add(entity); else this.shadowCasters.delete(entity);
+    }
     if (directional) {
-      // A sun has no radius and no cone: colour and brightness are all of it.
+      // A directional light has no radius and no cone: colour and brightness are all of it.
       if (changes.color) directional.color.set(changes.color);
       if (changes.intensity !== undefined) directional.intensity = changes.intensity;
       return true;
@@ -680,15 +1164,13 @@ export class Scene {
     }
 
     // Directional lights: -Z of the node, like a spot, and colour at
-    // intensity. The brightest goes to the sun fields, which the shadow map
-    // follows; the rest are packed for the shader to loop over.
-    const sun = this._brightestDirectional();
-    if (sun === undefined) this.sunColor.fill(0);
-
-    const others = this._directional.size - (sun === undefined ? 0 : 1);
-    if (this.directionals.length < others * DIRECTIONAL_FLOATS) {
-      this.directionals = new Float32Array(grownCapacity(this.directionals.length / DIRECTIONAL_FLOATS, others) * DIRECTIONAL_FLOATS);
+    // intensity, every one of them. Which cast shadows, and into which slot,
+    // the renderer writes into each record's w after this.
+    const count = this._directional.size;
+    if (this.directionals.length < count * DIRECTIONAL_FLOATS) {
+      this.directionals = new Float32Array(grownCapacity(this.directionals.length / DIRECTIONAL_FLOATS, count) * DIRECTIONAL_FLOATS);
     }
+    this.directionalEntity.length = count;
     let packed = 0;
     for (const [entity, { color, intensity }] of this._directional) {
       const m = handleIndex(entity) * 16;
@@ -696,15 +1178,7 @@ export class Scene {
       const y = -world[m + 9];
       const z = -world[m + 10];
       const inv = 1 / (hypot3(x, y, z) || 1);
-      if (entity === sun) {
-        this.sunDirection[0] = x * inv;
-        this.sunDirection[1] = y * inv;
-        this.sunDirection[2] = z * inv;
-        this.sunColor[0] = color[0] * intensity;
-        this.sunColor[1] = color[1] * intensity;
-        this.sunColor[2] = color[2] * intensity;
-        continue;
-      }
+      this.directionalEntity[packed] = entity;
       const o = packed++ * DIRECTIONAL_FLOATS;
       this.directionals[o] = x * inv;
       this.directionals[o + 1] = y * inv;
@@ -723,9 +1197,10 @@ export class Scene {
    * imported glTF node already is one.
    */
   _attachLight(entity, properties) {
+    if (properties.castShadow ?? properties.type === 'directional') this.shadowCasters.add(entity);
     if (properties.type === 'directional') {
-      // Not in the packed array: that is the clustered lights, and a sun
-      // reaches everything, so it has no cluster to be in.
+      // Not in the packed array: that is the clustered lights, and a
+      // directional light reaches everything, so it has no cluster to be in.
       this._directional.set(entity, {
         color: Float32Array.from(properties.color ?? [1, 1, 1]),
         intensity: properties.intensity ?? 1,
@@ -812,6 +1287,122 @@ export class Scene {
    */
   update(jobs = null) {
     return jobs?.parallel ? this.transforms.updateParallel(jobs) : this.transforms.update();
+  }
+
+  /**
+   * What each property a clip animates by pointer writes to, for one
+   * instance: key -> { slot, components, rest, write }. Null when no clip
+   * drives any. Only what the clips name is built.
+   */
+  _propertiesFor(asset, lightsOf, camerasOf) {
+    let properties = null;
+    // One state per light, shared by all its fields: setLight takes the whole
+    // light, so a colour written from a stale copy would put back an old
+    // intensity.
+    const lightState = [];
+    for (const clip of asset.animations) {
+      for (const channel of clip.channels) {
+        if (channel.path !== 'property' || properties?.has(channel.key)) continue;
+        const target = channel.kind === 'light'
+          ? this._lightProperty(asset.lights[channel.index], lightsOf[channel.index], channel.field,
+            (lightState[channel.index] ??= lightStateOf(asset.lights[channel.index])))
+          : channel.kind === 'camera' ? cameraProperty(camerasOf[channel.index], channel.field)
+            : this._materialProperty(asset, channel.index, channel.field);
+        // A light or camera on no node of the default scene has nothing here.
+        if (target === null) continue;
+        properties ??= new Map();
+        properties.set(channel.key, { slot: properties.size, components: channel.components, ...target });
+      }
+    }
+    return properties;
+  }
+
+  /**
+   * A light's colour, intensity, range or cone, written to every node this
+   * instance put it on. A light whose file gave no range keeps deriving its
+   * reach from its brightness as that changes.
+   *
+   * A value the importer would refuse -- a CUBICSPLINE curve can overshoot
+   * its keys -- is not written, and the light keeps the last one it would
+   * have accepted. Clamping would need an edge to clamp to, and `range > 0`
+   * and `inner < outer` have none.
+   */
+  _lightProperty(spec, entities, field, live) {
+    if (entities === undefined) return null;
+    const rest = field === 'color' ? live.color
+      : field === 'range' ? [live.range ?? spec.radius]
+        : [live[field]];
+    return {
+      rest: Float32Array.from(rest),
+      write: (values) => {
+        const v = values[0];
+        if (field === 'color') {
+          if (!(values[0] >= 0 && values[1] >= 0 && values[2] >= 0)) return;
+          for (let c = 0; c < 3; c++) live.color[c] = values[c];
+        } else if (field === 'intensity') {
+          if (!(v >= 0)) return;
+          live.intensity = v;
+        } else if (field === 'range') {
+          if (!(v > 0)) return;
+          live.range = v;
+        } else if (field === 'innerAngle') {
+          if (!(v >= 0 && v < live.outerAngle)) return;
+          live.innerAngle = v;
+        } else {
+          if (!(v > live.innerAngle && v <= Math.PI / 2)) return;
+          live.outerAngle = v;
+        }
+        const changes = { color: live.color, intensity: live.intensity };
+        if (spec.type !== 'directional') changes.radius = live.range ?? unboundedLightRadius(live.intensity, live.color);
+        if (spec.type === 'spot') {
+          changes.innerAngle = live.innerAngle;
+          changes.outerAngle = live.outerAngle;
+        }
+        for (const entity of entities) this.setLight(entity, changes);
+      },
+    };
+  }
+
+  /**
+   * A factor of one of the asset's materials. Written into the importer's
+   * record and queued for the renderer; emissive is the product of its factor
+   * and strength, so either one recomputes it. The importer takes any finite
+   * factor, and so does this.
+   */
+  _materialProperty(asset, index, field) {
+    const record = asset.materials?.[index];
+    const id = asset.materialIds?.[index];
+    if (record === undefined || id === undefined) return null;
+    // A texture transform's part: the part changes, and its slot's matrix
+    // rows are rebuilt from all three.
+    const uv = /^uv(\d+)\.(offset|rotation|scale)$/.exec(field);
+    if (uv !== null) {
+      const slot = Number(uv[1]);
+      const part = record.uvTransformParts[slot];
+      const name = uv[2];
+      return {
+        rest: Float32Array.from(name === 'rotation' ? [part.rotation] : part[name]),
+        write: (values) => {
+          if (name === 'rotation') part.rotation = values[0];
+          else { part[name][0] = values[0]; part[name][1] = values[1]; }
+          record.uvTransforms.set(uvTransformRows(part), slot * 6);
+          this.changedMaterials.set(id, record);
+        },
+      };
+    }
+    const value = record[field];
+    const width = typeof value === 'number' ? 1 : value.length;
+    return {
+      rest: Float32Array.from(width === 1 ? [value] : value),
+      write: (values) => {
+        if (width === 1) record[field] = values[0];
+        else for (let c = 0; c < width; c++) record[field][c] = values[c];
+        if (field === 'emissiveFactor' || field === 'emissiveStrength') {
+          for (let c = 0; c < 3; c++) record.emissive[c] = record.emissiveFactor[c] * record.emissiveStrength;
+        }
+        this.changedMaterials.set(id, record);
+      },
+    };
   }
 
   /** The AnimationPlayer for an asset instance, or null if it has no clips. */
@@ -1128,6 +1719,50 @@ export const LIGHT_SPOT = 1;
 /** The axis a spot shines along, in its own space: -Z, as in glTF. */
 
 /** A Camera for an imported glTF camera, before it is pointed at its node. */
+/** What an animated light is now, starting from what the file said. */
+function lightStateOf(spec) {
+  return {
+    color: Float32Array.from(spec.color),
+    intensity: spec.intensity,
+    range: spec.range ?? null,
+    innerAngle: spec.innerAngle,
+    outerAngle: spec.outerAngle,
+  };
+}
+
+/**
+ * A glTF camera's field of view, near or far plane, or orthographic half
+ * height, on every Camera this instance made of it. The half height is the
+ * distance to the target, as it is when the camera is made (see cameraFor).
+ * As with lights, a value the importer would refuse is not written.
+ */
+function cameraProperty(cameras, field) {
+  if (cameras === undefined) return null;
+  const first = cameras[0];
+  const rest = field === 'halfHeight' ? first.orthographicHalfHeight() : first[field];
+  return {
+    rest: Float32Array.of(rest),
+    write: (values) => {
+      const v = values[0];
+      for (const camera of cameras) {
+        if (field === 'fovY') {
+          if (v > 0 && v < Math.PI) camera.fovY = v;
+        } else if (field === 'near') {
+          // An orthographic znear of 0 gets the importer's sliver of the box.
+          if (camera.orthographic ? v >= 0 && v < camera.far : v > 0) camera.near = v > 0 ? v : camera.far * 1e-4;
+        } else if (field === 'far') {
+          if (v > camera.near) camera.far = v;
+        } else if (v !== 0 && Number.isFinite(v)) {
+          const scale = Math.abs(v) / camera.orthographicHalfHeight();
+          for (let c = 0; c < 3; c++) {
+            camera.target[c] = camera.position[c] + (camera.target[c] - camera.position[c]) * scale;
+          }
+        }
+      }
+    },
+  };
+}
+
 function cameraFor(spec) {
   if (!spec.orthographic) return new Camera({ fovY: spec.fovY, near: spec.near });
 

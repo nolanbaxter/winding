@@ -12,6 +12,7 @@
 // engine can compile does compile, every pipeline permutation builds, and a
 // full frame records and submits without the device complaining.
 
+import { EXTENSION_TEXTURES } from '../src/scene/gltf/images.js';
 import { Winding, Camera } from '../src/winding.js';
 import { Benchmark } from '../src/bench.js';
 import { Environment } from '../src/render/ibl.js';
@@ -19,9 +20,12 @@ import { CLUSTER_Z, MAX_LIGHTS_PER_CLUSTER } from '../src/render/clustered.js';
 import { shaderErrors } from '../src/rhi/shader.js';
 import { NOT_BATCHED, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
 import {
-  buildDemoGLB, buildRiggedGLB, buildMorphedGLB, buildFeatureGLB, twoToneImageURI,
+  buildDemoGLB, buildRiggedGLB, buildMorphedGLB, buildFeatureGLB, buildLodGLB, twoToneImageURI,
 } from './fixtures/demoModel.js';
-import { PBR_SHADER } from '../src/render/shaders/pbr.js';
+import { pbrShader } from '../src/render/shaders/pbr.js';
+
+/** The forward shader with every extension texture bound, as a roomy device builds it. */
+const PBR_SHADER = pbrShader(EXTENSION_TEXTURES.length);
 
 const FRAMES = 30;
 
@@ -90,6 +94,8 @@ export async function run(canvas, onDone) {
   });
 
   const scene = engine.createScene();
+  // A key light, so the frames below draw cascades as any lit scene does.
+  scene.addLight({ type: 'directional', direction: [-0.35, -0.55, -0.45], intensity: 3.2 });
   const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
   camera.position.set([0, 2, 8]);
 
@@ -399,7 +405,7 @@ export async function run(canvas, onDone) {
     // And the box the CULL SHADER reads. The upload was gated on the mesh
     // node moving, so this one stayed at the bind pose while the one above
     // was right -- and the GPU culled the character by its old box.
-    const culledTop = engine.renderer.gpu.boundsData[riggedIndex * 8 + 5];
+    const culledTop = engine.renderer.gpu.boundsData[riggedIndex * 12 + 5];
     if (culledTop !== Math.fround(afterTop)) {
       throw new Error(`the cull box top is ${culledTop.toFixed(2)}; the scene's is ${afterTop.toFixed(2)}`);
     }
@@ -636,21 +642,30 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     // left corner. Every check still passed because the quad fills the view,
     // and the one light check passed only because its radius covered the
     // corner too. A light aimed at the middle measured nothing.
-    const shootWith = async (options, light, { orthographic = false, at = [0.5, 0.5] } = {}) => {
+    // `points` reads several places from the one frame, as a list.
+    const shootWith = async (options, light, { orthographic = false, at = [0.5, 0.5], points = null } = {}) => {
       const scene = probe.createScene();
       const cam = new Camera({ fovY: 1.0, near: 0.1, orthographic });
       cam.position.set([0, 0, 2]);
       cam.target.set([0, 0, 0]);
       scene.add(await probe.load(buildFeatureGLB(options)));
-      // A function gets the scene to arrange as it likes; an object is one light.
-      if (typeof light === 'function') light(scene);
-      else if (light) scene.addLight(light);
+      // A function gets the scene to arrange as it likes, lights and all. An
+      // object is one light over the key light every other shot has.
+      if (typeof light === 'function') {
+        light(scene);
+      } else {
+        scene.addLight({ type: 'directional', direction: [-0.35, -0.55, -0.45], color: [1, 0.9375, 0.84375], intensity: 3.2 });
+        if (light) scene.addLight(light);
+      }
       probe.renderFrame(scene, cam);
       // Once per frame, before anything else awaits -- see rhi.readPixels.
       const pixels = await probe.rhi.readPixels();
       const { width, height } = probe.rhi;
-      const i = (Math.floor(at[1] * height) * width + Math.floor(at[0] * width)) * 4;
-      return [pixels[i], pixels[i + 1], pixels[i + 2]];
+      const read = ([x, y]) => {
+        const i = (Math.floor(y * height) * width + Math.floor(x * width)) * 4;
+        return [pixels[i], pixels[i + 1], pixels[i + 2]];
+      };
+      return points ? points.map(read) : read(at);
     };
     const shoot = (options) => shootWith(options, null);
 
@@ -702,6 +717,106 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 
       const onSet1 = await shoot({ imageURI: image, baseColorTexCoord: 1, uv0: LEFT, uv1: RIGHT });
       expect('texCoord 1 samples uv1', onSet1, blue(onSet1));
+
+      // KHR_texture_transform: the same red UVs, moved half a texture along u
+      // by the material, land in the blue texel. The importer's matrix is
+      // checked against the spec in Node; this is the shader applying it.
+      const moved = await shoot({ imageURI: image, uv0: LEFT, uv1: LEFT, baseColorTransform: { offset: [0.5, 0] } });
+      expect('a texture transform moves where the texture is sampled', moved, blue(moved));
+
+      {
+        // The material extensions, lit head-on by a point light so the
+        // highlight sits in the middle. Red only: the sky is pure green, so red
+        // is the light's alone.
+        const lamp = (scene) => scene.addLight({ position: [0, 0, 1], color: [1, 1, 1], intensity: 3, radius: 4 });
+        const dielectric = { baseColorFactor: [0.1, 0.1, 0.1, 1], metallicFactor: 0, roughnessFactor: 0.4 };
+        const shootExt = (materialExtensions, extra = {}) => shootWith({ ...dielectric, materialExtensions, ...extra }, lamp);
+        const [plain] = await shootExt(null);
+        const [denser] = await shootExt({ KHR_materials_ior: { ior: 3 } });
+        const [matte] = await shootExt({ KHR_materials_specular: { specularFactor: 0 } });
+        const [cyan] = await shootExt({ KHR_materials_specular: { specularColorFactor: [0, 1, 1] } });
+        // specularTexture's alpha is the strength: 0 everywhere, so no highlight,
+        // through the extension binding rather than the factor.
+        const [mapped] = await shootExt({ KHR_materials_specular: { specularTexture: { index: 0 } } }, {
+          extraImageURIs: [twoToneImageURI('rgba(255,255,255,0)', 'rgba(255,255,255,0)')],
+        });
+        const specular = `red ${plain} plain, ${denser} at ior 3, ${matte} at specular 0, `
+          + `${cyan} tinted cyan, ${mapped} with a zero specular map`;
+        if (!(denser > plain + 20 && matte < plain - 20 && cyan < plain - 20 && Math.abs(mapped - matte) <= 2)) {
+          throw new Error(`ior and specular: ${specular}`);
+        }
+        results.push(`ior and specular (${specular})`);
+
+        // A clear coat over a fully rough base: the lamp's sharp highlight is
+        // the coat's alone. A normal map tilting the coat 45 degrees moves the
+        // highlight off the middle, so the coat's own normal is what it used.
+        const roughBase = { baseColorFactor: [0.1, 0.1, 0.1, 1], metallicFactor: 0, roughnessFactor: 1 };
+        const shootRough = (materialExtensions, extra = {}) => shootWith({ ...roughBase, materialExtensions, ...extra }, lamp);
+        const bare = await shootRough(null);
+        const [coated] = await shootRough({ KHR_materials_clearcoat: { clearcoatFactor: 1 } });
+        const [tilted] = await shootRough({ KHR_materials_clearcoat: { clearcoatFactor: 1, clearcoatNormalTexture: { index: 0 } } }, {
+          extraImageURIs: [twoToneImageURI('rgb(218,128,218)', 'rgb(218,128,218)')],
+        });
+        const coat = `red ${bare[0]} bare, ${coated} coated, ${tilted} with the coat's normal tilted`;
+        if (!(coated > bare[0] + 60 && tilted < coated - 60)) throw new Error(`clearcoat: ${coat}`);
+        results.push(`clearcoat (${coat})`);
+
+        // Sheen in green, lit by the green sky: its rim brightens green and
+        // takes its share of the base's red. Sheen roughness 0 from the
+        // texture's alpha reflects nothing, and leaves the base alone.
+        const sheenOf = (extra) => ({ KHR_materials_sheen: { sheenColorFactor: [0, 1, 0], sheenRoughnessFactor: 1, ...extra } });
+        const sheen = await shootRough(sheenOf({}));
+        const smooth = await shootRough(sheenOf({ sheenRoughnessTexture: { index: 0 } }), {
+          extraImageURIs: [twoToneImageURI('rgba(255,255,255,0)', 'rgba(255,255,255,0)')],
+        });
+        const sheenText = `${show(bare)} bare, ${show(sheen)} with sheen, ${show(smooth)} at sheen roughness 0`;
+        if (!(sheen[1] > bare[1] + 20 && sheen[0] < bare[0] && smooth.every((c, k) => c === bare[k]))) {
+          throw new Error(`sheen: ${sheenText}`);
+        }
+        results.push(`sheen (${sheenText})`);
+
+        // Anisotropy stretches the lamp's highlight along the tangent -- u,
+        // which runs along x on this quad -- and a quarter turn stretches it
+        // along y instead. Read beside the middle, a step along each axis.
+        const glossy = { baseColorFactor: [0.05, 0.05, 0.05, 1], metallicFactor: 0, roughnessFactor: 0.3 };
+        const beside = { points: [[0.62, 0.5], [0.5, 0.62]] };
+        const stretched = async (rotation) => (await shootWith({
+          ...glossy, materialExtensions: { KHR_materials_anisotropy: { anisotropyStrength: 1, anisotropyRotation: rotation } },
+        }, lamp, beside)).map((p) => p[0]);
+        const [isoX, isoY] = (await shootWith(glossy, lamp, beside)).map((p) => p[0]);
+        const [alongX, acrossY] = await stretched(0);
+        const [acrossX, alongY] = await stretched(Math.PI / 2);
+        const aniso = `beside the highlight, x and y: ${isoX} ${isoY} plain, ${alongX} ${acrossY} along u, ${acrossX} ${alongY} turned`;
+        if (!(alongX > isoX + 30 && acrossY < isoY - 15 && alongY > isoY + 15 && acrossX < isoX - 5)) {
+          throw new Error(`anisotropy: ${aniso}`);
+        }
+        results.push(`anisotropy (${aniso})`);
+
+        // A 400 nm film colours a white highlight; a film of 0 nm leaves it as
+        // the plain surface has it. Red against blue, which the green sky adds
+        // nothing to.
+        const film = (nm) => shootWith({
+          ...glossy, materialExtensions: { KHR_materials_iridescence: { iridescenceFactor: 1, iridescenceThicknessMaximum: nm } },
+        }, lamp);
+        const plainHighlight = await shootWith(glossy, lamp);
+        const tinted = await film(400);
+        const bareFilm = await film(0);
+        const redBlue = ([r, , b]) => Math.abs(r - b);
+        const irid = `${show(plainHighlight)} plain, ${show(tinted)} at 400 nm, ${show(bareFilm)} at 0 nm`;
+        if (!(redBlue(tinted) > 30 && redBlue(bareFilm) <= 3 && bareFilm.every((c, k) => Math.abs(c - plainHighlight[k]) <= 8))) {
+          throw new Error(`iridescence: ${irid}`);
+        }
+        results.push(`iridescence (${irid})`);
+
+        // KHR_materials_unlit: the base colour, whatever the light.
+        const unlitQuad = { baseColorFactor: [0.5, 0.25, 0.125, 1], materialExtensions: { KHR_materials_unlit: {} } };
+        const unlitDark = await shootWith(unlitQuad, () => {});
+        const unlitLit = await shootWith(unlitQuad, lamp);
+        if (!(red(unlitDark) && unlitDark.every((c, k) => c === unlitLit[k]))) {
+          throw new Error(`unlit: ${show(unlitDark)} in the dark, ${show(unlitLit)} under a lamp`);
+        }
+        results.push('an unlit surface ignores the light');
+      }
 
       // A negative scale flips the winding, which is why there is a mirrored
       // pipeline variant. Seven CPU checks and no draws until now: if the
@@ -796,21 +911,19 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       }
       results.push('a light imported from glTF lights the surface');
 
-      // EVERY directional light lights, not only the one with the shadow. The
-      // bright one faces away from the quad, so it takes the shadow slot and
-      // adds nothing; the dim one faces it and can only reach the surface
-      // through the loop over the rest. Before, it would have been ignored.
+      // EVERY directional light lights, whatever else there is. The bright one
+      // faces away from the quad and adds nothing; the dim one faces it, and
+      // one that does not cast lights as well as one that does.
       const grey = { baseColorFactor: [0.6, 0.6, 0.6, 1] };
-      const noSun = await shootWith(grey, (scene) => scene.sun.destroy());
+      const dark = await shootWith(grey, () => {});
       const fill = await shootWith(grey, (scene) => {
-        scene.sun.destroy();
         scene.addLight({ type: 'directional', direction: [0, 0, 1], intensity: 20 });   // away
-        scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity: 2 });   // at it
+        scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity: 2, castShadow: false });   // at it
       });
-      if (!(fill[0] > noSun[0] + 20)) {
-        throw new Error(`a directional light without the shadow lit nothing: ${show(noSun)} -> ${show(fill)}`);
+      if (!(fill[0] > dark[0] + 20)) {
+        throw new Error(`a directional light that casts no shadow lit nothing: ${show(dark)} -> ${show(fill)}`);
       }
-      results.push('a directional light without the shadow still lights');
+      results.push('a directional light that casts no shadow still lights');
 
       // A SHADOW IS CAST -- nothing checked this, and for as long as the
       // cascade near plane was clamped in front of a light eye at the world
@@ -821,8 +934,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       // side, past the blocker, where its shadow falls.
       const shadowed = async (withBlocker, blocker = { baseColorFactor: [0.8, 0.8, 0.8, 1] }) => {
         const scene = probe.createScene();
-        scene.sun.setDirection(0, 0, -1);
-        scene.sun.setLight({ intensity: 3 });
+        scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity: 3 });
         scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] })));
         if (withBlocker) {
           scene.add(await probe.load(buildFeatureGLB({ ...blocker, nodeScale: [0.25, 0.25, 1] })))
@@ -867,8 +979,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       // pixel is the peak of the lobe.
       const highlight = async (roughnessFactor, intensity) => {
         const scene = probe.createScene();
-        scene.sun.setDirection(0, 0, -1);
-        scene.sun.setLight({ intensity });
+        scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity });
         scene.add(await probe.load(buildFeatureGLB({
           baseColorFactor: [0.5, 0.5, 0.5, 1], metallicFactor: 1, roughnessFactor,
         })));
@@ -912,6 +1023,1022 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
 
     return `${results.length} features drawn and read back`;
+  });
+
+  await step('two directional lights each cast their own shadow', async () => {
+    // A blocker over the ground under two directional lights slanting in from
+    // opposite sides: its two shadows fall either side of it, one per light,
+    // each from that light's own cascades. Turning one light's castShadow off
+    // must take away its shadow and leave the other.
+    const ground = await engine.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], roughnessFactor: 0.9 }));
+    const block = await engine.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.2, 0.2, 1] }));
+    const cam = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    cam.position.set([0, 6, 0.01]);
+    cam.target.set([0, 0, 0]);
+    const shot = async (castRight, castLeft) => {
+      const scene = engine.createScene();
+      scene.add(ground).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
+      scene.add(block).setRotationAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
+      scene.addLight({ type: 'directional', direction: [1, -1, 0], intensity: 5, castShadow: castRight });  // shadow at +x
+      scene.addLight({ type: 'directional', direction: [-1, -1, 0], intensity: 5, castShadow: castLeft }); // shadow at -x
+      engine.renderFrame(scene, cam);
+      const pixels = await engine.rhi.readPixels();
+      const { width, height } = engine.rhi;
+      const at = ([x, y, z]) => {
+        const m = cam.viewProjection;
+        const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+        const px = Math.round(((m[0] * x + m[4] * y + m[8] * z + m[12]) / w * 0.5 + 0.5) * width);
+        const py = Math.round((0.5 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w * 0.5) * height);
+        const i = (py * width + px) * 4;
+        return 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
+      };
+      return { right: at([1, 0, 0]), left: at([-1, 0, 0]), casting: engine.renderer.shadows.shadowedCount };
+    };
+    // Each point against itself with nothing casting: a shadow removes one of
+    // two lights there, and the tonemap keeps that a modest step.
+    const none = await shot(false, false);
+    const both = await shot(true, true);
+    const one = await shot(true, false);
+    if (none.casting !== 0 || both.casting !== 2 || one.casting !== 1) {
+      throw new Error(`${none.casting}, ${both.casting} and ${one.casting} lights casting, expected 0, 2 and 1`);
+    }
+    if (!(both.right < none.right - 8 && both.left < none.left - 8)) {
+      throw new Error(`both shadows should fall: right ${none.right.toFixed(0)} -> ${both.right.toFixed(0)}, left ${none.left.toFixed(0)} -> ${both.left.toFixed(0)}`);
+    }
+    if (Math.abs(one.left - none.left) > 2 || Math.abs(one.right - both.right) > 2) {
+      throw new Error(`one light's shadow off: left ${one.left.toFixed(0)} (unshadowed ${none.left.toFixed(0)}), right ${one.right.toFixed(0)} (shadowed ${both.right.toFixed(0)})`);
+    }
+    return `right ${none.right.toFixed(0)} -> ${both.right.toFixed(0)}, left ${none.left.toFixed(0)} -> ${both.left.toFixed(0)}; the left light's off, only its shadow goes`;
+  });
+
+
+  await step('point and spot lights cast shadows when asked, and only where the caster is', async () => {
+    // A blocker over the ground, one light above it and no sun, from straight
+    // above. The ground under the blocker must darken when the light casts,
+    // and the ground beside it must not change. The three cases are the three
+    // shapes a view can take: a point light's cube, a narrow spot's single
+    // frustum, and a spot wider than a cube face, which takes the cube.
+    const ground = await engine.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], roughnessFactor: 0.9 }));
+    const block = await engine.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.2, 0.2, 1] }));
+    const cam = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    cam.position.set([0, 6, 0.01]);
+    cam.target.set([0, 0, 0]);
+    const brightness = async (light) => {
+      const scene = engine.createScene();
+      scene.add(ground).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
+      // Facing down, so the light sees its back: the shadow pass culls fronts.
+      scene.add(block).setRotationAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
+      scene.addLight({ position: [0, 3, 0], intensity: 40, radius: 12, ...light });
+      engine.renderFrame(scene, cam);
+      const pixels = await engine.rhi.readPixels();
+      const { width, height } = engine.rhi;
+      const at = (fx) => {
+        const i = (Math.floor(height / 2) * width + Math.floor(fx * width)) * 4;
+        return 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
+      };
+      return { under: at(0.5), beside: at(0.7), views: engine.renderer.shadows.localCount };
+    };
+    const cases = [
+      ['point', { type: 'point' }, 6],
+      ['narrow spot', { type: 'spot', direction: [0, -1, 0], outerAngle: 0.6, innerAngle: 0.3 }, 1],
+      ['wide spot', { type: 'spot', direction: [0, -1, 0], outerAngle: 1.1, innerAngle: 0.5 }, 6],
+    ];
+    const report = [];
+    for (const [name, light, expectedViews] of cases) {
+      const lit = await brightness(light);
+      const shadowed = await brightness({ ...light, castShadow: true });
+      if (!(shadowed.under < lit.under - 20)) {
+        throw new Error(`${name}: under the blocker ${lit.under.toFixed(0)} -> ${shadowed.under.toFixed(0)}, no shadow`);
+      }
+      if (Math.abs(shadowed.beside - lit.beside) > 2) {
+        throw new Error(`${name}: beside the blocker ${lit.beside.toFixed(0)} -> ${shadowed.beside.toFixed(0)}, shadow where nothing casts`);
+      }
+      if (shadowed.views !== expectedViews || lit.views !== 0) {
+        throw new Error(`${name}: ${shadowed.views} views casting and ${lit.views} not, expected ${expectedViews} and 0`);
+      }
+      report.push(`${name} ${lit.under.toFixed(0)} -> ${shadowed.under.toFixed(0)} (${expectedViews} views)`);
+    }
+    return report.join(', ');
+  });
+
+
+  await step('an equirectangular map becomes the sky, the right way round', async () => {
+    // Above the horizon: green on the half of the panorama centred on +X (the
+    // image's middle, three.js's layout), red on the other half. Below: blue.
+    // Looking each way must see what the map put there, through the bake.
+    const width = 64, height = 32;
+    const data = new Float32Array(width * height * 3);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const o = (y * width + x) * 3;
+        const u = (x + 0.5) / width;
+        if (y >= height / 2) data[o + 2] = 1;
+        else if (u > 0.25 && u < 0.75) data[o + 1] = 1;
+        else data[o] = 1;
+      }
+    }
+    const environment = new Environment(engine.rhi, { map: { width, height, data } });
+    if (environment.environment.width !== width / 4) {
+      throw new Error(`a ${width}-wide map baked a ${environment.environment.width} cube, expected ${width / 4}`);
+    }
+    const scene = engine.createScene({ environment });
+    const look = async (target) => {
+      const cam = new Camera({ fovY: 0.5, near: 0.1 });
+      cam.position.set([0, 0, 0]);
+      cam.target.set(target);
+      engine.renderFrame(scene, cam);
+      const pixels = await engine.rhi.readPixels();
+      const { width: w, height: h } = engine.rhi;
+      const i = (Math.floor(h / 2) * w + Math.floor(w / 2)) * 4;
+      return [pixels[i], pixels[i + 1], pixels[i + 2]];
+    };
+    const dominant = ([r, g, b]) => (r > g && r > b ? 'red' : g > b ? 'green' : 'blue');
+    const seen = {
+      '+X': dominant(await look([1, 0.4, 0])),
+      '-X': dominant(await look([-1, 0.4, 0])),
+      down: dominant(await look([0.01, -1, 0])),
+    };
+    environment.destroy();
+    if (seen['+X'] !== 'green' || seen['-X'] !== 'red' || seen.down !== 'blue') {
+      throw new Error(`looking +X, -X and down saw ${seen['+X']}, ${seen['-X']}, ${seen.down}`);
+    }
+    return 'green along +X, red behind, blue below';
+  });
+
+
+  await step('ambient occlusion darkens a corner and leaves open floor alone', async () => {
+    // A floor meeting a wall, lit by the sky alone, rendered by an engine with
+    // occlusion and one without. Where the wall meets the floor, the floor
+    // sees half the sky and must come out darker. Open floor two radii from
+    // anything sees all of it and must not change -- an integral that reads
+    // the same as an unoccluded surface there is the whole claim of GTAO.
+    const brightness = async (ao, points) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '320px';
+      canvas.style.height = '240px';
+      document.body.appendChild(canvas);
+      const probe = await Winding.create(canvas, { ao });
+      probe.rhi.resize(320, 240);
+      const scene = probe.createScene();
+      const quad = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], roughnessFactor: 1 }));
+      scene.add(quad).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
+      scene.add(quad).setScale(4, 2, 1).setPosition(0, 3.2, -1.2);
+      const cam = new Camera({ fovY: 1.0, near: 0.1 });
+      cam.position.set([0, 1.2, 4]);
+      cam.target.set([0, 0, -1]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      const values = points.map(([x, y, z]) => {
+        const m = cam.viewProjection;
+        const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+        const px = Math.round(((m[0] * x + m[4] * y + m[8] * z + m[12]) / w * 0.5 + 0.5) * width);
+        const py = Math.round((0.5 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w * 0.5) * height);
+        const i = (py * width + px) * 4;
+        return 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
+      });
+      probe.destroy();
+      canvas.remove();
+      return values;
+    };
+    // At the foot of the wall, and open floor well in front of it.
+    const points = [[0, 0, -1.1], [0, 0, 2.5]];
+    const [cornerOff, openOff] = await brightness(false, points);
+    const [cornerOn, openOn] = await brightness(true, points);
+    if (!(cornerOn < cornerOff - 3)) {
+      throw new Error(`the corner went ${cornerOff.toFixed(1)} -> ${cornerOn.toFixed(1)}; occlusion should darken it`);
+    }
+    if (Math.abs(openOn - openOff) > 1) {
+      throw new Error(`open floor went ${openOff.toFixed(1)} -> ${openOn.toFixed(1)}; nothing occludes it`);
+    }
+    return `corner ${cornerOff.toFixed(0)} -> ${cornerOn.toFixed(0)}, open floor ${openOff.toFixed(0)} -> ${openOn.toFixed(0)}`;
+  });
+
+
+  await step('antialiasing softens a hard edge, and off leaves it hard', async () => {
+    // A flat quad turned a little against a flat sky, unlit so the edge is
+    // one colour meeting another. Without antialiasing every pixel along it
+    // is one or the other; FXAA blends the ones the edge crosses.
+    const SKY = [0, 0, 0];
+    const blended = async (antialias) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '320px';
+      canvas.style.height = '240px';
+      document.body.appendChild(canvas);
+      const probe = await Winding.create(canvas, {
+        antialias,
+        // No bloom, whose halo would blend the edge either way, and a quad bright
+        // enough to sit well clear of the band counted as between.
+        post: { strength: 0 },
+        exposure: 4,
+        environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      });
+      probe.rhi.resize(320, 240);
+      const scene = probe.createScene();
+      scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
+        .setRotationAxisAngle([0, 0, 1], 0.3).setScale(0.5, 0.5, 1);
+      const cam = new Camera({ fovY: 1.0, near: 0.1 });
+      cam.position.set([0, 0, 3]);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      let between = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        const g = pixels[i + 1];
+        if (g > 25 && g < 230) between++;
+      }
+      probe.destroy();
+      canvas.remove();
+      return between;
+    };
+    const hard = await blended(false);
+    const soft = await blended(true);
+    if (!(soft > hard * 3 && soft > 100)) {
+      throw new Error(`pixels between the two colours: ${hard} without, ${soft} with antialiasing`);
+    }
+    return `${hard} edge pixels between the two colours without, ${soft} with`;
+  });
+
+  await step('grading: saturation, a white balance that neutralises its light, and a .cube LUT', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+      antialias: false,
+    });
+    probe.rhi.device.pushErrorScope('validation');
+    const { planckianXY } = await import('../src/render/grading.js');
+    // A tungsten light's colour in linear sRGB, from its chromaticity, brightest channel 0.5.
+    const [x, y] = planckianXY(3200);
+    const X = x / y;
+    const Z = (1 - x - y) / y;
+    const rgb = [3.2404542 * X - 1.5371385 - 0.4985314 * Z, -0.9692660 * X + 1.8760108 + 0.0415560 * Z, 0.0556434 * X - 0.2040259 + 1.0572252 * Z];
+    const peak = Math.max(...rgb);
+    const lamp = [...rgb.map((c) => (0.5 * c) / peak), 1];
+    const shot = async (color, grading) => {
+      probe.grading = grading;
+      const scene = probe.createScene();
+      scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: color, materialExtensions: { KHR_materials_unlit: {} } })));
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, 2]);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      const i = ((height >> 1) * width + (width >> 1)) * 4;
+      return [pixels[i], pixels[i + 1], pixels[i + 2]];
+    };
+    const orange = [0.8, 0.4, 0.1, 1];
+    const plain = await shot(orange, null);
+    const grey = await shot(orange, { saturation: 0 });
+    const tungsten = await shot(lamp, null);
+    const balanced = await shot(lamp, { whiteBalance: 3200 });
+    const cube = (f) => `LUT_3D_SIZE 2\n${[0, 1].flatMap((b) => [0, 1].flatMap((g) => [0, 1].map((r) => f(r, g, b).join(' ')))).join('\n')}`;
+    const identity = await probe.loadLUT(cube((r, g, b) => [r, g, b]));
+    const invert = await probe.loadLUT(cube((r, g, b) => [1 - r, 1 - g, 1 - b]));
+    const same = await shot(orange, { lut: identity });
+    const inverted = await shot(orange, { lut: invert });
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+    const show = (p) => `rgb(${p.join(',')})`;
+    const spread = (p) => Math.max(...p) - Math.min(...p);
+    const report = `${show(plain)} as is, ${show(grey)} at saturation 0; a 3200 K light ${show(tungsten)}, `
+      + `${show(balanced)} balanced to it; ${show(same)} through an identity LUT, ${show(inverted)} through an inverting one`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const ok = spread(grey) <= 1 && spread(tungsten) > 60 && spread(balanced) <= 4
+      && same.every((c, k) => Math.abs(c - plain[k]) <= 1) && inverted.every((c, k) => Math.abs(c + plain[k] - 255) <= 2);
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('depth of field blurs by the lens: sharp at the focus distance, spread away from it', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+      antialias: false,
+    });
+    probe.rhi.device.pushErrorScope('validation');
+    const quad = await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], materialExtensions: { KHR_materials_unlit: {} } }));
+    const { lensCoefficients } = await import('../src/render/dof.js');
+    // The quad's right edge along the middle row, the quad 5 m away.
+    const edge = async (dof) => {
+      probe.renderer.dof = dof;
+      const scene = probe.createScene();
+      scene.add(quad).setPosition(-1.6, 0, 0);
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, 5]);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      let between = 0;
+      for (let x = 0; x < width; x++) {
+        const v = pixels[((height >> 1) * width + x) * 4];
+        if (v > 20 && v < 220) between++;
+      }
+      return between;
+    };
+    const lens = { fStop: 0.2, focusDistance: 5 };
+    const none = await edge(null);
+    const focused = await edge(lens);
+    const near = { fStop: 0.2, focusDistance: 0.5 };
+    const blurred = await edge(near);
+    // What the lens says the quad's disc is, focused at 0.5: scale (1 - 0.5 / 5).
+    const disc = lensCoefficients(near, 1, probe.rhi.height).scale * (1 - 0.5 / 5);
+    const error = await probe.rhi.device.popErrorScope();
+    probe.renderer.dof = null;
+    probe.destroy();
+    canvas.remove();
+    const report = `edge pixels: ${none} without, ${focused} focused on it, ${blurred} focused at 0.5 m, `
+      + `where the lens gives a ${disc.toFixed(0)} px disc`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    if (!(focused <= none + 2 && blurred > disc * 0.4 && blurred < disc * 1.6)) throw new Error(report);
+    return report;
+  });
+
+  await step('text stays sharp magnified, lies in its plane when asked, and survives its atlas growing', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+      antialias: false,
+    });
+    probe.rhi.device.pushErrorScope('validation');
+    const font = await probe.loadFont('128px sans-serif');
+    const red = [1, 0, 0, 1];
+    const shot = async (build, { from = [0, 0, 3] } = {}) => {
+      const scene = probe.createScene();
+      build(scene);
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set(from);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      let lit = 0;
+      let partial = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if (pixels[i] > 200) lit++;
+        else if (pixels[i] > 30) partial++;
+      }
+      const row = [...Array(width).keys()].map((x) => pixels[((height >> 1) * width + x) * 4]);
+      return { lit, partial, row, green: pixels[((height >> 1) * width + (width >> 1)) * 4 + 1] };
+    };
+    // An I, three units tall three units away: far past its 128 px raster.
+    const big = await shot((s) => s.addText({ font, text: 'I', size: 3, color: red }));
+    // Its edges along the middle row: every pixel between dark and full.
+    const ramp = big.row.filter((v) => v > 30 && v <= 200).length;
+    const flat = await shot((s) => s.addText({ font, text: 'I', size: 1, color: red, facing: 'plane' })
+      .setRotationAxisAngle([0, 1, 0], Math.PI / 2));
+    const facing = await shot((s) => s.addText({ font, text: 'I', size: 1, color: red })
+      .setRotationAxisAngle([0, 1, 0], Math.PI / 2));
+    // Enough glyphs at 128 px to overflow a 512 atlas, then the I again.
+    const before = big.lit;
+    font.ensure('ABCDEFGHJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789');
+    const atlas = font.texture.width;
+    const after = (await shot((s) => s.addText({ font, text: 'I', size: 3, color: red }))).lit;
+    const error = await probe.rhi.device.popErrorScope();
+    font.destroy();
+    probe.destroy();
+    canvas.remove();
+
+    const report = `a magnified I: ${big.lit} px full, ${ramp} px of edge across its middle row; `
+      + `${flat.lit + flat.partial} px lying edge-on in its plane, ${facing.lit} px facing; `
+      + `after the atlas grew to ${atlas}, ${after} px (was ${before})`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const ok = big.lit > 1000 && big.green < 20 && ramp <= 4
+      && flat.lit + flat.partial === 0 && facing.lit > 100
+      && atlas > 512 && after === before;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('a decal paints the base colour in its box, is lit as the surface is, only from the side it faces, and the last added on top', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+    });
+    probe.rhi.device.pushErrorScope('validation');
+    // Red on the left of the image, clear on the right.
+    const image = await probe.loadTexture(twoToneImageURI('#ff0000', 'rgba(255,0,0,0)'));
+    const green = await probe.loadTexture(twoToneImageURI('#00ff00', 'rgba(0,255,0,0)'));
+    const floor = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0 }));
+    const look = async ({ decal = true, fromBelow = false, intensity = 3, layers = [image] } = {}) => {
+      const scene = probe.createScene();
+      scene.add(floor).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(3, 3, 1);
+      scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity });
+      // A 2 x 2 box, projecting straight down -- or straight up, from below.
+      for (const texture of decal ? layers : []) {
+        scene.addDecal({ texture, size: [2, 2, 1] })
+          .setRotationAxisAngle([1, 0, 0], fromBelow ? Math.PI / 2 : -Math.PI / 2);
+      }
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 6, 0.01]);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      // The first frame with decals starts their pipelines; draw once they are ready.
+      await probe.renderer._variantSets.get(2)?.building;
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      const at = (x) => [0, 1, 2].map((c) => pixels[((height >> 1) * width + Math.floor(x * width)) * 4 + c]);
+      // World x -0.44, +0.44 and +1.4: the red half, the clear half, outside the box.
+      return { red: at(0.45), clear: at(0.55), outside: at(0.8) };
+    };
+    const bare = await look({ decal: false });
+    const painted = await look();
+    const dim = await look({ intensity: 1 });
+    const below = await look({ fromBelow: true });
+    // Two decals in one box: the one added last is on top, every frame,
+    // whatever order the cluster pass listed them in.
+    const greenLast = await look({ layers: [image, green] });
+    const redLast = await look({ layers: [green, image] });
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+    const show = (p) => `rgb(${p.join(',')})`;
+    const report = `floor ${show(bare.red)}; painted ${show(painted.red)}, ${show(painted.clear)} where clear, `
+      + `${show(painted.outside)} outside; ${show(dim.red)} under a dimmer light; ${show(below.red)} projected from below; `
+      + `${show(greenLast.red)} with green added last, ${show(redLast.red)} with red`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const same = (a, b) => a.every((c, k) => Math.abs(c - b[k]) <= 2);
+    const ok = painted.red[0] > painted.red[1] + 80 && same(painted.clear, bare.clear) && same(painted.outside, bare.outside)
+      && dim.red[0] < painted.red[0] - 30 && same(below.red, bare.red)
+      && greenLast.red[1] > greenLast.red[0] + 80 && redLast.red[0] > redLast.red[1] + 80;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('particles follow their solved paths at any frame rate, and are drawn while they live', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+    });
+    probe.rhi.device.pushErrorScope('validation');
+    const cam = new Camera({ fovY: 1, near: 0.1 });
+    cam.position.set([0, 0, 6]);
+    cam.target.set([0, 0, 0]);
+
+    /** Every live particle of one emitter, read back from the pool. */
+    const read = async (node) => {
+      const system = probe.renderer.particles;
+      const ring = system.rings.get(node.entity);
+      const bytes = ring.capacity * 32;
+      const buffer = probe.rhi.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = probe.rhi.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(system.pool, ring.offset * 32, buffer, 0, bytes);
+      probe.rhi.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const f = new Float32Array(buffer.getMappedRange().slice(0));
+      buffer.unmap();
+      buffer.destroy();
+      const live = [];
+      for (let i = 0; i < ring.capacity; i++) {
+        const o = i * 8;
+        if (f[o + 3] < f[o + 7]) live.push({ position: [f[o], f[o + 1], f[o + 2]], age: f[o + 3], velocity: [f[o + 4], f[o + 5], f[o + 6]] });
+      }
+      return live;
+    };
+    /** Burst 32 at time 0, then run `steps` frames of `dt`. */
+    const flight = async (options, steps, dt) => {
+      const scene = probe.createScene();
+      const node = scene.addEmitter({ lifetime: 10, size: 0.1, ...options });
+      scene.burst(node, 32);
+      probe.renderFrame(scene, cam);
+      for (let k = 0; k < steps; k++) {
+        scene.advanceParticles(dt);
+        probe.renderFrame(scene, cam);
+      }
+      return read(node);
+    };
+    const worst = (live, expect) => Math.max(...live.map((p) => Math.abs(p.position[1] - expect)));
+
+    // Thrown up at 2 under gravity: y = 2t - 9.81 t^2 / 2 at t = 0.5.
+    const thrown = await flight({ speed: 2, acceleration: [0, -9.81, 0] }, 5, 0.1);
+    const fine = await flight({ speed: 2, acceleration: [0, -9.81, 0] }, 50, 0.01);
+    const ballistic = 2 * 0.5 - 0.5 * 9.81 * 0.25;
+    // Under drag 1 alone: y = 2 (1 - e^-t).
+    const dragged = await flight({ speed: 2, drag: 1 }, 5, 0.1);
+    const coasted = 2 * (1 - Math.exp(-0.5));
+    // A cone of pi/4 about +Y, and births anywhere in a ball of radius 1.
+    const coned = await flight({ speed: 1, spread: Math.PI / 4 }, 0, 0);
+    const widest = Math.max(...coned.map((p) => Math.acos(Math.min(1, p.velocity[1] / Math.hypot(...p.velocity)))));
+    const balled = await flight({ radius: 1 }, 0, 0);
+    const farthest = Math.max(...balled.map((p) => Math.hypot(...p.position)));
+
+    // A stream: rate 100 for half a second is 50 particles.
+    const scene = probe.createScene();
+    const stream = scene.addEmitter({ rate: 100, lifetime: 1, size: 0.3, speed: 0.5, color: [4, 4, 4, 1] });
+    // The canvas first: its image lasts only until something else awaits.
+    const lit = async () => {
+      const pixels = await probe.rhi.readPixels();
+      let n = 0;
+      for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 60) n++;
+      return n;
+    };
+    for (let k = 0; k < 5; k++) { scene.advanceParticles(0.1); probe.renderFrame(scene, cam); }
+    const drawn = await lit();
+    const alive = (await read(stream)).length;
+    scene.setEmitter(stream, { rate: 0 });
+    for (let k = 0; k < 12; k++) { scene.advanceParticles(0.1); probe.renderFrame(scene, cam); }
+    const after = await lit();
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const report = `y off by ${worst(thrown, ballistic).toExponential(1)} thrown at 10 fps, `
+      + `${worst(fine, ballistic).toExponential(1)} at 100 fps; ${worst(dragged, coasted).toExponential(1)} under drag; `
+      + `widest ${(widest * 180 / Math.PI).toFixed(1)} deg in a 45 deg cone; farthest ${farthest.toFixed(3)} in a ball of 1; `
+      + `${alive} alive at rate 100 for 0.5 s; ${drawn} px drawn, ${after} after their lifetime`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const ok = thrown.length === 32 && worst(thrown, ballistic) < 1e-4 && worst(fine, ballistic) < 1e-4
+      && worst(dragged, coasted) < 1e-4 && widest <= Math.PI / 4 + 1e-3 && farthest <= 1 + 1e-4
+      && alive === 50 && drawn > 50 && after === 0;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('sprites face the camera, keep their pixel size, hide behind geometry, and blend in order', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+    });
+    probe.rhi.device.pushErrorScope('validation');
+    const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
+    const halfClear = await probe.loadTexture(twoToneImageURI('rgba(255,255,255,0)', '#ffffff'));
+    const wall = await probe.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.2, 0.2, 1], materialExtensions: { KHR_materials_unlit: {} } }));
+    const shot = async (build, { from = [0, 0, 0], to = [0, 0, -1] } = {}) => {
+      const scene = probe.createScene();
+      build(scene);
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set(from);
+      cam.target.set(to);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      return {
+        middle: [0, 1, 2].map((c) => pixels[((height >> 1) * width + (width >> 1)) * 4 + c]),
+        at: (x) => [0, 1, 2].map((c) => pixels[((height >> 1) * width + Math.floor(x * width)) * 4 + c]),
+        redRow: [...Array(width).keys()].filter((x) => pixels[((height >> 1) * width + x) * 4] > 100).length,
+        lit: Array.from({ length: pixels.length / 4 }, (_, i) => pixels[i * 4] + pixels[i * 4 + 1] > 100).filter(Boolean).length,
+      };
+    };
+    const red = [1, 0, 0, 1];
+    const plain = await shot((s) => s.addSprite({ texture: white, color: red, position: [0, 0, -3] }));
+    const pixels = await shot((s) => s.addSprite({ texture: white, color: red, position: [0, 0, -30], pixels: true, size: [40, 40] }));
+    const hidden = await shot((s) => {
+      s.addSprite({ texture: white, color: red, position: [0, 0, -5] });
+      s.add(wall).setPosition(0, 0, -3);
+    });
+    const order = async (nearFirst) => (await shot((s) => {
+      const near = () => s.addSprite({ texture: white, color: [0, 1, 0, 0.5], position: [0, 0, -2] });
+      const far = () => s.addSprite({ texture: white, color: red, position: [0, 0, -4] });
+      if (nearFirst) { near(); far(); } else { far(); near(); }
+    })).middle;
+    const [inOrder, reversed] = [await order(false), await order(true)];
+    const additive = await shot((s) => {
+      s.add(wall).setPosition(0, 0, -4);
+      s.addSprite({ texture: white, color: red, position: [0, 0, -3], blend: 'additive' });
+    });
+    // Seen from above: facing the camera it shows its face, standing upright
+    // it shows its edge.
+    const above = { from: [0, 5, 0.001], to: [0, 0, 0] };
+    const facing = await shot((s) => s.addSprite({ texture: white, color: red }), above);
+    const upright = await shot((s) => s.addSprite({ texture: white, color: red, facing: 'upright' }), above);
+    const cutout = await shot((s) => s.addSprite({ texture: halfClear, color: red, position: [0, 0, -2], blend: 'cutout' }));
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const show = (p) => `rgb(${p.join(',')})`;
+    const report = `${show(plain.middle)} plain; ${pixels.redRow} px wide at 40 px; ${show(hidden.middle)} behind a wall; `
+      + `${show(inOrder)} and ${show(reversed)} for two alpha sprites either order; ${show(additive.middle)} added to grey; `
+      + `${facing.lit} px facing vs ${upright.lit} upright from above; cutout ${show(cutout.at(0.45))} | ${show(cutout.at(0.55))}`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const ok = plain.middle[0] > 200 && plain.middle[1] < 20
+      && Math.abs(pixels.redRow - 40) <= 1
+      && Math.abs(hidden.middle[0] - hidden.middle[1]) <= 3
+      && inOrder.every((c, k) => Math.abs(c - reversed[k]) <= 1) && inOrder[1] > 100 && inOrder[0] > 100
+      && additive.middle[0] > additive.middle[1] + 60 && additive.middle[1] > 40
+      && upright.lit * 4 < facing.lit
+      && cutout.at(0.45)[0] < 20 && cutout.at(0.55)[0] > 200;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('a reflection probe captures the room the right way round, and a mirror reflects it', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    probe.rhi.device.pushErrorScope('validation');
+    const unlit = (color) => probe.load(buildFeatureGLB({
+      baseColorFactor: color, materialExtensions: { KHR_materials_unlit: {} },
+    }));
+    const [red, green, blue] = await Promise.all([[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]].map(unlit));
+    // A red wall two units along +X, facing back at the origin; green on it
+    // above the middle, blue on it toward +Z.
+    const room = () => {
+      const scene = probe.createScene();
+      const facing = (node) => node.setRotationAxisAngle([0, 1, 0], -Math.PI / 2);
+      facing(scene.add(red)).setPosition(2, 0, 0);
+      facing(scene.add(green)).setPosition(1.9, 0.8, 0).setScale(0.15, 0.15, 1);
+      facing(scene.add(blue)).setPosition(1.9, 0, 0.8).setScale(0.15, 0.15, 1);
+      return scene;
+    };
+
+    // 1. The capture itself, read back from the probe array: face 0 is +X.
+    const scene = room();
+    scene.addReflectionProbe({ min: [-3, -3, -3], max: [3, 3, 3] });
+    await probe.captureReflectionProbes(scene);
+    const set = probe.renderer._probeSets.get(scene);
+    const size = set.size;
+    const readback = probe.rhi.device.createBuffer({ size: size * size * 8 * 2, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = probe.rhi.device.createCommandEncoder();
+    encoder.copyTextureToBuffer(
+      { texture: set.texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
+      { buffer: readback, bytesPerRow: size * 8, rowsPerImage: size }, [size, size, 2],
+    );
+    probe.rhi.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const halves = new Uint16Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+    readback.destroy();
+    const half = (h) => {
+      const e = (h >> 10) & 31;
+      const m = h & 1023;
+      return (e === 0 ? m / 1024 * 2 ** -14 : (1 + m / 1024) * 2 ** (e - 15)) * (h & 0x8000 ? -1 : 1);
+    };
+    const texel = (face, u, v) => {
+      const i = ((face * size + Math.floor(v * size)) * size + Math.floor(u * size)) * 4;
+      return [0, 1, 2].map((c) => +half(halves[i + c]).toFixed(2));
+    };
+    // cubeDirection(+X, u, v) = (1, -v', -u') with u', v' in [-1, 1]: up is
+    // small v, and +Z is small u.
+    const middle = texel(0, 0.5, 0.5);
+    const above = texel(0, 0.5, 0.5 - 0.4 * 0.5);
+    const towardZ = texel(0, 0.5 - 0.4 * 0.5, 0.5);
+    const behind = texel(1, 0.5, 0.5);
+    const face = `+X face: ${middle} middle, ${above} above, ${towardZ} toward +Z; -X face ${behind}`;
+    const is = (p, c) => p[c] > 0.5 && p.every((x, k) => k === c || x < 0.2);
+    if (!(is(middle, 0) && is(above, 1) && is(towardZ, 2) && behind.every((x) => x < 0.05))) {
+      throw new Error(`the capture is not the right way round: ${face}`);
+    }
+
+    // 2. A mirror floor under the room reflects the wall once the probe is
+    // captured -- and the sky, black, where no probe's box reaches.
+    const floorMirror = await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], metallicFactor: 1, roughnessFactor: 0 }));
+    const reflection = async (probeBox) => {
+      const s = room();
+      s.add(floorMirror).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setPosition(0, -1, 0).setScale(1, 1, 1);
+      if (probeBox) await probe.captureReflectionProbes(s, [s.addReflectionProbe(probeBox)]);
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([-1.5, 0.2, 0]);
+      cam.target.set([1, -1, 0]);
+      probe.renderFrame(s, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      // Where the floor is, below the middle of the view.
+      const i = (Math.floor(height * 0.8) * width + (width >> 1)) * 4;
+      return [pixels[i], pixels[i + 1], pixels[i + 2]];
+    };
+    const sky = await reflection(null);
+    const captured = await reflection({ min: [-3, -3, -3], max: [3, 3, 3] });
+    const elsewhere = await reflection({ min: [10, -3, -3], max: [16, 3, 3] });
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+    const show = (p) => `rgb(${p.join(',')})`;
+    const report = `${face}; the mirror floor: ${show(sky)} with no probe, ${show(captured)} inside a captured one, `
+      + `${show(elsewhere)} when its box is elsewhere`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    if (!(captured[0] > sky[0] + 60 && captured[0] > captured[1] + 60 && Math.abs(elsewhere[0] - sky[0]) <= 3)) {
+      throw new Error(report);
+    }
+    return report;
+  });
+
+  await step('a double-sided surface casts whichever side faces the light', async () => {
+    // A quad above a floor, lit from above, FACING the light. The shadow pass
+    // draws back faces, so single-sided it casts nothing -- the limit the
+    // README states -- and double-sided it must cast.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    const floor = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0 }));
+    const dark = async (doubleSided) => {
+      const quad = await probe.load(buildFeatureGLB({ metallicFactor: 0, doubleSided }));
+      const scene = probe.createScene();
+      scene.add(floor).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
+      scene.add(quad).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
+      scene.addLight({ type: 'directional', direction: [1, -1, 0], intensity: 3 });
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 6, 0.01]);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      let count = 0;
+      for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 1] < 60) count++;
+      return count;
+    };
+    const single = await dark(false);
+    const double = await dark(true);
+    probe.destroy();
+    canvas.remove();
+    const report = `shadow pixels with the lit side up: ${single} single-sided, ${double} double-sided`;
+    if (!(single === 0 && double > 500)) throw new Error(report);
+    return report;
+  });
+
+  await step('levels of detail switch at their coverage, and cast only the level shown', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    probe.rhi.device.pushErrorScope('validation');
+    // The quad's sphere: radius hypot(3.2, 3.2) / 2 = 2.263. At fovY 1 its
+    // coverage is 2.263 / tan(0.5) / d = 4.14 / d: 1.04 at 4, 0.35 at 12,
+    // 0.10 at 40, and 0.04 at 100, below the last level's 0.05.
+    const lod = await probe.load(buildLodGLB([0.5, 0.2, 0.05]));
+    const middle = async (distance) => {
+      const scene = probe.createScene();
+      scene.add(lod);
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, distance]);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      const i = ((height >> 1) * width + (width >> 1)) * 4;
+      return [pixels[i], pixels[i + 1], pixels[i + 2]];
+    };
+    const levels = [];
+    for (const d of [4, 12, 40, 100]) levels.push(await middle(d));
+
+    // A small copy in front of a lit wall, the light a little to the side so
+    // its shadow falls clear of it. Turned to face the wall: the shadow pass
+    // draws back faces, so a single-sided quad casts only with its back to the
+    // light. The same quad whose levels all need more coverage than it has
+    // shows no level, and must cast no shadow either.
+    const wall = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0 }));
+    const hidden = await probe.load(buildLodGLB([5, 4, 3]));
+    const shadowAt = async (asset) => {
+      const scene = probe.createScene();
+      scene.add(wall).setPosition(0, 0, -2).setScale(4, 4, 1);
+      scene.add(asset).setRotationAxisAngle([0, 1, 0], Math.PI).setScale(0.3, 0.3, 1);
+      scene.addLight({ type: 'directional', direction: [0.3, 0, -1], intensity: 3 });
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, 4]);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      const at = (x) => pixels[((height >> 1) * width + Math.floor(x * width)) * 4 + 1];
+      // Where the shadow falls on the wall, and the same spot mirrored.
+      return { shadow: at(0.603), clear: at(0.397) };
+    };
+    const cast = await shadowAt(lod);
+    const none = await shadowAt(hidden);
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const show = (p) => `rgb(${p.join(',')})`;
+    const report = `${levels.map(show).join(' -> ')} at 4, 12, 40 and 100 m; wall ${cast.clear} lit, `
+      + `${cast.shadow} in the shown level's shadow, ${none.shadow} behind a group showing none`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const only = (p, c) => p[c] > 200 && p.every((v, k) => k === c || v < 30);
+    const ok = only(levels[0], 0) && only(levels[1], 1) && only(levels[2], 2) && levels[3].every((v) => v < 30)
+      && cast.shadow < cast.clear - 30 && Math.abs(none.shadow - none.clear) <= 3;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('debug lines draw their exact colour, hide behind geometry unless asked not to, and last one frame', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    const quad = await probe.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.2, 0.2, 1] }));
+    // The line lies along y = 0, which lands on the boundary between the two
+    // middle rows; whichever the rasterizer picks, one of them holds it.
+    const row = async ({ withQuad = false, draw = true, depthTest = true } = {}) => {
+      const scene = probe.createScene();
+      if (withQuad) scene.add(quad);
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, 2]);
+      cam.target.set([0, 0, 0]);
+      probe.debug.depthTest = depthTest;
+      if (draw) probe.debug.line([-1, 0, -1], [1, 0, -1], [1, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.rhi.readPixels();
+      const { width, height } = probe.rhi;
+      const at = (y) => { const i = (y * width + (width >> 1)) * 4; return [pixels[i], pixels[i + 1], pixels[i + 2]]; };
+      const [a, b] = [at((height >> 1) - 1), at(height >> 1)];
+      return a[0] >= b[0] ? a : b;
+    };
+    const alone = await row();
+    const hidden = await row({ withQuad: true });
+    const onTop = await row({ withQuad: true, depthTest: false });
+    const gone = await row({ draw: false });
+    probe.destroy();
+    canvas.remove();
+    const show = (p) => `rgb(${p.join(',')})`;
+    const report = `${show(alone)} alone, ${show(hidden)} behind a quad, ${show(onTop)} with depthTest off, `
+      + `${show(gone)} the frame after`;
+    const red = (p) => p[0] === 255 && p[1] === 0 && p[2] === 0;
+    if (!(red(alone) && !red(hidden) && red(onTop) && gone[0] === 0)) throw new Error(report);
+    return report;
+  });
+
+  await step('fog thickens with distance, takes its colour from the light, and pools below its height', async () => {
+    // An unlit white quad straight ahead, which fog can only dim toward its
+    // own colour. That colour is never given: under a black sky and a red
+    // light it must come out red, and under a blue sky with no light, blue.
+    const shots = async (sky, lights, cases) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '320px';
+      canvas.style.height = '240px';
+      document.body.appendChild(canvas);
+      const probe = await Winding.create(canvas, {
+        environment: { sky: { ground: sky, horizon: sky, zenith: sky, sunIntensity: 0, glow: 0 } },
+      });
+      const quad = await probe.load(buildFeatureGLB({
+        baseColorFactor: [1, 1, 1, 1], materialExtensions: { KHR_materials_unlit: {} },
+      }));
+      const results = {};
+      for (const [name, { fog, distance = 2, quad: drawQuad = true }] of Object.entries(cases)) {
+        probe.renderer.fog = fog ?? null;
+        const scene = probe.createScene();
+        for (const light of lights) scene.addLight(light);
+        const cam = new Camera({ fovY: 1, near: 0.1 });
+        cam.position.set([0, 0, 0]);
+        cam.target.set([0, 0, -1]);
+        if (drawQuad) scene.add(quad).setPosition(0, 0, -distance).setScale(distance, distance, 1);
+        probe.renderFrame(scene, cam);
+        const pixels = await probe.rhi.readPixels();
+        const { width, height } = probe.rhi;
+        const at = (y) => { const i = (Math.floor(y * height) * width + (width >> 1)) * 4; return [pixels[i], pixels[i + 1], pixels[i + 2]]; };
+        results[name] = { middle: at(0.5), top: at(0.02) };
+      }
+      probe.destroy();
+      canvas.remove();
+      return results;
+    };
+    const BLACK = [0, 0, 0];
+    const red = [{ type: 'directional', direction: [0, -1, 0], color: [1, 0, 0], intensity: 4 * Math.PI }];
+    const r = await shots(BLACK, red, {
+      clear: { distance: 20 },
+      near: { fog: { visibility: 20 }, distance: 2 },
+      far: { fog: { visibility: 20 }, distance: 20 },
+      layerHere: { fog: { visibility: 20, scaleHeight: 2 }, distance: 20 },
+      layerBelow: { fog: { visibility: 20, height: -10, scaleHeight: 2 }, distance: 20 },
+      skyUniform: { fog: { visibility: 20 }, quad: false },
+      skyLayer: { fog: { visibility: 20, height: -10, scaleHeight: 2 }, quad: false },
+    });
+    const blue = await shots([0, 0, 1], [], { far: { fog: { visibility: 20 }, distance: 20 } });
+    const gb = (p) => (p[1] + p[2]) / 2;
+    const show = (p) => `rgb(${p.join(',')})`;
+    const report = `white quad ${show(r.clear.middle)} clear; `
+      + `${show(r.near.middle)} at 2 m and ${show(r.far.middle)} at 20 m in 20 m fog; `
+      + `${show(r.layerHere.middle)} in a layer at eye height, ${show(r.layerBelow.middle)} with it 10 m below; `
+      + `sky above ${show(r.skyUniform.top)} in uniform fog, ${show(r.skyLayer.top)} over a layer below; `
+      + `${show(blue.far.middle)} under a blue sky`;
+    const ok = gb(r.clear.middle) > 200
+      && gb(r.near.middle) > gb(r.far.middle) + 60 && r.far.middle[0] > gb(r.far.middle) + 60
+      && gb(r.layerBelow.middle) > gb(r.layerHere.middle) + 60
+      && r.skyUniform.top[0] > 60 && r.skyUniform.top[0] > r.skyLayer.top[0] + 40
+      && blue.far.middle[2] > blue.far.middle[0] + 60;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('transmission shows the scene behind: tinted, blurred, bent and absorbed', async () => {
+    // A glowing red quad a unit behind a glass one, in the dark, so every red
+    // value in the middle came through the glass. Along one row, just past the
+    // red quad's edge, is where a volume's refraction shows: the view bends
+    // toward the axis inside it, onto the quad.
+    const SKY = [0, 0, 0];
+    const EDGE = [0.58, 0.62];   // inside the red quad, and just outside it
+    const shots = async (engineOptions, cases) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '320px';
+      canvas.style.height = '240px';
+      document.body.appendChild(canvas);
+      const probe = await Winding.create(canvas, {
+        environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } }, ...engineOptions,
+      });
+      probe.rhi.device.pushErrorScope('validation');
+      const results = {};
+      for (const [name, { glass, back = 1, lamp = false }] of Object.entries(cases)) {
+        const scene = probe.createScene();
+        const cam = new Camera({ fovY: 1, near: 0.1 });
+        cam.position.set([0, 0, 2]);
+        cam.target.set([0, 0, 0]);
+        if (back > 0) {
+          scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 0, 0, 1], emissiveFactor: [1, 0, 0], metallicFactor: 0 })))
+            .setPosition(0, 0, -1).setScale(back, back, 1);
+        }
+        if (glass) {
+          scene.add(await probe.load(buildFeatureGLB({
+            metallicFactor: 0, roughnessFactor: 0.05, ...glass, baseColorFactor: glass.baseColorFactor ?? [1, 1, 1, 1],
+          })));
+        }
+        if (lamp) scene.addLight({ position: [0, 0, -0.5], color: [1, 1, 1], intensity: 3, radius: 4 });
+        probe.renderFrame(scene, cam);
+        const pixels = await probe.rhi.readPixels();
+        const { width, height } = probe.rhi;
+        const red = (x, y = 0.5) => pixels[(Math.floor(y * height) * width + Math.floor(x * width)) * 4];
+        results[name] = { middle: red(0.5), edge: EDGE.map((x) => red(x)) };
+      }
+      const error = await probe.rhi.device.popErrorScope();
+      probe.destroy();
+      canvas.remove();
+      if (error) throw new Error(`transmission with ${JSON.stringify(engineOptions)}: ${error.message}`);
+      return results;
+    };
+    const glass = (extensions, extra = {}) => ({
+      materialExtensions: { KHR_materials_transmission: { transmissionFactor: 1 }, ...extensions }, ...extra,
+    });
+    const r = await shots({}, {
+      none: {},
+      opaque: { glass: {} },
+      clear: { glass: glass({}) },
+      tinted: { glass: glass({}, { baseColorFactor: [0.2, 1, 1, 1] }) },
+      sharp: { glass: glass({}), back: 0.03 },
+      rough: { glass: glass({}, { roughnessFactor: 0.8 }), back: 0.03 },
+      roughAtIor1: { glass: glass({ KHR_materials_ior: { ior: 1 } }, { roughnessFactor: 0.8 }), back: 0.03 },
+      absorbing: { glass: glass({ KHR_materials_volume: { thicknessFactor: 0.5, attenuationDistance: 0.25, attenuationColor: [0.5, 1, 1] } }) },
+      thin: { glass: glass({}), back: 0.3 },
+      thick: { glass: glass({ KHR_materials_volume: { thicknessFactor: 2 } }), back: 0.3 },
+      lampThrough: { glass: glass({}, { roughnessFactor: 0.5 }), back: 0, lamp: true },
+      lampOpaque: { glass: { roughnessFactor: 0.5 }, back: 0, lamp: true },
+    });
+    const report = `red behind ${r.none.middle}: glass ${r.opaque.middle} opaque, ${r.clear.middle} clear, `
+      + `${r.tinted.middle} tinted; small target ${r.sharp.middle} sharp, ${r.rough.middle} rough, `
+      + `${r.roughAtIor1.middle} rough at ior 1; ${r.absorbing.middle} absorbed; past the edge `
+      + `${r.thin.edge[1]} thin, ${r.thick.edge[1]} thick; lamp behind ${r.lampOpaque.middle} -> ${r.lampThrough.middle}`;
+    const ok = r.opaque.middle < 20
+      && Math.abs(r.clear.middle - r.none.middle) <= 8
+      && r.tinted.middle < r.clear.middle - 40
+      && r.rough.middle < r.sharp.middle - 100 && Math.abs(r.roughAtIor1.middle - r.sharp.middle) <= 8
+      && r.absorbing.middle < r.clear.middle - 40
+      && r.thin.edge[0] > 200 && r.thin.edge[1] < 20 && r.thick.edge[1] > 200
+      && r.lampThrough.middle > r.lampOpaque.middle + 100;
+    if (!ok) throw new Error(report);
+
+    // Its own pass beside ambient occlusion's two targets, and beside OIT.
+    for (const options of [{ ao: true }, { oit: true }]) {
+      const { clear } = await shots(options, { clear: { glass: glass({}) } });
+      if (Math.abs(clear.middle - r.clear.middle) > 8) throw new Error(`with ${JSON.stringify(options)}: ${clear.middle}`);
+    }
+    return report;
   });
 
   await step('order-independent transparency resolves into the scene', async () => {

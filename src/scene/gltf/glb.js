@@ -5,6 +5,8 @@
 // the same data as a .gltf, just without a second network round trip for the
 // .bin -- which is why it is what you actually ship.
 
+import { isFallbackBuffer, usesMeshopt } from './meshopt.js';
+
 const GLB_MAGIC = 0x46546c67;    // 'glTF', little-endian
 const CHUNK_JSON = 0x4e4f534a;   // 'JSON'
 const CHUNK_BIN = 0x004e4942;    // 'BIN\0'
@@ -84,16 +86,21 @@ export function parseContainer(source) {
  *   - no uri          -> the GLB BIN chunk (only valid for buffer 0)
  *   - data: uri       -> base64 inline
  *   - relative uri    -> fetched against baseURL
+ *
+ * A meshopt fallback buffer is none of these: it holds the uncompressed data
+ * for readers that cannot decompress, or nothing at all, and this reader
+ * decompresses, so it is never fetched. It resolves empty, so a view that
+ * reads it without being decompressed fails the buffer-bounds check loudly.
  */
 export async function resolveBuffers(json, binary, { baseURL, fetchImpl = globalThis.fetch } = {}) {
   const buffers = json.buffers ?? [];
+  const meshopt = usesMeshopt(json);
 
   return Promise.all(buffers.map(async (buffer, i) => {
+    if (buffer.uri === undefined && i === 0 && binary !== null) return binary;
+    if (isFallbackBuffer(buffer) || (meshopt && buffer.uri === undefined)) return new Uint8Array(0);
     if (buffer.uri === undefined) {
-      if (i !== 0 || binary === null) {
-        throw new Error(`glTF: buffer ${i} has no uri and there is no BIN chunk for it`);
-      }
-      return binary;
+      throw new Error(`glTF: buffer ${i} has no uri and there is no BIN chunk for it`);
     }
 
     if (buffer.uri.startsWith('data:')) return decodeDataURI(buffer.uri);

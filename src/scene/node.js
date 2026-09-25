@@ -52,11 +52,11 @@ export class Node {
   }
 
   /**
-   * Face -Z along (x, y, z), upright: the way a spot shines, the way the
-   * sun's light travels, the way a followed camera looks. In the parent's
-   * space, like every other setter here.
+   * Face -Z along (x, y, z), upright: the way a spot shines, the way a
+   * directional light's light travels, the way a followed camera looks. In
+   * the parent's space, like every other setter here.
    *
-   *   scene.sun.setDirection(-0.4, -0.7, -0.3);
+   *   key.setDirection(-0.4, -0.7, -0.3);
    */
   setDirection(x, y, z) {
     quatLookAlong(scratchQuat, [x, y, z]);
@@ -102,8 +102,9 @@ export class Node {
     return this;
   }
 
-  stop() {
-    this.animation?.stop();
+  /** Stop every layer, or `{ layer }`; with `{ fade }` the clips fade out. */
+  stop(options) {
+    this.animation?.stop(options);
     return this;
   }
 

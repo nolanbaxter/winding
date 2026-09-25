@@ -16,6 +16,12 @@
 // FNV-1a here, but a Map already hashes string keys internally, and a real hash
 // would only add a collision mode where two different pipelines silently share
 // one object. Strings are shorter code AND strictly safer.
+//
+// A DESCRIPTOR IS NOT CHANGED AFTER ITS FIRST get(). The renderer asks once
+// per draw, so each descriptor object remembers its pipeline and the key is
+// built only the first time: building it every call cost Sponza 0.4 ms of CPU
+// a frame once override constants lengthened it. A different pipeline is a
+// different descriptor object.
 
 import { DEPTH_COMPARE, DEPTH_FORMAT } from './device.js';
 
@@ -38,6 +44,8 @@ export class PipelineCache {
   constructor(device) {
     this.device = device;
     this.pipelines = new Map();
+    /** Descriptor object -> its pipeline, so a repeat get() skips the key. */
+    this._byDescriptor = new WeakMap();
     /** Compiles in flight, by key, so a second warm() waits on the first. */
     this._compiling = new Map();
     /** How many distinct pipelines exist. Watch this stop growing after load. */
@@ -47,13 +55,43 @@ export class PipelineCache {
   }
 
   get(desc) {
+    const known = this._byDescriptor.get(desc);
+    if (known) {
+      this.hits++;
+      return known;
+    }
     const key = pipelineKey(desc);
+    let pipeline = this.pipelines.get(key);
+    if (pipeline) {
+      this.hits++;
+    } else {
+      pipeline = this.device.createRenderPipeline(gpuDescriptor(desc));
+      this.pipelines.set(key, pipeline);
+      this.created++;
+    }
+    this._byDescriptor.set(desc, pipeline);
+    return pipeline;
+  }
+
+  /**
+   * A compute pipeline, from the same kind of plain descriptor:
+   * { label, layout, shader, entry, constants }.
+   */
+  compute(desc) {
+    const constants = desc.constants
+      ? Object.keys(desc.constants).sort().map((k) => `${k}=${desc.constants[k]}`).join(',')
+      : '';
+    const key = `compute|${desc.layout.id}|${desc.shader.id}|${desc.entry}|${constants}`;
     const existing = this.pipelines.get(key);
     if (existing) {
       this.hits++;
       return existing;
     }
-    const pipeline = this.device.createRenderPipeline(gpuDescriptor(desc));
+    const pipeline = this.device.createComputePipeline({
+      label: desc.label,
+      layout: desc.layout.gpu,
+      compute: { module: desc.shader.module, entryPoint: desc.entry, constants: desc.constants },
+    });
     this.pipelines.set(key, pipeline);
     this.created++;
     return pipeline;
@@ -181,4 +219,17 @@ function pipelineKey(desc) {
   }
 
   return key;
+}
+
+const shared = new WeakMap();
+
+/**
+ * The cache for pipelines outside the renderer's -- a bake, a mip chain, the
+ * culling and clustering passes -- one per device. Every pipeline in the
+ * engine is then a plain descriptor through a PipelineCache.
+ */
+export function sharedPipelines(device) {
+  let cache = shared.get(device);
+  if (!cache) shared.set(device, (cache = new PipelineCache(device)));
+  return cache;
 }

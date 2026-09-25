@@ -23,19 +23,58 @@
 // Biasing it away fixes that and detaches the shadow from the object's feet,
 // which is peter-panning. Both are fought here, with different tools: slope-
 // scaled hardware bias for the map, and a normal offset at lookup time.
+//
+// EVERY LIGHT that casts -- castShadow, on by default for directional lights
+// and off for the rest -- gets views of its own, each a layer of a depth
+// array, all drawn by the same caster passes: a view is a view-projection,
+// whatever made it. A directional light gets the cascades; a spot one
+// perspective view down its cone; a point light six, one per cube face.
+// Cascades and local views are two arrays only because they are two sizes.
 
 import { DEBUG, assert } from '../core/assert.js';
 import {
-  mat4Create, mat4LookAt, mat4Multiply, mat4OrthographicReverseZ, mat4Identity,
+  mat4Create, mat4LookAt, mat4Multiply, mat4OrthographicReverseZ, mat4PerspectiveReverseZInfinite,
 } from '../core/math/mat4.js';
+import { frustumCreate, frustumFromViewProjection, frustumTestSphere } from '../core/math/frustum.js';
+import { grownCapacity } from '../core/grow.js';
+import { LIGHT_FLOATS, LIGHT_SPOT, DIRECTIONAL_FLOATS } from '../scene/scene.js';
 import { vec3Create, vec3Normalize } from '../core/math/vec3.js';
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW } from '../rhi/bindgroups.js';
-import { ALPHA_MASK } from './material.js';
+import { ALPHA_MASK, MATERIAL_WGSL, VARIANT_DOUBLE_SIDED } from './material.js';
+import { CULL_SHADOW } from './gpudriven.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
 import { VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
+import { createBuffer } from '../rhi/buffer.js';
+import { createTexture } from '../rhi/texture.js';
 
 export const MAX_CASCADES = 4;
+
+/** One local shadow view as the forward shader reads it: a mat4 and a vec4. */
+export const LOCAL_VIEW_FLOATS = 20;
+
+/**
+ * How far past its own edge each local view reaches, as a tangent scale: the
+ * 3x3 PCF reaches two texels beyond the one a fragment lands in, so a view of
+ * `size` texels whose inner size - 4 cover the cone (or the cube face) keeps
+ * every tap of every fragment inside its own map.
+ */
+export function localMargin(size) {
+  return size / (size - 4);
+}
+
+/**
+ * Whether a spot light takes one perspective view or six. A cone wider than a
+ * cube face (outer angle past 45 degrees) is covered better by the six faces a
+ * point light uses than by one frustum stretched towards 180 degrees, where
+ * the texels at its rim grow without bound.
+ */
+export function spotViewCount(outerAngle) {
+  return Math.tan(outerAngle) <= 1 ? 1 : 6;
+}
+
+/** Cube face axes, in the order the forward shader picks them: +x -x +y -y +z -z. */
+const CUBE_AXES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 
 /**
  * Depth-only for everything opaque: no fragment stage at all, half the work of
@@ -79,15 +118,7 @@ struct Batch {
 
 // The material, for the casters whose shape comes from alpha. Only the fields
 // alpha needs are read, but the struct is the forward pass's, byte for byte.
-struct Material {
-  baseColor         : vec4<f32>,
-  emissive          : vec4<f32>,
-  roughness         : f32,
-  normalScale       : f32,
-  alphaCutoff       : f32,
-  occlusionStrength : f32,
-  uvSets            : f32,
-};
+${MATERIAL_WGSL}
 @group(2) @binding(0) var<uniform> material     : Material;
 @group(2) @binding(1) var          baseColorMap : texture_2d<f32>;
 @group(2) @binding(6) var          surfSampler  : sampler;
@@ -175,7 +206,8 @@ fn vsSkinnedAlpha(
 
 /** The forward pass's alpha, from the same three factors in the same UV set. */
 fn surfaceAlpha(v : AlphaOut) -> f32 {
-  let uv = select(v.uv, v.uv1, (u32(material.uvSets) & 1u) != 0u);
+  let p = vec3<f32>(select(v.uv, v.uv1, (u32(material.uvSets) & 1u) != 0u), 1.0);
+  let uv = vec2<f32>(dot(material.uvTransforms[0].xyz, p), dot(material.uvTransforms[1].xyz, p));
   return textureSample(baseColorMap, surfSampler, uv).a * material.baseColor.a * v.alpha;
 }
 
@@ -357,6 +389,12 @@ export class ShadowMaps {
     /** Hardware slope-scaled bias applied while rendering the map. */
     depthBiasSlope = -2.0,
     depthBiasConstant = -1,
+    /**
+     * Texels on a side of each point or spot shadow view. A budget, not a
+     * derivation: a point light is six of these, at four bytes a texel, so
+     * 512 is 6 MB a point light. 512 is also three.js's default.
+     */
+    localSize = 512,
   } = {}) {
     // Unconditional: past MAX_CASCADES the per-cascade arrays and the cascade
     // uniform are overrun, and the shadows are wrong with nothing reported.
@@ -367,6 +405,10 @@ export class ShadowMaps {
     if (size > maxSize) {
       throw new RangeError(`Shadows: a ${size} map is past this device's ${maxSize}`);
     }
+    if (!(localSize > 4 && localSize <= maxSize)) {
+      throw new RangeError(`Shadows: a local map of ${localSize} is outside 5 to this device's ${maxSize}`);
+    }
+    this.localSize = localSize;
 
     this.rhi = rhi;
     this.size = size;
@@ -383,22 +425,11 @@ export class ShadowMaps {
     this.depthBiasSlope = depthBiasSlope;
     this.depthBiasConstant = depthBiasConstant;
 
-    // One depth texture, `cascades` array layers. An array rather than an atlas
-    // so the shader indexes by cascade with no UV arithmetic and no bleeding
-    // between neighbours at the seams.
-    this.texture = rhi.device.createTexture({
-      label: 'shadow-cascades',
-      size: [size, size, cascades],
-      format: DEPTH_FORMAT,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    });
-    this.view = this.texture.createView({ dimension: '2d-array', label: 'shadow-cascades' });
-    this.layerViews = [];
-    for (let i = 0; i < cascades; i++) {
-      this.layerViews.push(this.texture.createView({
-        dimension: '2d', baseArrayLayer: i, arrayLayerCount: 1, label: `cascade-${i}`,
-      }));
-    }
+    // The cascade array is made in _init and grown with the lights that cast:
+    // `cascades` layers for each, light by light.
+    this.cascadeCapacity = 0;
+    /** Directional lights casting this frame. */
+    this.shadowedCount = 0;
 
     // A comparison sampler does the depth test AND the bilinear blend in one
     // fetch, so a 3x3 PCF kernel costs 9 taps of already-filtered results
@@ -412,7 +443,9 @@ export class ShadowMaps {
       addressModeV: 'clamp-to-edge',
     });
 
-    this.matrices = new Float32Array(MAX_CASCADES * 16);
+    /** Every cascade of every casting light, a mat4 each, light by light. */
+    this.matrices = new Float32Array(0);
+    /** Shared by every light: the slices depend on the camera alone. */
     this.splits = new Float32Array(MAX_CASCADES);
     /** World size of one shadow texel, per cascade. The normal-offset bias
      *  scales with it, so a coarse far cascade biases more than a fine near one. */
@@ -420,7 +453,7 @@ export class ShadowMaps {
 
     this._lightView = mat4Create();
     this._projection = mat4Create();
-    this._sphere = new Float32Array(4);
+    this._spheres = Array.from({ length: MAX_CASCADES }, () => new Float32Array(4));
     this._lightDirection = vec3Create(0, -1, 0);
     this._eye = vec3Create();
     this._target = vec3Create();
@@ -448,19 +481,14 @@ export class ShadowMaps {
     });
 
     this.alignment = rhi.limits.minUniformBufferOffsetAlignment;
-    this.cascadeBuffer = rhi.device.createBuffer({
-      label: 'shadow-cascades',
-      size: this.alignment * MAX_CASCADES,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    this.cascadeStaging = new ArrayBuffer(this.alignment * MAX_CASCADES);
-    this._makeCascadeBindGroup = (gpu, palette, morph) => rhi.device.createBindGroup({
+    // `order` is the static batch order, or with LOD the shadow cull's slice.
+    this._makeCascadeBindGroup = (gpu, palette, morph, buffer = this.cascadeBuffer) => rhi.device.createBindGroup({
       label: 'shadow-cascade',
       layout: this.cascadeLayout,
       entries: [
-        { binding: 0, resource: { buffer: this.cascadeBuffer, size: 64 } },
+        { binding: 0, resource: { buffer, size: 64 } },
         { binding: 1, resource: { buffer: gpu.drawDataBuffer } },
-        { binding: 2, resource: { buffer: gpu.batchOrderBuffer } },
+        { binding: 2, resource: { buffer: gpu.hasLod ? gpu.visibleBuffer : gpu.batchOrderBuffer } },
         { binding: 3, resource: { buffer: palette.buffer } },
         { binding: 4, resource: { buffer: morph.deltaBuffer } },
         { binding: 5, resource: { buffer: morph.weightBuffer } },
@@ -524,11 +552,22 @@ export class ShadowMaps {
       label: `${descriptor.label}-mirrored`,
       primitive: { ...descriptor.primitive, frontFace: 'cw' },
     });
-    // Indexed by skinned * 2 + mirrored.
-    this.descriptors = [
+    // And all four culling nothing, for double-sided materials. Front-face
+    // culling assumes a closed surface, whose back faces stand in for its
+    // front; a double-sided material says its surface has two sides and is
+    // usually open -- a leaf, a sail, a sheet -- so culling the side facing
+    // the light took the whole shadow with it.
+    const twoSided = (descriptor) => ({
+      ...descriptor,
+      label: `${descriptor.label}-double-sided`,
+      primitive: { ...descriptor.primitive, cullMode: 'none' },
+    });
+    // Indexed by doubleSided * 4 + skinned * 2 + mirrored.
+    const oneSided = [
       this.descriptor, mirror(this.descriptor),
       this.skinnedDescriptor, mirror(this.skinnedDescriptor),
     ];
+    this.descriptors = [...oneSided, ...oneSided.map(twoSided)];
 
     // Casters whose shape comes from alpha: MASK batches, tested against the
     // material's cutoff, and blended items, hashed. Both need the material, so
@@ -560,60 +599,250 @@ export class ShadowMaps {
     }
     await pipelines.warm([...this.descriptors, ...this.alphaDescriptors]);
 
-    // One bound executor per cascade, built once. The graph stores a function
-    // per pass, and building them per frame would allocate MAX_CASCADES
-    // closures every frame for no reason.
+    // One bound executor per layer, built as the arrays grow. The graph stores
+    // a function per pass, and building them per frame would allocate a
+    // closure per pass per frame for no reason.
     this._executors = [];
-    for (let cascade = 0; cascade < MAX_CASCADES; cascade++) {
-      this._executors.push((pass) => this._encodeCascade(pass, cascade));
-    }
+
+    // Local views: none yet, but the forward pass binds the array and the view
+    // list whether or not a light uses them, so both exist from the start.
+    this.localCount = 0;
+    this.localCapacity = 0;
+    /** Bumped when either array or its buffers are replaced: bind groups rebuild. */
+    this.revision = 0;
+    this._localExecutors = [];
+    this._frustum = frustumCreate();
+    this._growCascades(this.cascadeCount);
+    this._growLocal(1);
   }
 
   /**
-   * Fit every cascade to the camera and light, and upload the matrices.
-   * Call once per frame, before rendering the shadow pass.
+   * Room for `needed` cascade layers: the depth array, a slot each in the
+   * render uniform, and a matrix each in the list the forward pass reads. The
+   * ceiling is the device's array-layer limit, read from the adapter.
    */
-  update(camera, lightDirection) {
-    // A zero direction is the natural way to say "no sun", because sun.direction
-    // is a plain mutable field the API invites you to write into. Normalizing it
-    // yields (0,0,0), which makes eye === target in mat4LookAt and fills every
-    // cascade matrix with NaN -- and a NaN shadow lookup does not fail loudly,
-    // it just poisons the lighting. So the degenerate case is answered here
-    // instead: no cascades, which selectCascade already reads as "unshadowed"
-    // because the splits are zero.
-    const lengthSq = lightDirection[0] * lightDirection[0]
-      + lightDirection[1] * lightDirection[1]
-      + lightDirection[2] * lightDirection[2];
-    this.activeCascades = lengthSq > 0 ? this.cascadeCount : 0;
-    if (this.activeCascades === 0) {
-      this.splits.fill(0);
-      return;
+  _growCascades(needed) {
+    if (needed <= this.cascadeCapacity) return;
+    const rhi = this.rhi;
+    const capacity = grownCapacity(this.cascadeCapacity, needed, rhi.limits.maxTextureArrayLayers, 'directional shadow cascades');
+    this.texture?.destroy();
+    this.cascadeBuffer?.destroy();
+    this.cascadeList?.destroy();
+    this.texture = createTexture(rhi, {
+      label: 'shadow-cascades',
+      size: [this.size, this.size, capacity],
+      format: DEPTH_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.view = this.texture.createView({ dimension: '2d-array', label: 'shadow-cascades' });
+    this.layerViews = [];
+    for (let i = 0; i < capacity; i++) {
+      this.layerViews.push(this.texture.createView({
+        dimension: '2d', baseArrayLayer: i, arrayLayerCount: 1, label: `cascade-${i}`,
+      }));
     }
+    this.cascadeBuffer = createBuffer(rhi, {
+      label: 'shadow-cascades',
+      size: this.alignment * capacity,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    // Grown mid-frame, between one light's cascades and the next: what the
+    // lights before it already wrote comes across, or their shadows are lost
+    // for the frame the array grew in.
+    const staging = new ArrayBuffer(this.alignment * capacity);
+    if (this.cascadeStaging) new Uint8Array(staging).set(new Uint8Array(this.cascadeStaging));
+    this.cascadeStaging = staging;
+    this._cascadeStagingF32 = new Float32Array(this.cascadeStaging);
+    this.cascadeList = createBuffer(rhi, {
+      label: 'shadow-cascade-list',
+      size: capacity * 64,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const matrices = new Float32Array(capacity * 16);
+    matrices.set(this.matrices);
+    this.matrices = matrices;
+    for (let layer = this._executors.length; layer < capacity; layer++) {
+      this._executors.push((pass) => this._encodeView(pass, this.cascadeBindGroup, layer * this.alignment));
+    }
+    this.cascadeCapacity = capacity;
+    this.cascadeBindGroup = undefined;
+    this.revision++;
+  }
 
-    vec3Normalize(this._lightDirection, lightDirection);
-    const splits = cascadeSplits(camera.near, this.shadowDistance, this.cascadeCount, this.lambda);
+  /**
+   * Room for `needed` local views: layers of the depth array, a slot each in
+   * the render uniform, and a view each in the list the forward pass reads.
+   * The ceiling is the device's array-layer limit, read from the adapter.
+   */
+  _growLocal(needed) {
+    if (needed <= this.localCapacity) return;
+    const rhi = this.rhi;
+    const capacity = grownCapacity(this.localCapacity, needed, rhi.limits.maxTextureArrayLayers, 'point and spot shadow views');
+    this.localTexture?.destroy();
+    this.localUniform?.destroy();
+    this.localBuffer?.destroy();
+    const size = this.localSize;
+    this.localTexture = createTexture(rhi, {
+      label: 'shadow-local',
+      size: [size, size, capacity],
+      format: DEPTH_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.localView = this.localTexture.createView({ dimension: '2d-array', label: 'shadow-local' });
+    this.localLayerViews = [];
+    for (let i = 0; i < capacity; i++) {
+      this.localLayerViews.push(this.localTexture.createView({
+        dimension: '2d', baseArrayLayer: i, arrayLayerCount: 1, label: `shadow-local-${i}`,
+      }));
+    }
+    this.localUniform = createBuffer(rhi, {
+      label: 'shadow-local-views',
+      size: this.alignment * capacity,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    // As with the cascades: views written before the growth come across.
+    const staging = new ArrayBuffer(this.alignment * capacity);
+    if (this.localStaging) new Uint8Array(staging).set(new Uint8Array(this.localStaging));
+    this.localStaging = staging;
+    this._localStagingF32 = new Float32Array(this.localStaging);
+    this.localBuffer = createBuffer(rhi, {
+      label: 'shadow-local-list',
+      size: capacity * LOCAL_VIEW_FLOATS * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const data = new Float32Array(capacity * LOCAL_VIEW_FLOATS);
+    if (this.localData) data.set(this.localData);
+    this.localData = data;
+    for (let v = this._localExecutors.length; v < capacity; v++) {
+      this._localExecutors.push((pass) => this._encodeView(pass, this.localBindGroup, v * this.alignment));
+    }
+    this.localCapacity = capacity;
+    this.localBindGroup = undefined;
+    this.revision++;
+  }
 
+  /**
+   * Views for every point and spot light that casts a shadow and whose reach
+   * is on screen, written into the light records the forward pass reads:
+   * directionCone.w is how many views (1 or 6) and coneFalloff.w the first
+   * layer plus one, zero for none. Runs after scene.refreshLights, which is
+   * where a light's position and aim for this frame come from, and before the
+   * light list is uploaded.
+   *
+   * A light whose sphere is off screen gets no views: nothing it lights is
+   * drawn, so nothing would read them.
+   */
+  updateLocal(scene, camera) {
+    frustumFromViewProjection(this._frustum, camera.viewProjection);
+    const lights = scene.lights;
+    const casters = scene.shadowCasters;
+    const margin = localMargin(this.localSize);
+    let count = 0;
+    for (let i = 0; i < scene.lightCount; i++) {
+      const o = i * LIGHT_FLOATS;
+      lights[o + 11] = 0;
+      lights[o + 15] = 0;
+      if (casters.size === 0 || !casters.has(scene.lightEntity[i])) continue;
+      const radius = lights[o + 3];
+      this._eye[0] = lights[o]; this._eye[1] = lights[o + 1]; this._eye[2] = lights[o + 2];
+      if (!(radius > 0) || !frustumTestSphere(this._frustum, this._eye, radius)) continue;
+
+      const views = lights[o + 14] === LIGHT_SPOT ? spotViewCount(scene._lightCone[i * 2 + 1]) : 6;
+      this._growLocal(count + views);
+      // Near only clips here: reverse-Z float depth is relative, so precision
+      // does not depend on it. A thousandth of the reach clips only casters
+      // inside the bulb.
+      const near = radius / 1024;
+      if (views === 1) {
+        const tanHalf = Math.tan(scene._lightCone[i * 2 + 1]) * margin;
+        this._localView(count, this._eye, lights[o + 8], lights[o + 9], lights[o + 10], tanHalf, near);
+      } else {
+        for (let face = 0; face < 6; face++) {
+          const [x, y, z] = CUBE_AXES[face];
+          this._localView(count + face, this._eye, x, y, z, margin, near);
+        }
+      }
+      lights[o + 11] = views;
+      lights[o + 15] = count + 1;
+      count += views;
+    }
+    this.localCount = count;
+    if (count > 0) {
+      this.rhi.queue.writeBuffer(this.localUniform, 0, this.localStaging, 0, this.alignment * count);
+      this.rhi.queue.writeBuffer(this.localBuffer, 0, this.localData, 0, count * LOCAL_VIEW_FLOATS);
+    }
+  }
+
+  /** One perspective view from `eye` along (x, y, z), square, at `tanHalf`. */
+  _localView(index, eye, x, y, z, tanHalf, near) {
+    this._lightDirection[0] = x; this._lightDirection[1] = y; this._lightDirection[2] = z;
+    vec3Normalize(this._lightDirection, this._lightDirection);
+    this._target[0] = eye[0] + this._lightDirection[0];
+    this._target[1] = eye[1] + this._lightDirection[1];
+    this._target[2] = eye[2] + this._lightDirection[2];
+    mat4LookAt(this._lightView, eye, this._target, chooseUp(this._up, this._lightDirection));
+    mat4PerspectiveReverseZInfinite(this._projection, 2 * Math.atan(tanHalf), 1, near);
+    const at = index * LOCAL_VIEW_FLOATS;
+    mat4Multiply(this.localData, this._projection, this._lightView, at);
+    this._localStagingF32.set(this.localData.subarray(at, at + 16), index * this.alignment / 4);
+    this.localData[index * LOCAL_VIEW_FLOATS + 16] = tanHalf;
+  }
+
+  /**
+   * Fit the cascades of every directional light that casts, and upload them.
+   * Call once per frame, after scene.refreshLights and before the directional
+   * lights are uploaded: each casting light's record gets its slot in
+   * direction.w -- slot + 1, zero for none -- and its cascades are layers
+   * slot * cascades + i of the array.
+   *
+   * The slices, their spheres and their texel sizes depend on the camera
+   * alone, so every light shares them; only the matrices are per light.
+   */
+  update(camera, scene) {
+    const count = this.cascadeCount;
+    const splits = cascadeSplits(camera.near, this.shadowDistance, count, this.lambda);
     let sliceNear = camera.near;
-    for (let i = 0; i < this.cascadeCount; i++) {
-      const sliceFar = splits[i];
-      this._fitCascade(i, camera, sliceNear, sliceFar);
-      this.splits[i] = sliceFar;
-      sliceNear = sliceFar;
+    for (let i = 0; i < count; i++) {
+      frustumSliceSphere(this._spheres[i], camera, sliceNear, splits[i]);
+      this.splits[i] = splits[i];
+      sliceNear = splits[i];
     }
     // Unused cascades get a split of 0, not Infinity. selectCascade tests
     // `viewDepth < split`, and every depth is below Infinity, so the obvious
-    // sentinel picks the cascade it was meant to skip -- an identity matrix and
-    // a texture layer that was never allocated.
-    for (let i = this.cascadeCount; i < MAX_CASCADES; i++) {
-      this.splits[i] = 0;
-      mat4Identity(this.matrices.subarray(i * 16, i * 16 + 16));
-    }
+    // sentinel picks the cascade it was meant to skip.
+    for (let i = count; i < MAX_CASCADES; i++) this.splits[i] = 0;
 
-    this.rhi.queue.writeBuffer(this.cascadeBuffer, 0, this.cascadeStaging);
+    const directionals = scene.directionals;
+    const casters = scene.shadowCasters;
+    let lights = 0;
+    for (let d = 0; d < scene.directionalCount; d++) {
+      const o = d * DIRECTIONAL_FLOATS;
+      directionals[o + 3] = 0;
+      if (casters.size === 0 || !casters.has(scene.directionalEntity[d])) continue;
+      // A zero direction would make eye === target in the look-at and fill
+      // every matrix with NaN, which poisons the lighting rather than failing.
+      // A node scaled to nothing is the way to get one; it casts nothing.
+      const x = directionals[o], y = directionals[o + 1], z = directionals[o + 2];
+      if (x * x + y * y + z * z === 0) continue;
+      this._growCascades((lights + 1) * count);
+      this._lightDirection[0] = x; this._lightDirection[1] = y; this._lightDirection[2] = z;
+      vec3Normalize(this._lightDirection, this._lightDirection);
+      for (let c = 0; c < count; c++) this._fitCascade(lights * count + c, c);
+      directionals[o + 3] = lights + 1;
+      lights++;
+    }
+    this.shadowedCount = lights;
+    // Zero keeps every shadow pass off the graph and every lookup lit.
+    this.activeCascades = lights > 0 ? count : 0;
+    if (lights === 0) return;
+    const layers = lights * count;
+    this.rhi.queue.writeBuffer(this.cascadeBuffer, 0, this.cascadeStaging, 0, this.alignment * layers);
+    this.rhi.queue.writeBuffer(this.cascadeList, 0, this.matrices, 0, layers * 16);
   }
 
-  _fitCascade(index, camera, sliceNear, sliceFar) {
-    const sphere = frustumSliceSphere(this._sphere, camera, sliceNear, sliceFar);
+  /** One cascade of the light along _lightDirection, into array layer `layer`. */
+  _fitCascade(layer, cascade) {
+    const sphere = this._spheres[cascade];
     const radius = sphere[3];
 
     // A light-space basis anchored at the WORLD origin, not at the camera.
@@ -648,8 +877,8 @@ export class ShadowMaps {
     // The light looks down -Z, so a point at light-space z has distance -z.
     //
     // NEGATIVE IS FINE, and usually right. The eye sits at the world origin,
-    // so for a scene standing on a floor at y = 0 under an overhead sun, every
-    // caster is on the sun's side of the eye: behind it, at a negative
+    // so for a scene standing on a floor at y = 0 under an overhead light,
+    // every caster is on the light's side of the eye: behind it, at a negative
     // distance. This used to be clamped to at least 0.01, a perspective habit
     // an orthographic box has no use for -- and that clamp cut every one of
     // those casters out of the map. Nothing above the floor cast a shadow.
@@ -663,14 +892,11 @@ export class ShadowMaps {
       nearDistance, Math.max(farDistance, nearDistance + 0.02),
     );
 
-    const offset = index * 16;
+    const offset = layer * 16;
     mat4Multiply(this.matrices, this._projection, this._lightView, offset, 0, 0);
-
     // Same matrix into the GPU-side staging, at its dynamic-offset slot.
-    const slot = new Float32Array(this.cascadeStaging, index * this.alignment, 16);
-    for (let k = 0; k < 16; k++) slot[k] = this.matrices[offset + k];
-
-    this.texelSizes[index] = texelSize;
+    this._cascadeStagingF32.set(this.matrices.subarray(offset, offset + 16), layer * this.alignment / 4);
+    this.texelSizes[cascade] = texelSize;
   }
 
   /**
@@ -685,7 +911,7 @@ export class ShadowMaps {
    * the matrix does not depend on which cascade is drawing, and writing it per
    * cascade would quadruple the ring for nothing.
    */
-  addPasses(graph, resource, gpu, batchBindGroup, palette, morph) {
+  addPasses(graph, resource, gpu, batchBindGroup, palette, morph, localResource = null, reads = []) {
     this._gpu = gpu;
     this._batchBindGroup = batchBindGroup;
     // Built on first use: the buffers it references belong to GpuDriven, which
@@ -697,30 +923,46 @@ export class ShadowMaps {
     if (this.cascadeBindGroup === undefined
       || this._gpuRevision !== gpu.buffersRevision
       || this._paletteRevision !== palette.revision
-      || this._morphRevision !== morph.revision) {
+      || this._morphRevision !== morph.revision
+      || this._hasLod !== gpu.hasLod) {
+      this._hasLod = gpu.hasLod;
       this.cascadeBindGroup = this._makeCascadeBindGroup(gpu, palette, morph);
+      this.localBindGroup = undefined;
       this._gpuRevision = gpu.buffersRevision;
       this._paletteRevision = palette.revision;
       this._morphRevision = morph.revision;
     }
 
-    for (let cascade = 0; cascade < this.activeCascades; cascade++) {
+    for (let layer = 0; layer < this.shadowedCount * this.cascadeCount; layer++) {
       graph.addPass({
-        name: `shadow:${cascade}`,
+        name: `shadow:${Math.floor(layer / this.cascadeCount)}:${layer % this.cascadeCount}`,
+        reads,
         depth: {
           resource,
-          view: this.layerViews[cascade],
+          view: this.layerViews[layer],
           clear: DEPTH_CLEAR_VALUE,
         },
-        // Prebuilt in _init, so declaring a frame allocates no closures.
-        execute: this._executors[cascade],
+        // Prebuilt as the array grew, so declaring a frame allocates no closures.
+        execute: this._executors[layer],
+      });
+    }
+
+    if (localResource === null || this.localCount === 0) return;
+    this.localBindGroup ??= this._makeCascadeBindGroup(gpu, palette, morph, this.localUniform);
+    for (let v = 0; v < this.localCount; v++) {
+      graph.addPass({
+        name: `shadow:local:${v}`,
+        reads,
+        depth: { resource: localResource, view: this.localLayerViews[v], clear: DEPTH_CLEAR_VALUE },
+        execute: this._localExecutors[v],
       });
     }
   }
 
-  _encodeCascade(pass, cascade) {
+  /** Every caster, into one view: a cascade or a point or spot light's. */
+  _encodeView(pass, bindGroup, offset) {
     const gpu = this._gpu;
-    pass.setBindGroup(GROUP_FRAME, this.cascadeBindGroup, [cascade * this.alignment]);
+    pass.setBindGroup(GROUP_FRAME, bindGroup, [offset]);
     this.pipelineLayout.bindEmptyGroups(pass);
     // Batches arrive sorted by pipeline, so these come in runs and this
     // switches once per run rather than per draw.
@@ -742,18 +984,32 @@ export class ShadowMaps {
       if (alpha && materials.alphaModes[gpu.batchMaterial[b]] === ALPHA_MASK) continue;
       const primitive = gpu.batchPrimitive[b];
       const skinned = gpu.batchSkinned[b];
-      const variant = skinned * 2 + gpu.batchMirrored[b];
+      const doubleSided = (materials.variants[gpu.batchMaterial[b]] & VARIANT_DOUBLE_SIDED) !== 0;
+      const variant = (doubleSided ? 4 : 0) + skinned * 2 + gpu.batchMirrored[b];
       if (variant !== boundVariant) {
         pass.setPipeline(this._pipelines.get(this.descriptors[variant]));
         boundVariant = variant;
       }
-      pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
       pass.setVertexBuffer(0, primitive.vertexBuffer);
       if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
       pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
-      pass.drawIndexed(primitive.indexCount, gpu.batchSize[b]);
+      this._drawBatch(pass, gpu, b, primitive);
     }
     if (alpha) this._encodeAlphaCasters(pass, gpu, materials);
+  }
+
+  /**
+   * One batch's casters: all of them, or with LOD the ones the shadow cull
+   * kept -- the level the camera shows, on screen or off.
+   */
+  _drawBatch(pass, gpu, b, primitive) {
+    if (gpu.hasLod) {
+      pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b, CULL_SHADOW)]);
+      pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, CULL_SHADOW));
+    } else {
+      pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
+      pass.drawIndexed(primitive.indexCount, gpu.batchSize[b]);
+    }
   }
 
   /** MASK batches, then blended items, each shaped by its material's alpha. */
@@ -777,8 +1033,7 @@ export class ShadowMaps {
       if (materials.alphaModes[material] !== ALPHA_MASK) continue;
       const primitive = gpu.batchPrimitive[b];
       draw(false, gpu.batchSkinned[b] === 1, material, primitive);
-      pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
-      pass.drawIndexed(primitive.indexCount, gpu.batchSize[b]);
+      this._drawBatch(pass, gpu, b, primitive);
     }
 
     // Blended casters sit after the batches in the static order, and are drawn
@@ -786,12 +1041,16 @@ export class ShadowMaps {
     // transparent pass uses. Neighbours that bind alike share one call.
     const casters = gpu.blendedCasters;
     if (casters.length === 0) return;
-    pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.transparentBatchOffset()]);
+    pass.setBindGroup(GROUP_DRAW, this._batchBindGroup,
+      [gpu.hasLod ? gpu.shadowTransparentBatchOffset() : gpu.transparentBatchOffset()]);
+    const selected = gpu.casterSelected;
     for (let k = 0; k < casters.length;) {
+      if (gpu.hasLod && selected[k] === 0) { k++; continue; }
       const { primitive, material, skinned } = casters[k];
       let run = 1;
       while (k + run < casters.length && casters[k + run].primitive === primitive
-        && casters[k + run].material === material && casters[k + run].skinned === skinned) run++;
+        && casters[k + run].material === material && casters[k + run].skinned === skinned
+        && (!gpu.hasLod || selected[k + run] === 1)) run++;
       draw(true, skinned, material, primitive);
       pass.drawIndexed(primitive.indexCount, run, 0, 0, gpu.opaqueCount + k);
       k += run;
@@ -801,6 +1060,10 @@ export class ShadowMaps {
   destroy() {
     this.texture.destroy();
     this.cascadeBuffer.destroy();
+    this.cascadeList.destroy();
+    this.localTexture?.destroy();
+    this.localUniform?.destroy();
+    this.localBuffer?.destroy();
   }
 }
 

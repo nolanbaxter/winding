@@ -33,6 +33,8 @@
 import { DEBUG, assert } from '../core/assert.js';
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
+import { createBuffer } from '../rhi/buffer.js';
+import { createTexture } from '../rhi/texture.js';
 
 /** Single channel float. Not filterable by default, which is fine: every read
  *  is a textureLoad, because a filtered average is not a conservative bound. */
@@ -156,7 +158,7 @@ export class HierarchicalDepth {
     this.alignment = rhi.limits.minUniformBufferOffsetAlignment;
     this.maxLevels = 16;
     this.paramsStaging = new ArrayBuffer(this.alignment * this.maxLevels);
-    this.paramsBuffer = rhi.device.createBuffer({
+    this.paramsBuffer = createBuffer(rhi, {
       label: 'hzb-params',
       size: this.paramsStaging.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -167,7 +169,7 @@ export class HierarchicalDepth {
     // validates usage STATICALLY, so pointing it at the level being rendered
     // into is a conflict even though the shader ignores it. A 1x1 stand-in has
     // no such overlap.
-    this.dummy = rhi.device.createTexture({
+    this.dummy = createTexture(rhi, {
       label: 'hzb-unused',
       size: [1, 1, 1],
       format: HZB_FORMAT,
@@ -236,7 +238,7 @@ export class HierarchicalDepth {
     this.levelCount = Math.floor(Math.log2(Math.max(width, height))) + 1;
     if (DEBUG) assert(this.levelCount <= this.maxLevels, 'HZB has more levels than slots');
 
-    this.texture = this.rhi.device.createTexture({
+    this.texture = createTexture(this.rhi, {
       label: 'hzb',
       size: [width, height, 1],
       format: HZB_FORMAT,

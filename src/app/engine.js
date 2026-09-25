@@ -22,8 +22,12 @@
 import { createDevice } from '../rhi/device.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { Environment } from '../render/ibl.js';
+import { parseHDR } from '../render/hdr.js';
 import { Renderer } from '../render/renderer.js';
 import { GLTFTextures } from '../render/textures.js';
+import { createTexture2D, uploadImage, generateMipmaps } from '../rhi/texture.js';
+import { Font } from '../render/text.js';
+import { parseCube, uploadLUT } from '../render/grading.js';
 import { packSkinVertices } from '../render/vertex.js';
 import { packMorphCountStride } from '../render/morph.js';
 import { Scene } from '../scene/scene.js';
@@ -124,11 +128,15 @@ export class Winding {
         maxDraws: options.maxDraws,
         exposure: options.exposure,
         shadows: options.shadows,
-        post: options.post,
+        // `antialias` sits at the top, where a canvas's own option would.
+        post: { antialias: options.antialias, grading: options.grading ?? null, ...(options.post ?? {}) },
         shadowDistance: options.shadowDistance,
         lightDistance: options.lightDistance,
         gpuTiming: options.gpuTiming,
         oit: options.oit,
+        ao: options.ao,
+        fog: options.fog,
+        dof: options.dof,
       });
 
       const environment = new Environment(rhi, options.environment ?? {});
@@ -203,6 +211,112 @@ export class Winding {
   }
 
   /**
+   * Load a Radiance .hdr panorama and bake it into an Environment: ambient
+   * light, reflections and background. Hand it to createScene({ environment }).
+   *
+   *   const studio = await engine.loadEnvironment('studio.hdr');
+   *   const scene = engine.createScene({ environment: studio });
+   *
+   * `source` is a URL, an ArrayBuffer or a Uint8Array. Other options are the
+   * Environment's -- `size` to bake the cube smaller than the map, say. The
+   * environment is yours: destroy() it when no scene uses it any more.
+   */
+  /**
+   * An image as a GPU texture, mipmapped: for sprites (scene.addSprite).
+   *
+   *   const pin = await engine.loadTexture('pin.png');
+   *
+   * `source` is a URL, a Blob, an ImageBitmap, or anything createImageBitmap
+   * takes. `srgb` for colour, which is almost every image; false for data.
+   * Returns { texture, view, width, height }; destroy the texture when done.
+   */
+  async loadTexture(source, { srgb = true, label = 'texture' } = {}) {
+    this._assertAlive('loadTexture');
+    let image = source;
+    if (typeof source === 'string') {
+      const response = await fetch(source);
+      if (!response.ok) throw new Error(`loadTexture: ${source} returned ${response.status}`);
+      image = await response.blob();
+    }
+    // The bytes as authored: no colour conversion and no premultiplying, as
+    // for glTF images (scene/gltf/images.js). Whether they are sRGB is the
+    // texture's format's business.
+    const bitmap = image instanceof ImageBitmap
+      ? image
+      : await createImageBitmap(image, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    this._assertAlive('loadTexture');
+    const texture = createTexture2D(this.rhi, {
+      label, width: bitmap.width, height: bitmap.height, srgb, mipmapped: true,
+    });
+    uploadImage(this.rhi, texture, bitmap);
+    generateMipmaps(this.rhi, texture);
+    if (bitmap !== source) bitmap.close();
+    return { texture, view: texture.createView(), width: texture.width, height: texture.height };
+  }
+
+  /**
+   * A font for scene.addText: any CSS font the page can use, rasterised as a
+   * distance field at the size it names. Waits for a web font to load.
+   *
+   *   const font = await engine.loadFont('64px Inter');
+   *
+   * Rasterise near the size text is mostly seen at: sharp above it, and
+   * sharp down to an eighth of it (see SPREAD in render/text.js).
+   */
+  async loadFont(css) {
+    this._assertAlive('loadFont');
+    const px = /(\d+(?:\.\d+)?)px/.exec(css);
+    if (px === null) throw new Error(`loadFont: the font needs a size in pixels, like '64px sans-serif'; got '${css}'`);
+    await document.fonts?.load(css);
+    this._assertAlive('loadFont');
+    return new Font(this.rhi, css, Number(px[1]));
+  }
+
+  /**
+   * A 3D colour LUT from an Adobe .cube file, for grading:
+   *
+   *   engine.grading = { lut: await engine.loadLUT('film.cube') };
+   *
+   * `source` is a URL or the file's text.
+   */
+  async loadLUT(source) {
+    this._assertAlive('loadLUT');
+    let text = source;
+    if (!/LUT_3D_SIZE/i.test(source)) {
+      const response = await fetch(source);
+      if (!response.ok) throw new Error(`loadLUT: ${source} returned ${response.status}`);
+      text = await response.text();
+    }
+    this._assertAlive('loadLUT');
+    return uploadLUT(this.rhi, parseCube(text));
+  }
+
+  /** Colour grading, read and set any time: { whiteBalance, contrast, saturation, lut }. See render/grading.js. */
+  get grading() {
+    return this.renderer.post.grading;
+  }
+
+  set grading(value) {
+    this.renderer.post.grading = value ?? null;
+  }
+
+  async loadEnvironment(source, options = {}) {
+    this._assertAlive('loadEnvironment');
+    const { fetch: fetchImpl = globalThis.fetch, ...environmentOptions } = options;
+    let bytes = source;
+    if (typeof source === 'string') {
+      const response = await fetchImpl(source);
+      if (!response.ok) throw new Error(`loadEnvironment: ${source} returned ${response.status}`);
+      bytes = new Uint8Array(await response.arrayBuffer());
+      this._assertAlive('loadEnvironment');
+    } else if (source instanceof ArrayBuffer) {
+      bytes = new Uint8Array(source);
+    }
+    const map = parseHDR(bytes, { maxDimension: this.rhi.limits.maxTextureDimension2D });
+    return new Environment(this.rhi, { ...environmentOptions, map });
+  }
+
+  /**
    * Load a .glb/.gltf and get back something scene.add() can take.
    *
    * `source` is a URL string, an ArrayBuffer, or a Uint8Array. This is the only
@@ -263,7 +377,7 @@ export class Winding {
     // material ids included, which then counted against the 4096 for good.
     const textures = new GLTFTextures(this.rhi, model.source.json, bitmaps);
     const asset = {
-      nodes: model.nodes, meshes: [], roots: model.roots, materialIds: [],
+      nodes: model.nodes, meshes: [], roots: model.roots, materials: model.materials, materialIds: [],
       animations: model.animations, skins: model.skins, source: model.source,
       lights: model.lights, cameras: model.cameras, textures,
       /** Which engine made it. unload() refuses an asset from another. */
@@ -472,6 +586,7 @@ export class Winding {
       // Before update(), so a callback that reads a bone's world position sees
       // this frame's pose rather than last frame's.
       scene.advanceAnimations(this.clock.realDelta);
+      scene.advanceParticles(this.clock.realDelta);
       if (update) while (this.clock.step()) update(this.clock.fixedDt, this.clock.elapsed);
       else this.clock.accumulator = 0;   // nothing to simulate; do not let it grow
 
@@ -503,6 +618,22 @@ export class Winding {
 
   get stats() {
     return this.renderer.stats;
+  }
+
+  /**
+   * Capture a scene's reflection probes (scene.addReflectionProbe): six
+   * renders of the scene from each, prefiltered. All of them, or a list.
+   * Recapture after what they see has changed. Async: the first capture
+   * builds the pipelines that read probes.
+   */
+  async captureReflectionProbes(scene, probes) {
+    this._assertAlive('captureReflectionProbes');
+    await this.renderer.captureReflectionProbes(scene, probes);
+  }
+
+  /** Lines for the next frame: line, box, sphere, axes. See render/debug.js. */
+  get debug() {
+    return this.renderer.debug;
   }
 
   /**

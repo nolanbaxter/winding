@@ -13,10 +13,11 @@ export { Scene } from './scene/scene.js';
 export { Node } from './scene/node.js';
 
 export { Environment } from './render/ibl.js';
+export { parseHDR } from './render/hdr.js';
 
 // Math is part of the public surface, not an engine internal. Tier 3 already
 // demands it: getWorldPosition(out) wants a vec3, setRotationAxisAngle wants an
-// axis, camera.position and scene.sun.direction are vectors you write into.
+// axis, camera.position and camera.target are vectors you write into.
 // Leaving it out of this barrel meant reaching past it into src/core/math.
 export * from './core/math/vec3.js';
 export * from './core/math/quat.js';

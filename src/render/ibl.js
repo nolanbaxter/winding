@@ -15,9 +15,12 @@
 
 import { BRDF_WGSL } from './shaders/brdf.js';
 import {
-  createCubemap, cubeView, cubeFaceView, clampSampler, generateMipmaps, mipLevelCountFor,
-} from '../rhi/texture.js';
+  createCubemap, cubeView, cubeFaceView, clampSampler, generateMipmaps, mipLevelCountFor, createTexture } from '../rhi/texture.js';
+import { toHalfRGBA } from './hdr.js';
 import { compileShaderSync } from '../rhi/shader.js';
+import { sharedPipelines } from '../rhi/pipeline.js';
+import { createPipelineLayout } from '../rhi/bindgroups.js';
+import { createBuffer } from '../rhi/buffer.js';
 
 const FACE_COUNT = 6;
 const PARAMS_BYTES = 16;   // face:u32, roughness:f32, sampleCount:u32, envSize:f32
@@ -35,10 +38,11 @@ const IRRADIANCE_SAMPLES = 64;
  * the cubemap in a float format -- clamp it to 1 and every reflection in the
  * scene flattens.
  *
- * `sun` points TOWARD the sun, which is the opposite of `scene.sun.direction`
- * (the direction light travels). They are separate on purpose: this one is
- * baked once into a cubemap and the other is a per-frame analytic light. If
- * you move one and want the disc to stay under the highlight, move both.
+ * `sun` points TOWARD the sun disc, the opposite of a directional light's
+ * direction (the way its light travels). The sky has no light in it: the disc
+ * is baked once into a cubemap, and a directional light is a per-frame
+ * analytic one. For a highlight under the disc, add a directional light
+ * shining along -sun.
  */
 export const DEFAULT_SKY = Object.freeze({
   ground: Object.freeze([0.10, 0.09, 0.08]),
@@ -110,6 +114,62 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
 }
 `;
 }
+
+/**
+ * The sky pass for an equirectangular map: each cube texel reads the map in
+ * its direction, with three.js's layout -- the image's centre faces +X, its
+ * top row is straight up -- so a panorama sits where it would there.
+ *
+ * The mip is the ratio of the two texel sizes: a map W wide spends 2 pi / W
+ * radians a texel at the equator, a face of `size` about (pi / 2) / size, so
+ * each cube texel covers W / (4 size) map texels across and reads the level
+ * where one texel does. Without it a 4k map baked into a small cube would
+ * alias its sun into sparkles.
+ *
+ * ponytail: one level for the whole face. Towards the poles an equirect
+ * texel narrows, so the map is sampled a little blurrier there than it needs
+ * to be; a per-texel level from the solid angle is the upgrade.
+ */
+const EQUIRECT_SHADER = /* wgsl */ `
+${BRDF_WGSL}
+
+struct Params {
+  face        : u32,
+  roughness   : f32,
+  sampleCount : u32,
+  envSize     : f32,
+};
+@group(0) @binding(0) var<uniform> params : Params;
+@group(0) @binding(1) var map : texture_2d<f32>;
+@group(0) @binding(2) var mapSampler : sampler;
+
+struct VertexOut {
+  @builtin(position) position : vec4<f32>,
+  @location(0)       uv       : vec2<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) index : u32) -> VertexOut {
+  var out : VertexOut;
+  let x = f32((index << 1u) & 2u);
+  let y = f32(index & 2u);
+  out.uv = vec2<f32>(x, y);
+  out.position = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+  return out;
+}
+
+@fragment
+fn fs(v : VertexOut) -> @location(0) vec4<f32> {
+  let dir = cubeDirection(params.face, v.uv);
+  let uv = vec2<f32>(
+    atan2(dir.z, dir.x) / (2.0 * PI) + 0.5,
+    0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI,
+  );
+  let width = f32(textureDimensions(map).x);
+  let level = max(log2(width / (4.0 * params.envSize)), 0.0);
+  return vec4<f32>(textureSampleLevel(map, mapSampler, uv, level).rgb, 1.0);
+}
+`;
 
 const CONVOLVE_SHADER = /* wgsl */ `
 ${BRDF_WGSL}
@@ -242,16 +302,32 @@ fn fsPrefilter(v : VertexOut) -> @location(0) vec4<f32> {
 /**
  * A prebaked lighting environment.
  *
- * Generated from the procedural sky in brdf.js. Swapping in a loaded HDR map
- * means replacing the sky pass with an equirectangular blit -- the irradiance
- * and prefilter passes below do not change.
+ * Baked from the procedural sky above, or from `map`: an equirectangular
+ * panorama, { width, height, data } in linear RGB floats, as parseHDR in
+ * hdr.js returns (engine.loadEnvironment does both). Only the first pass
+ * differs -- the irradiance and prefilter passes read the cube either way.
+ *
+ * With a map, `size` defaults to the map's own resolution: W / 4, which is
+ * what puts one cube texel under one map texel at the equator. A smaller
+ * size bakes a softer background and costs less memory; the lighting it
+ * gives is the same.
  */
 export class Environment {
   constructor(rhi, {
-    size = 128, irradianceSize = 32, prefilterMips = 6, label = 'env', sky = null,
+    size, irradianceSize = 32, prefilterMips = 6, label = 'env', sky = null, map = null, capture = false,
   } = {}) {
     this.rhi = rhi;
     const max = rhi.limits.maxTextureDimension2D;
+    if (map !== null) {
+      if (!(map.width > 0 && map.height > 0 && map.data?.length === map.width * map.height * 3)) {
+        throw new Error('Environment: map needs width, height and width * height * 3 floats of RGB');
+      }
+      if (map.width > max || map.height > max) {
+        throw new RangeError(`Environment: a ${map.width}x${map.height} map is past this device's ${max}`);
+      }
+    }
+    size ??= map === null ? 128 : Math.max(1, Math.min(Math.floor(map.width / 4), max));
+    this._map = map;
     if (size > max || irradianceSize > max) {
       throw new RangeError(`Environment: size ${Math.max(size, irradianceSize)} is past this device's ${max}`);
     }
@@ -279,11 +355,39 @@ export class Environment {
     });
 
     this.environmentView = cubeView(this.environment, `${label}-sky`);
+    // The map is only needed for the bake: uploaded here, read once, dropped.
+    if (map !== null) {
+      this._mapTexture = createTexture(rhi, {
+        label: `${label}-map`,
+        size: [map.width, map.height, 1],
+        format: 'rgba16float',
+        mipLevelCount: mipLevelCountFor(map.width, map.height),
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      rhi.queue.writeTexture(
+        { texture: this._mapTexture },
+        toHalfRGBA(map.data),
+        { bytesPerRow: map.width * 8 },
+        [map.width, map.height, 1],
+      );
+      generateMipmaps(rhi, this._mapTexture);
+    }
     this.irradianceView = cubeView(this.irradiance, `${label}-irradiance`);
     this.prefilteredView = cubeView(this.prefiltered, `${label}-prefiltered`);
     this.sampler = clampSampler(rhi);
 
-    this._bake(size, irradianceSize, prefilterMips);
+    /** The cube's resolution, which reflection probes take as theirs. */
+    this.size = size;
+    // A capture's six faces are rendered into `environment` by whoever made
+    // it -- a reflection probe -- and prefiltered by convolve() once they are.
+    this._capture = capture;
+    this._irradianceSize = irradianceSize;
+    if (!capture) this._bake(size, irradianceSize, prefilterMips);
+  }
+
+  /** Prefilter a capture, once its faces are in `environment` at mip 0. */
+  convolve() {
+    this._bake(this.size, this._irradianceSize, this.prefilterMips);
   }
 
   _bake(size, irradianceSize, prefilterMips) {
@@ -296,7 +400,7 @@ export class Environment {
     const alignment = rhi.limits.minUniformBufferOffsetAlignment;
     const passCount = FACE_COUNT * (2 + prefilterMips);
     const params = new ArrayBuffer(alignment * passCount);
-    const paramsBuffer = device.createBuffer({
+    const paramsBuffer = createBuffer(rhi, {
       label: 'ibl-params',
       size: params.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -359,38 +463,58 @@ export class Environment {
       ],
     });
 
-    const skyModule = compileShaderSync(device, skyShader(this.sky), 'ibl-sky.wgsl').module;
-    const convolveModule = compileShaderSync(device, CONVOLVE_SHADER, 'ibl-convolve.wgsl').module;
-    const target = [{ format: 'rgba16float' }];
+    // From a map, the sky pass reads it through its own layout: the map and a
+    // sampler that wraps round the panorama and clamps at the poles.
+    const mapLayout = this._map === null ? null : device.createBindGroupLayout({
+      label: 'ibl-map',
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
+        },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+      ],
+    });
+    const skyShaderObject = this._map === null
+      ? compileShaderSync(device, skyShader(this.sky), 'ibl-sky.wgsl')
+      : compileShaderSync(device, EQUIRECT_SHADER, 'ibl-equirect.wgsl');
+    const convolveShader = compileShaderSync(device, CONVOLVE_SHADER, 'ibl-convolve.wgsl');
 
-    const skyPipeline = device.createRenderPipeline({
-      label: 'ibl-sky',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [paramsLayout] }),
-      vertex: { module: skyModule, entryPoint: 'vs' },
-      fragment: { module: skyModule, entryPoint: 'fs', targets: target },
-      primitive: { topology: 'triangle-list' },
+    // Plain descriptors through the shared cache, like every pipeline. Each
+    // pass is one full-screen triangle, which winds clockwise: nothing culled.
+    const pipelines = sharedPipelines(device);
+    const bake = (label, layout, shader, fragmentEntry) => pipelines.get({
+      label, layout, shader, fragmentEntry,
+      targets: [{ format: 'rgba16float' }],
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depth: null,
     });
+    const skyPipeline = bake('ibl-sky', createPipelineLayout(device, { 0: mapLayout ?? paramsLayout }, 'ibl-sky'), skyShaderObject, 'fs');
+    const convolvePipelineLayout = createPipelineLayout(device, { 0: convolveLayout }, 'ibl-convolve');
+    const irradiancePipeline = bake('ibl-irradiance', convolvePipelineLayout, convolveShader, 'fsIrradiance');
+    const prefilterPipeline = bake('ibl-prefilter', convolvePipelineLayout, convolveShader, 'fsPrefilter');
 
-    const convolvePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [convolveLayout] });
-    const irradiancePipeline = device.createRenderPipeline({
-      label: 'ibl-irradiance',
-      layout: convolvePipelineLayout,
-      vertex: { module: convolveModule, entryPoint: 'vs' },
-      fragment: { module: convolveModule, entryPoint: 'fsIrradiance', targets: target },
-      primitive: { topology: 'triangle-list' },
-    });
-    const prefilterPipeline = device.createRenderPipeline({
-      label: 'ibl-prefilter',
-      layout: convolvePipelineLayout,
-      vertex: { module: convolveModule, entryPoint: 'vs' },
-      fragment: { module: convolveModule, entryPoint: 'fsPrefilter', targets: target },
-      primitive: { topology: 'triangle-list' },
-    });
-
-    const paramsBindGroup = device.createBindGroup({
-      layout: paramsLayout,
-      entries: [{ binding: 0, resource: { buffer: paramsBuffer, size: PARAMS_BYTES } }],
-    });
+    const paramsBindGroup = mapLayout === null
+      ? device.createBindGroup({
+        layout: paramsLayout,
+        entries: [{ binding: 0, resource: { buffer: paramsBuffer, size: PARAMS_BYTES } }],
+      })
+      : device.createBindGroup({
+        layout: mapLayout,
+        entries: [
+          { binding: 0, resource: { buffer: paramsBuffer, size: PARAMS_BYTES } },
+          { binding: 1, resource: this._mapTexture.createView() },
+          {
+            binding: 2,
+            resource: device.createSampler({
+              label: 'ibl-map', magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear',
+              addressModeU: 'repeat', addressModeV: 'clamp-to-edge',
+            }),
+          },
+        ],
+      });
     const convolveBindGroup = device.createBindGroup({
       layout: convolveLayout,
       entries: [
@@ -420,7 +544,8 @@ export class Environment {
       pass.end();
     };
 
-    for (let face = 0; face < FACE_COUNT; face++) {
+    // A capture's faces are already there.
+    for (let face = 0; !this._capture && face < FACE_COUNT; face++) {
       facePass(skyPipeline, paramsBindGroup, skyOffsets[face],
         cubeFaceView(this.environment, face), `sky:${face}`);
     }
@@ -460,6 +585,11 @@ export class Environment {
 
     rhi.queue.submit([convolve.finish()]);
     paramsBuffer.destroy();
+    // Destroyed after submit, which WebGPU allows: the work already queued
+    // keeps what it reads.
+    this._mapTexture?.destroy();
+    this._mapTexture = null;
+    this._map = null;
 
     this.passCount = passCount;
   }

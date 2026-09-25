@@ -460,10 +460,17 @@ export function buildFeatureGLB({
   uv0 = null,
   uv1 = null,
   baseColorTexCoord,
+  // KHR_texture_transform on the base colour texture: { offset, rotation, scale }.
+  baseColorTransform = null,
   imageURI = null,
   normalImageURI = null,
   normalScale,
   nodeScale,
+  // The material's extensions object, as the file would carry it.
+  materialExtensions = null,
+  doubleSided = false,
+  // Images after the base colour and normal ones, for extension textures.
+  extraImageURIs = [],
 } = {}) {
   const S = 1.6;
   const corners = [[-S, -S], [S, -S], [S, S], [-S, S]];
@@ -514,6 +521,7 @@ export function buildFeatureGLB({
   if (imageURI) {
     pbr.baseColorTexture = { index: 0 };
     if (baseColorTexCoord !== undefined) pbr.baseColorTexture.texCoord = baseColorTexCoord;
+    if (baseColorTransform) pbr.baseColorTexture.extensions = { KHR_texture_transform: baseColorTransform };
   }
 
   const material = { name: 'probe', pbrMetallicRoughness: pbr };
@@ -524,6 +532,8 @@ export function buildFeatureGLB({
   if (alphaMode) material.alphaMode = alphaMode;
   if (alphaCutoff !== undefined) material.alphaCutoff = alphaCutoff;
   if (emissiveFactor) material.emissiveFactor = emissiveFactor;
+  if (materialExtensions) material.extensions = materialExtensions;
+  if (doubleSided) material.doubleSided = true;
 
   const primitive = { attributes, material: 0 };
   if (indexed) primitive.indices = indicesAccessor;
@@ -548,7 +558,8 @@ export function buildFeatureGLB({
     json.nodes.push({ name: 'lamp', translation: lamp.translation, extensions: { KHR_lights_punctual: { light: 0 } } });
     json.scenes[0].nodes.push(1);
   }
-  const uris = [imageURI, normalImageURI].filter(Boolean);
+  if (materialExtensions) json.extensionsUsed = [...(json.extensionsUsed ?? []), ...Object.keys(materialExtensions)];
+  const uris = [imageURI, normalImageURI, ...extraImageURIs].filter(Boolean);
   if (uris.length > 0) {
     json.images = uris.map((uri) => ({ uri }));
     json.samplers = [{ magFilter: 9728, minFilter: 9728 }];   // NEAREST, so halves stay crisp
@@ -569,4 +580,46 @@ export function twoToneImageURI(left, right) {
   ctx.fillStyle = right;
   ctx.fillRect(1, 0, 1, 1);
   return canvas.toDataURL('image/png');
+}
+
+/**
+ * One quad at three levels of detail (MSFT_lod), each level an unlit colour
+ * -- red, green, blue, finest first -- so which level drew is one pixel's
+ * question. `coverage` is MSFT_screencoverage, one value a level.
+ */
+export function buildLodGLB(coverage = [0.5, 0.2, 0.01]) {
+  const S = 1.6;
+  const positions = Float32Array.from([-S, -S, 0, S, -S, 0, S, S, 0, -S, S, 0]);
+  const normals = Float32Array.from([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]);
+  const uvs = Float32Array.from([0, 0, 1, 0, 1, 1, 0, 1]);
+  const indices = Uint16Array.from([0, 1, 2, 0, 2, 3]);
+  const { bytes, views } = packBuffer([positions, normals, uvs, indices]);
+  const accessors = [
+    { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [-S, -S, 0], max: [S, S, 0] },
+    { bufferView: 1, componentType: 5126, count: 4, type: 'VEC3' },
+    { bufferView: 2, componentType: 5126, count: 4, type: 'VEC2' },
+    { bufferView: 3, componentType: 5123, count: 6, type: 'SCALAR' },
+  ];
+  const colours = [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]];
+  const json = {
+    asset: { version: '2.0' },
+    extensionsUsed: ['MSFT_lod', 'KHR_materials_unlit'],
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: views.map((v) => ({ buffer: 0, ...v })),
+    accessors,
+    materials: colours.map((baseColorFactor) => ({
+      pbrMetallicRoughness: { baseColorFactor }, extensions: { KHR_materials_unlit: {} },
+    })),
+    meshes: colours.map((_, m) => ({
+      primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, indices: 3, material: m }],
+    })),
+    nodes: [
+      { name: 'high', mesh: 0, extensions: { MSFT_lod: { ids: [1, 2] } }, extras: { MSFT_screencoverage: coverage } },
+      { name: 'medium', mesh: 1 },
+      { name: 'low', mesh: 2 },
+    ],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  };
+  return encodeGLB(json, bytes);
 }

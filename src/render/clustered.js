@@ -42,8 +42,10 @@
 
 import { DEBUG, assert } from '../core/assert.js';
 import { grownCapacity } from '../core/grow.js';
-import { storageCapacity } from '../rhi/buffer.js';
+import { storageCapacity, createBuffer } from '../rhi/buffer.js';
 import { compileShader } from '../rhi/shader.js';
+import { sharedPipelines } from '../rhi/pipeline.js';
+import { createPipelineLayout } from '../rhi/bindgroups.js';
 
 /**
  * Screen tiles in the froxel grid. A budget, not a shape.
@@ -88,6 +90,14 @@ export function clusterGridFor(aspect) {
  */
 export const MAX_LIGHTS_PER_CLUSTER = 64;
 
+/**
+ * Decals are clustered by the same pass (render/decals.js): each adds its
+ * bounding sphere after the lights, and lands in a second region of the same
+ * shape -- counts from CLUSTER_COUNT, indices from DECAL_INDEX_BASE -- so the
+ * surface shader reads them through the bindings it already has.
+ */
+export const DECAL_INDEX_BASE = CLUSTER_COUNT * MAX_LIGHTS_PER_CLUSTER;
+
 /** vec4 positionRadius, vec4 colorIntensity, vec4 directionCone, vec4 coneFalloff */
 export const LIGHT_BYTES = 64;
 /**
@@ -110,6 +120,8 @@ struct Params {
   // Forward projection, for the tiles a light's bounds land on. Last, so the
   // layout above it is unchanged.
   projection    : mat4x4<f32>,
+  // x = decals, whose spheres follow the grid.w lights in the list.
+  decals        : vec4<u32>,
 };
 
 struct Light {
@@ -210,6 +222,7 @@ fn buildClusters(@builtin(global_invocation_id) id : vec3<u32>) {
   // Assignment appends to these, so every frame starts them at zero -- here,
   // where there is already one invocation per cluster.
   atomicStore(&counts[cluster], 0u);
+  atomicStore(&counts[${CLUSTER_COUNT}u + cluster], 0u);
 }
 
 /** The slice a view depth falls in: the fragment shader's mapping, clamped. */
@@ -276,7 +289,12 @@ fn assignLights(
   @builtin(local_invocation_index) lane : u32,
 ) {
   let li = group.y * 65535u + group.x;
-  if (li >= params.grid.w) { return; }
+  if (li >= params.grid.w + params.decals.x) { return; }
+  // Past the lights, a decal: its own region, numbered from zero.
+  let decal = li >= params.grid.w;
+  let item = select(li, li - params.grid.w, decal);
+  let countAt = select(0u, ${CLUSTER_COUNT}u, decal);
+  let indexAt = select(0u, ${DECAL_INDEX_BASE}u, decal);
 
   let light = lights[li];
   // Lights arrive in world space; the cluster grid is view space.
@@ -324,9 +342,9 @@ fn assignLights(
     // A sphere-vs-AABB test. Conservative for spot lights, which are tested
     // by their bounding sphere -- a cone's own test is much more work.
     if (distanceSqToBox(centre, bounds[cluster].minPoint.xyz, bounds[cluster].maxPoint.xyz) <= radiusSq) {
-      let slot = atomicAdd(&counts[cluster], 1u);
+      let slot = atomicAdd(&counts[countAt + cluster], 1u);
       if (slot < ${MAX_LIGHTS_PER_CLUSTER}u) {
-        indices[cluster * ${MAX_LIGHTS_PER_CLUSTER}u + slot] = li;
+        indices[indexAt + cluster * ${MAX_LIGHTS_PER_CLUSTER}u + slot] = item;
       }
     }
   }
@@ -358,7 +376,7 @@ export class ClusteredLights {
      */
     ({ x: this.gridX, y: this.gridY } = clusterGridFor(16 / 9));
     this.lightData = new Float32Array(this.lightCapacity * (LIGHT_BYTES / 4));
-    this.lightBuffer = device.createBuffer({
+    this.lightBuffer = createBuffer(rhi, {
       label: 'lights',
       size: this.lightCapacity * LIGHT_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -366,27 +384,27 @@ export class ClusteredLights {
     /** Bumped by _grow. The renderer's frame bind group names lightBuffer. */
     this.buffersRevision = 0;
 
-    this.boundsBuffer = device.createBuffer({
+    this.boundsBuffer = createBuffer(rhi, {
       label: 'cluster-bounds',
       size: CLUSTER_COUNT * 32,            // two vec4 per cluster
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,   // COPY_SRC: the GPU suite reads the lists back
     });
-    this.indexBuffer = device.createBuffer({
-      label: 'cluster-light-indices',
-      size: CLUSTER_COUNT * MAX_LIGHTS_PER_CLUSTER * 4,
+    this.indexBuffer = createBuffer(rhi, {
+      label: 'cluster-indices',
+      size: 2 * DECAL_INDEX_BASE * 4,        // lights, then decals
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
-    this.countBuffer = device.createBuffer({
-      label: 'cluster-light-counts',
-      size: CLUSTER_COUNT * 4,
+    this.countBuffer = createBuffer(rhi, {
+      label: 'cluster-counts',
+      size: 2 * CLUSTER_COUNT * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    // invProjection(64) + view(64) + grid(16) + depth(16) + screen(16) + projection(64)
-    this.paramsData = new ArrayBuffer(240);
+    // invProjection(64) + view(64) + grid(16) + depth(16) + screen(16) + projection(64) + decals(16)
+    this.paramsData = new ArrayBuffer(256);
     this.paramsF32 = new Float32Array(this.paramsData);
     this.paramsU32 = new Uint32Array(this.paramsData);
-    this.paramsBuffer = device.createBuffer({
+    this.paramsBuffer = createBuffer(rhi, {
       label: 'cluster-params',
       size: this.paramsData.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -405,6 +423,7 @@ export class ClusteredLights {
     this.bindGroup = this._makeBindGroup();
 
     this.lightCount = 0;
+    this.decalCount = 0;
     this.sliceScale = 0;
     this.sliceBias = 0;
     this.tileSize = new Float32Array(2);
@@ -417,18 +436,10 @@ export class ClusteredLights {
   async _init() {
     const device = this.rhi.device;
     const shader = await compileShader(device, CLUSTER_SHADER, 'clustered.wgsl');
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-
-    this.buildPipeline = device.createComputePipeline({
-      label: 'cluster-bounds',
-      layout: pipelineLayout,
-      compute: { module: shader.module, entryPoint: 'buildClusters' },
-    });
-    this.assignPipeline = device.createComputePipeline({
-      label: 'cluster-assign',
-      layout: pipelineLayout,
-      compute: { module: shader.module, entryPoint: 'assignLights' },
-    });
+    const layout = createPipelineLayout(device, { 0: this.layout }, 'clusters');
+    const pipelines = sharedPipelines(device);
+    this.buildPipeline = pipelines.compute({ label: 'cluster-bounds', layout, shader, entry: 'buildClusters' });
+    this.assignPipeline = pipelines.compute({ label: 'cluster-assign', layout, shader, entry: 'assignLights' });
   }
 
   /** Names lightBuffer, so it is rebuilt whenever that buffer is replaced. */
@@ -459,7 +470,7 @@ export class ClusteredLights {
     this.lightData = new Float32Array(capacity * (LIGHT_BYTES / 4));
 
     this.lightBuffer.destroy();
-    this.lightBuffer = this.rhi.device.createBuffer({
+    this.lightBuffer = createBuffer(this.rhi, {
       label: 'lights',
       size: capacity * LIGHT_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -478,15 +489,27 @@ export class ClusteredLights {
    * `lightDistance` is the range clustered lights are resolved over. It is not
    * a cutoff: anything past it falls into the last slice and is still lit.
    */
-  update(scene, camera, lightDistance) {
-    if (scene.lightCount > this.lightCapacity) this._grow(scene.lightCount);
+  /** `width` and `height`: the target's, which is the canvas's unless a probe is capturing. */
+  /**
+   * `decalSpheres`: centre and radius of each of `decalCount` decals' boxes,
+   * clustered after the lights.
+   */
+  update(scene, camera, lightDistance, width = this.rhi.width, height = this.rhi.height, decalSpheres = null, decalCount = 0) {
     const count = scene.lightCount;
+    const items = count + decalCount;
+    if (items > this.lightCapacity) this._grow(items);
     this.lightCount = count;
+    this.decalCount = decalCount;
 
-    this.lightData.set(scene.lights.subarray(0, count * (LIGHT_BYTES / 4)));
-    this.rhi.queue.writeBuffer(this.lightBuffer, 0, this.lightData, 0, count * (LIGHT_BYTES / 4));
+    const floats = LIGHT_BYTES / 4;
+    this.lightData.set(scene.lights.subarray(0, count * floats));
+    for (let i = 0; i < decalCount; i++) {
+      this.lightData.fill(0, (count + i) * floats, (count + i + 1) * floats);
+      this.lightData.set(decalSpheres.subarray(i * 4, i * 4 + 4), (count + i) * floats);
+    }
+    this.rhi.queue.writeBuffer(this.lightBuffer, 0, this.lightData, 0, items * floats);
 
-    // How far the farthest light actually reaches, in view depth. The last
+    // How far the farthest light or decal actually reaches, in view depth. The last
     // cluster slice is stretched to this, because the fragment shader clamps
     // everything past lightDistance into that slice and a light outside its
     // box is in no cluster at all. Derived from the light list, so it is
@@ -497,8 +520,8 @@ export class ClusteredLights {
     // out to its radius, so that is what has to be inside the box.
     const view = camera.view;
     let reach = lightDistance;   // published as lightReach below
-    for (let i = 0; i < count; i++) {
-      const o = i * (LIGHT_BYTES / 4);
+    for (let i = 0; i < items; i++) {
+      const o = i * floats;
       const x = this.lightData[o], y = this.lightData[o + 1], z = this.lightData[o + 2];
       const radius = this.lightData[o + 3];
       const depth = -(view[2] * x + view[6] * y + view[10] * z + view[14]);
@@ -534,11 +557,11 @@ export class ClusteredLights {
     // The grid follows the viewport, so froxels stay near square as it is
     // resized or rotated. Recomputed each frame because it is two integers
     // from one divide -- cheaper than tracking whether the aspect moved.
-    const grid = clusterGridFor(this.rhi.width / this.rhi.height);
+    const grid = clusterGridFor(width / height);
     this.gridX = grid.x;
     this.gridY = grid.y;
-    this.tileSize[0] = this.rhi.width / this.gridX;
-    this.tileSize[1] = this.rhi.height / this.gridY;
+    this.tileSize[0] = width / this.gridX;
+    this.tileSize[1] = height / this.gridY;
 
     const f32 = this.paramsF32;
     const u32 = this.paramsU32;
@@ -549,11 +572,12 @@ export class ClusteredLights {
     f32[37] = lightDistance;
     f32[38] = reach;
     f32[39] = 0;
-    f32[40] = this.rhi.width;
-    f32[41] = this.rhi.height;
+    f32[40] = width;
+    f32[41] = height;
     f32[42] = this.tileSize[0];
     f32[43] = this.tileSize[1];
     f32.set(camera.projection, 44);
+    u32[60] = decalCount;
 
     this.rhi.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
   }
@@ -595,11 +619,12 @@ export class ClusteredLights {
 
   /** One workgroup per light; see assignLights. */
   _dispatchAssign(pass) {
-    if (this.lightCount === 0) return;   // the counts are already zero
+    const items = this.lightCount + this.decalCount;
+    if (items === 0) return;   // the counts are already zero
     pass.setPipeline(this.assignPipeline);
     pass.setBindGroup(0, this.bindGroup);
     // 65,535 is WebGPU's guaranteed workgroups per dimension; past it, y.
-    pass.dispatchWorkgroups(Math.min(this.lightCount, 65535), Math.ceil(this.lightCount / 65535));
+    pass.dispatchWorkgroups(Math.min(items, 65535), Math.ceil(items / 65535));
   }
 
   destroy() {

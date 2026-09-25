@@ -16,10 +16,17 @@ import { frustumCreate, frustumFromViewProjection, frustumTestAABB } from '../sr
 import { mat4Create, mat4Decompose, mat4FromQuatPosScale, mat4PerspectiveReverseZInfinite } from '../src/core/math/mat4.js';
 import { quatCreate, quatNormalize, quatSetAxisAngle } from '../src/core/math/quat.js';
 import { createBuffer, storageCapacity } from '../src/rhi/buffer.js';
-import { mipLevelCountFor } from '../src/rhi/texture.js';
+import { mipLevelCountFor, createTexture } from '../src/rhi/texture.js';
 import { PipelineCache } from '../src/rhi/pipeline.js';
 import { MorphStore, packMorphCountStride } from '../src/render/morph.js';
-import { MaterialRegistry } from '../src/render/material.js';
+import {
+  MaterialRegistry, MATERIAL_BYTES, extensionSlotCount, EXTENSION_BINDING, VARIANT_EXTENDED, variantKey, variantPipelineState,
+} from '../src/render/material.js';
+import { EXTENSION_TEXTURES, CORE_TEXTURE_COUNT, MATERIAL_TEXTURES } from '../src/scene/gltf/images.js';
+import { DebugLines } from '../src/render/debug.js';
+
+/** Where the material uniform's texture rows start, in floats: they end it, eight floats a texture. */
+const UV_ROWS = MATERIAL_BYTES / 4 - MATERIAL_TEXTURES.length * 8;
 import { SkinPalette } from '../src/render/skin.js';
 import { ShadowMaps, MAX_CASCADES } from '../src/render/shadows.js';
 import { Scene } from '../src/scene/scene.js';
@@ -79,6 +86,7 @@ function fakeRhi(limits = {}) {
       maxBufferSize: 256 << 20,
       maxStorageBufferBindingSize: 128 << 20,
       maxTextureDimension2D: 8192,
+      maxSampledTexturesPerShaderStage: 16,
       ...limits,
     },
   };
@@ -234,6 +242,28 @@ console.log('\nmaterials');
 
 const MATERIAL = { baseColorFactor: [0.25, 0.5, 0.75, 1] };
 
+test('a texture past the device is refused by name, not made invalid', () => {
+  const made = [];
+  const rhi = { device: { createTexture: (d) => { made.push(d); return d; } }, limits: { maxTextureDimension2D: 4096, maxTextureArrayLayers: 256 } };
+  assert.throws(() => createTexture(rhi, { label: 'big', size: [8192, 64, 1] }), /big is 8192x64, past this device's 4096/);
+  assert.throws(() => createTexture(rhi, { label: 'deep', size: { width: 64, height: 64, depthOrArrayLayers: 300 } }), /deep has 300 layers, past this device's 256/);
+  createTexture(rhi, { label: 'fits', size: [4096, 4096, 256] });
+  assert.deepEqual(made.map((d) => d.label), ['fits'], 'only the one that fits reached the device');
+});
+
+test('compute pipelines are cached by what makes them different', () => {
+  let created = 0;
+  const cache = new PipelineCache({ createComputePipeline: () => ({ n: ++created }) });
+  const layout = { id: 1, gpu: {} };
+  const shader = { id: 7, module: {} };
+  const a = cache.compute({ label: 'a', layout, shader, entry: 'main' });
+  assert.equal(cache.compute({ label: 'again', layout, shader, entry: 'main' }), a, 'same layout, shader and entry');
+  assert.notEqual(cache.compute({ layout, shader, entry: 'other' }), a, 'another entry');
+  assert.notEqual(cache.compute({ layout, shader, entry: 'main', constants: { N: 2 } }), a, 'other constants');
+  assert.equal(created, 3);
+});
+
+
 test('growth keeps every material: its values, its pipeline and its bind group', () => {
   const rhi = fakeRhi();
   const registry = new MaterialRegistry(rhi, { capacity: 2 });
@@ -259,6 +289,135 @@ test('a released id is reused, and its textures are let go', () => {
   assert.equal(registry.bindGroups[id], undefined);
   assert.equal(registry._textures[id], undefined);
   assert.equal(registry.register(MATERIAL), id);
+});
+
+test('an animated material uploads again, unless its id went to another asset', () => {
+  const rhi = fakeRhi();
+  const registry = new MaterialRegistry(rhi, { capacity: 4 });
+  const record = { ...MATERIAL, baseColorFactor: Float32Array.of(0.25, 0.5, 0.75, 1) };
+  const id = registry.register(record);
+  record.baseColorFactor[1] = 0.125;
+  rhi.log.writes.length = 0;
+  registry.update(id, record);
+  assert.equal(rhi.log.writes.length, 1);
+  const { data, offset } = rhi.log.writes[0];
+  assert.equal(new Float32Array(data, offset, 4)[1], 0.125, 'the new colour went up');
+
+  // Unloaded between the clip's change and the frame's upload: nothing to
+  // upload. And once the id is handed to someone else, their material must
+  // not be overwritten.
+  registry.release(id);
+  rhi.log.writes.length = 0;
+  registry.update(id, record);
+  assert.equal(rhi.log.writes.length, 0, 'a released id');
+  const other = registry.register(MATERIAL);
+  assert.equal(other, id, 'the id really was reused');
+  rhi.log.writes.length = 0;
+  registry.update(id, record);
+  assert.equal(rhi.log.writes.length, 0);
+});
+
+
+test('extension textures share a binding per image, each kind keeping its own UVs', () => {
+  const rhi = fakeRhi();
+  const registry = new MaterialRegistry(rhi, { capacity: 4, frameTextures: 4 });
+  assert.equal(registry.extensionSlots, Math.min(EXTENSION_TEXTURES.length, 16 - 4 - CORE_TEXTURE_COUNT));
+  const image = { createView: () => ({ image: 'shared' }) };
+  const id = registry.register(
+    { ...MATERIAL, name: 'shared', uvSets: { specularColor: 1 } },
+    { specular: image, specularColor: image },
+  );
+  const f32 = new Float32Array(rhi.log.writes.at(-1).data, 0, MATERIAL_BYTES / 4);
+  const rows = (kind) => f32.subarray(UV_ROWS + (CORE_TEXTURE_COUNT + kind) * 8, UV_ROWS + (CORE_TEXTURE_COUNT + kind + 1) * 8);
+  assert.deepEqual([rows(0)[3], rows(0)[7]], [0, 0], 'specular: UV set 0, binding 0');
+  assert.deepEqual([rows(1)[3], rows(1)[7]], [1, 0], 'specular colour: UV set 1, the same binding');
+  assert.deepEqual([f32[13], f32[14], f32[15], ...f32.subarray(16, 19)], [1.5, 1, 0, 1, 1, 1], 'the extension defaults');
+  const entries = registry.shadingGroup(id).entries;
+  assert.equal(entries.find((e) => e.binding === EXTENSION_BINDING).resource.image, 'shared');
+  assert.equal(entries.length, EXTENSION_BINDING + registry.extensionSlots, 'every slot bound, spares to white');
+
+  const plain = registry.register(MATERIAL);
+  const g32 = new Float32Array(rhi.log.writes.at(-1).data, plain * registry.stride, MATERIAL_BYTES / 4);
+  assert.equal(g32[UV_ROWS + CORE_TEXTURE_COUNT * 8 + 7], -1, 'no texture, no binding: the shader reads 1');
+});
+
+test('a material with more extension images than the device binds is refused, and takes no id', () => {
+  assert.equal(extensionSlotCount(16, 4), Math.min(EXTENSION_TEXTURES.length, 7));
+  assert.equal(extensionSlotCount(10, 5), 0, 'never negative');
+  const registry = new MaterialRegistry(fakeRhi({ maxSampledTexturesPerShaderStage: 10 }), { capacity: 4, frameTextures: 4 });
+  assert.equal(registry.extensionSlots, 1);
+  const a = { createView: () => ({}) };
+  const b = { createView: () => ({}) };
+  assert.throws(() => registry.register({ name: 'rich' }, { specular: a, specularColor: b }),
+    /material "rich" samples 2 distinct extension textures; this device binds 1 \(maxSampledTexturesPerShaderStage 10/);
+  assert.equal(registry.count, 0);
+  registry.register({ name: 'fits' }, { specular: a, specularColor: a });
+});
+
+test('a transmissive material leaves the opaque path, with a variant of its own', () => {
+  // It must draw after the opaque scene is copied, with the one colour target
+  // that pass has, so it cannot share a pipeline with an opaque material.
+  const rhi = fakeRhi();
+  const registry = new MaterialRegistry(rhi, { capacity: 4 });
+  const glass = registry.register({ ...MATERIAL, transmission: 1, attenuationDistance: Infinity });
+  const solid = registry.register(MATERIAL);
+  assert.equal(registry.isTransparent(glass), true);
+  assert.equal(registry.isTransmissive(glass), true);
+  assert.equal(registry.isTransparent(solid), false);
+  assert.notEqual(registry.variants[glass], registry.variants[solid]);
+  assert.notEqual(registry.pipelineIdOf[glass], registry.pipelineIdOf[solid]);
+  const f32 = new Float32Array(rhi.log.writes.find((w) => w.offset === glass * registry.stride).data, glass * registry.stride, MATERIAL_BYTES / 4);
+  assert.deepEqual([f32[36], f32[38]], [1, 0], 'an infinite attenuation distance is written as 0, which the shader reads as none');
+});
+
+test('only a material that uses an extension layer pays for the extended shader', () => {
+  const registry = new MaterialRegistry(fakeRhi(), { capacity: 8 });
+  const texture = { createView: () => ({}) };
+  const extended = (material, textures) => (registry.variants[registry.register(material, textures)] & VARIANT_EXTENDED) !== 0;
+  assert.equal(extended(MATERIAL), false, 'plain');
+  assert.equal(extended({ ...MATERIAL, ior: 1.33, specular: 0.5, specularColor: [1, 0, 0] }), false,
+    'ior and specular factors need no layer');
+  assert.equal(extended({ ...MATERIAL, clearcoat: 0.5 }), true);
+  assert.equal(extended({ ...MATERIAL, extendedShading: true }), true, 'declared at zero, so a clip can raise it');
+  assert.equal(extended(MATERIAL, { specular: texture }), true, 'an extension texture');
+  assert.equal(variantPipelineState(variantKey(0, false, false, false, false, true)).constants.EXTENSIONS, 1);
+  assert.equal(variantPipelineState(variantKey(0, false)).constants.EXTENSIONS, 0);
+});
+
+test('debug lines: what each shape writes, growth, and a frame with none adds no pass', () => {
+  const rhi = fakeRhi();
+  const debug = new DebugLines(rhi, null, {}, {});
+  debug.box([0, 0, 0], [1, 2, 3], [1, 0.5, 0]);
+  assert.equal(debug.count, 24, 'twelve edges');
+  const f32 = new Float32Array(debug._floats.buffer, 0, debug.count * 4);
+  const corners = new Set();
+  for (let v = 0; v < debug.count; v++) corners.add(`${f32[v * 4]},${f32[v * 4 + 1]},${f32[v * 4 + 2]}`);
+  assert.equal(corners.size, 8, 'every edge ends on a corner, and all eight are used');
+  assert.deepEqual([...debug._bytes.subarray(12, 16)], [255, 128, 0, 255], 'colour as unorm bytes, opaque');
+
+  debug.clear();
+  debug.sphere([1, 1, 1], 2);
+  assert.equal(debug.count, 3 * 32 * 2);
+  const g32 = new Float32Array(debug._floats.buffer, 0, debug.count * 4);
+  for (let v = 0; v < debug.count; v++) {
+    const r = Math.hypot(g32[v * 4] - 1, g32[v * 4 + 1] - 1, g32[v * 4 + 2] - 1);
+    assert.ok(Math.abs(r - 2) < 1e-5, 'every point on the sphere');
+  }
+
+  // Past the first allocation, and the earlier lines survive the move.
+  debug.clear();
+  debug.line([7, 8, 9], [0, 0, 0], [0, 1, 0]);
+  for (let i = 0; i < 300; i++) debug.axes([i, 0, 0]);
+  assert.equal(debug.count, 2 + 300 * 6);
+  assert.deepEqual([...debug._floats.subarray(0, 3)], [7, 8, 9]);
+
+  const passes = [];
+  const graph = { addPass: (p) => passes.push(p) };
+  debug.addPass(graph, { surface: 1, depth: 2, viewProjection: new Float32Array(16) });
+  assert.equal(passes.length, 1);
+  debug.clear();
+  debug.addPass(graph, { surface: 1, depth: 2, viewProjection: new Float32Array(16) });
+  assert.equal(passes.length, 1, 'nothing to draw, no pass');
 });
 
 test('the 4096th material fits the sort key and the 4097th does not', () => {

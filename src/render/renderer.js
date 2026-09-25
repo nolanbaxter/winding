@@ -22,9 +22,21 @@ import { grownCapacity } from '../core/grow.js';
 import { DIRECTIONAL_FLOATS } from '../scene/scene.js';
 
 import {
-  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, ALPHA_BLEND,
+  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND,
 } from './material.js';
-import { PBR_SHADER, FRAME_BYTES } from './shaders/pbr.js';
+import { pbrShader, FRAME_BYTES } from './shaders/pbr.js';
+import { SHEEN_ALBEDO } from './sheen.js';
+import { OpaqueCopy } from './transmission.js';
+import { packFog } from './fog.js';
+import { DebugLines } from './debug.js';
+import { SpritePass } from './sprites.js';
+import { ParticleSystem } from './particles.js';
+import { DecalSet } from './decals.js';
+import { DepthOfField } from './dof.js';
+import { ProbeSet, FACE_CAMERAS, flipInto, PROBE_FLOATS } from './probes.js';
+import { Environment } from './ibl.js';
+import { Camera } from '../scene/camera.js';
+import { createTexture, cubeFaceView } from '../rhi/texture.js';
 import { OIT_RESOLVE_SHADER } from './shaders/oit.js';
 import { SkyboxPass } from './skybox.js';
 import { ShadowMaps, stableShadowDistance } from './shadows.js';
@@ -34,13 +46,15 @@ import { SkinPalette } from './skin.js';
 import { MorphStore } from './morph.js';
 import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
-import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES } from './gpudriven.js';
+import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW } from './gpudriven.js';
 import {
   updateWorldBounds, unionWorldBounds, farthestViewDepth, farthestDistance,
   updateSkinBounds, applySkinBounds,
 } from '../scene/bounds.js';
 import { HierarchicalDepth } from './hzb.js';
+import { AmbientOcclusion, AMBIENT_FORMAT } from './ao.js';
 import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
+import { createBuffer } from '../rhi/buffer.js';
 
 const DEFAULT_MAX_DRAWS = 4096;
 
@@ -70,13 +84,21 @@ const FORWARD = vec3Create();
 
 const now = () => (globalThis.performance?.now?.() ?? Date.now());
 
+/** Shader features a pipeline set compiles in; see PROBES and DECALS in pbr.js. */
+export const FEATURE_PROBES = 1;
+export const FEATURE_DECALS = 2;
+
+function featureConstants(features) {
+  return { PROBES: features & FEATURE_PROBES ? 1 : 0, DECALS: features & FEATURE_DECALS ? 1 : 0 };
+}
+
 export class Renderer {
   static async create(rhi, {
     maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
-    shadowDistance = null, post, gpuTiming = false, oit = false,
+    shadowDistance = null, post, gpuTiming = false, oit = false, ao = false,
   } = {}) {
     const renderer = new Renderer(rhi, {
-      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit,
+      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao,
     });
     await renderer._init();
     return renderer;
@@ -84,17 +106,17 @@ export class Renderer {
 
   constructor(rhi, {
     maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = false,
-    oit = false,
+    oit = false, ao = false, fog = null, dof = null,
   }) {
     this.shadowOptions = shadows ?? {};
+    this._fogOption = fog;
+    this._dofOption = dof;
     this.postOptions = post ?? {};
     this.rhi = rhi;
     this.maxDraws = maxDraws;
     this.exposure = exposure;
 
     this.pipelines = new PipelineCache(rhi.device);
-    this.materials = new MaterialRegistry(rhi, { capacity: 1024 });
-
     const frameEntries = [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
@@ -126,8 +148,31 @@ export class Renderer {
       { binding: 13, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       // Every directional light but the shadowed one.
       { binding: 14, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      // Point and spot shadows: their maps, a layer a view, and the views.
+      {
+        binding: 15,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: 'depth', viewDimension: '2d-array' },
+      },
+      { binding: 16, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      // Every casting directional light's cascade matrices, light by light.
+      { binding: 17, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      // The opaque scene, mipped, for transmissive surfaces to see through.
+      { binding: 18, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+      // Reflection probes: their prefiltered cubes, and their boxes.
+      { binding: 19, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube-array' } },
+      { binding: 20, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      // Decals: their textures, a layer each, and their boxes. The boxes are the
+      // fragment stage's eighth storage buffer, which is as many as WebGPU
+      // guarantees: the next thing that needs one has to share.
+      { binding: 21, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d-array' } },
+      { binding: 22, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
     ];
     checkStorageStages(rhi, frameEntries);
+    this.materials = new MaterialRegistry(rhi, {
+      capacity: 1024,
+      frameTextures: frameEntries.filter((e) => e.texture && (e.visibility & GPUShaderStage.FRAGMENT)).length,
+    });
     this.frameLayout = rhi.device.createBindGroupLayout({ label: 'frame', entries: frameEntries });
     this.drawLayout = rhi.device.createBindGroupLayout({
       label: 'draw',
@@ -142,11 +187,20 @@ export class Renderer {
       [GROUP_MATERIAL]: this.materials.layout,
       [GROUP_DRAW]: this.drawLayout,
     }, 'pbr');
+    // The extended variants' own: the material group with its extension slots.
+    this.extendedPipelineLayout = createPipelineLayout(rhi.device, {
+      [GROUP_FRAME]: this.frameLayout,
+      [GROUP_MATERIAL]: this.materials.extendedLayout,
+      [GROUP_DRAW]: this.drawLayout,
+    }, 'pbr-extended');
 
-    this.frameBuffer = rhi.device.createBuffer({
-      label: 'frame', size: FRAME_BYTES,
+    this.frameBuffer = createBuffer(rhi, {
+      label: 'frame', size: FRAME_BYTES + SHEEN_ALBEDO.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+    // The sheen albedo table rides at the end of the frame's uniform: it never
+    // changes, so it is written once here and the per-frame write stops short.
+    rhi.queue.writeBuffer(this.frameBuffer, FRAME_BYTES, SHEEN_ALBEDO);
     this.frameData = new Float32Array(FRAME_BYTES / 4);
     // The directional lights that do not cast the shadow. Grown to the scene's
     // count on demand; one entry to start, since a binding cannot be empty.
@@ -157,8 +211,15 @@ export class Renderer {
 
     this.frustum = frustumCreate();
 
-    this._pipelineByVariant = new Map();
-    this._oitPipelineByVariant = new Map();
+    /**
+     * Pipelines by variant: the forward ones and the OIT ones, first without
+     * reflection probes compiled in, then -- once a scene has captured any --
+     * with. Each frame draws from the set its scene needs; see PROBES in
+     * pbr.js for what carrying the lookup costs a scene without probes.
+     */
+    this._variantSets = new Map([[0, { forward: new Map(), oit: new Map(), ready: true }]]);
+    this._pipelineByVariant = this._variantSets.get(0).forward;
+    this._oitPipelineByVariant = this._variantSets.get(0).oit;
     /**
      * Weighted-blended order-independent transparency, off by default.
      *
@@ -168,6 +229,14 @@ export class Renderer {
      * architectural glass wants the sorted path, smoke and foliage want this.
      */
     this.oit = oit;
+    /**
+     * Screen-space ambient occlusion (ao.js), off by default: `true`, or
+     * { radius } in world units. Without a radius it is a thirty-second of
+     * the scene's bounding radius, found each frame -- the reach of a contact
+     * shadow has to be picked by someone, and this picks it relative to the
+     * scene so that a helmet and a cathedral both get one in proportion.
+     */
+    this.ao = ao ? { radius: ao.radius ?? null } : null;
     this._frameBindGroups = new WeakMap();
     this._clusterRevision = 0;
 
@@ -231,6 +300,35 @@ export class Renderer {
     this._forwardEarly = (pass) => this._encodeForward(pass, 0);
     this._oitExecute = (pass) => this._encodeOIT(pass);
     this._forwardLate = (pass) => this._encodeForward(pass, 1);
+    this._forwardBlend = (pass) => {
+      pass.setBindGroup(GROUP_FRAME, this._frameBindGroup(this._frameEnvironment));
+      this.pipelineLayout.bindEmptyGroups(pass);
+      this._encodeTransparent(pass, this._pipelineByVariant, null, -1, false);
+    };
+    this._forwardTransmission = (pass) => {
+      pass.setBindGroup(GROUP_FRAME, this._frameBindGroup(this._frameEnvironment));
+      this.pipelineLayout.bindEmptyGroups(pass);
+      this._encodeTransparent(pass, this._pipelineByVariant, null, -1, true);
+    };
+    /** The opaque scene, for transmissive surfaces; see transmission.js. */
+    this.opaqueCopy = new OpaqueCopy(rhi);
+    /** Each scene's reflection probes on the GPU; see probes.js. */
+    this._probeSets = new WeakMap();
+    /** What the frame binds for probes when a scene has none: an empty set. */
+    this._noProbes = {
+      view: createTexture(rhi, {
+        label: 'no-probes', size: [1, 1, 6], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING,
+      }).createView({ dimension: 'cube-array' }),
+      buffer: createBuffer(rhi, { label: 'no-probes', size: PROBE_FLOATS * 4, usage: GPUBufferUsage.STORAGE }),
+    };
+    this._frameProbes = null;
+    /** Every scene's decals go through this one set, packed each frame. */
+    this.decals = new DecalSet(rhi);
+    this._decalRevision = this.decals.revision;
+    /** How many transmissive items this frame draws, from _orderTransparent. */
+    this._transmissiveCount = 0;
+    /** Whether blended items draw at the end of forward:late, or in a pass of their own. */
+    this._blendInLate = true;
     this._frameScene = null;
     this._frameEnvironment = null;
 
@@ -257,16 +355,22 @@ export class Renderer {
     this.gpu = await GpuDriven.create(this.rhi, this.maxDraws, this.materials);
     this._makeDrawBindGroup();
     this.clusters = await ClusteredLights.create(this.rhi);
-    this.shader = await compileShader(this.rhi.device, PBR_SHADER, 'pbr.wgsl');
+    // Two modules: the plain one declares no extension textures, so its
+    // pipelines take the core material layout.
+    [this.shader, this.extendedShader] = await Promise.all([
+      compileShader(this.rhi.device, pbrShader(0), 'pbr.wgsl'),
+      compileShader(this.rhi.device, pbrShader(this.materials.extensionSlots), 'pbr-extended.wgsl'),
+    ]);
     if (this.oit) await this._initOit();
     this.shadows = await ShadowMaps.create(
       this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout,
     );
-    this.skybox = await SkyboxPass.create(this.rhi, this.pipelines);
+    this.skybox = await SkyboxPass.create(this.rhi, this.pipelines, this.ao ? AMBIENT_FORMAT : null);
+    if (this.ao) this.aoPass = await AmbientOcclusion.create(this.rhi, this.pipelines);
     /**
      * Whether the environment is drawn as the background.
      *
-     * A plain mutable field, like scene.sun: per-renderer state a caller reads
+     * A plain mutable field: per-renderer state a caller reads
      * and writes, not hidden configuration. Turning it off leaves the clear
      * colour showing and changes NOTHING about lighting -- the same cubemap is
      * still the ambient term, because the sky IS the light. Setting the sky
@@ -274,7 +378,24 @@ export class Renderer {
      * lighting with it.
      */
     this.drawSkybox = true;
+    /**
+     * Fog, or null for none: { visibility, height, scaleHeight, albedo } --
+     * see fogCoefficients in fog.js. A plain field like drawSkybox, checked
+     * each frame it is used.
+     */
+    this.fog = this._fogOption;
+    this._fogData = new Float32Array(12);
     this.post = await PostStack.create(this.rhi, this.pipelines, this.postOptions);
+    /** Lines for one frame, drawn over the finished picture; see debug.js. */
+    this.debug = await DebugLines.create(this.rhi, this.pipelines);
+    this.sprites = await SpritePass.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
+    this.particles = await ParticleSystem.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
+    this.dofPass = await DepthOfField.create(this.rhi, this.pipelines, HDR_FORMAT);
+    /**
+     * Depth of field, or null for none: { focusDistance, fStop, sensorHeight }
+     * -- see render/dof.js. A plain field, like fog.
+     */
+    this.dof = this._dofOption;
     this.hzb = await HierarchicalDepth.create(this.rhi, this.pipelines);
     // The opaque, single-sided variant is what almost every asset uses; having
     // it ready means the first model added never waits on a compile.
@@ -307,7 +428,6 @@ export class Renderer {
    * render() is allowed to create one.
    */
   async ensureVariants(variants) {
-    const pending = [];
     // Both windings of each, because whether an instance mirrors is a property
     // of the scene and is not known here -- and the contract of this method is
     // that nothing in render() ever has to create a pipeline.
@@ -317,30 +437,78 @@ export class Renderer {
       wanted.push(base, base | VARIANT_MIRRORED,
         base | VARIANT_SKINNED, base | VARIANT_MIRRORED | VARIANT_SKINNED);
     }
+    // Every set in use: a material loaded after probes were captured needs
+    // its pipelines every way the scenes may draw it.
+    for (const features of this._variantSets.keys()) {
+      await this._ensureVariantSet(wanted, features);
+    }
+  }
+
+  /**
+   * The pipelines with some features compiled in -- FEATURE_PROBES,
+   * FEATURE_DECALS -- built the first time a frame needs them, for every
+   * variant then known. Until they are ready a frame draws with the largest
+   * set that is, so render() itself never compiles.
+   */
+  async _enableFeatures(features) {
+    const existing = this._variantSets.get(features);
+    if (existing) return existing.building;
+    const set = { forward: new Map(), oit: new Map(), ready: false };
+    this._variantSets.set(features, set);
+    set.building = this._ensureVariantSet([...this._variantSets.get(0).forward.keys()], features)
+      .then(() => { set.ready = true; });
+    return set.building;
+  }
+
+  /** The largest ready set within these features: every one, or a subset, or none. */
+  _readySet(features) {
+    for (let subset = features; ; subset = (subset - 1) & features) {
+      const set = this._variantSets.get(subset);
+      if (set?.ready) return set;
+      if (subset === 0) return this._variantSets.get(0);
+    }
+  }
+
+  /** The module and layout a variant's pipelines use; see extendedPipelineLayout. */
+  _shaderFor(variant) {
+    return (variant & VARIANT_EXTENDED) === 0
+      ? { layout: this.pipelineLayout, shader: this.shader }
+      : { layout: this.extendedPipelineLayout, shader: this.extendedShader };
+  }
+
+  async _ensureVariantSet(wanted, features) {
+    const set = this._variantSets.get(features);
+    const pending = [];
     for (const variant of wanted) {
       // Every wanted variant goes to warm(), built or not: one another load
       // is still compiling has to be waited on, and warm() knows which.
-      const known = this._pipelineByVariant.get(variant);
+      const known = set.forward.get(variant);
       if (known) { pending.push(known); continue; }
 
       const state = variantPipelineState(variant);
       const skinned = (variant & VARIANT_SKINNED) !== 0;
+      // With ambient occlusion on, opaque and masked surfaces also write their
+      // ambient term, for the occlusion pass to take its share back out.
+      // Blended ones draw after it, in a pass with the one target.
+      const ambient = this.ao !== null && (variant & 3) !== ALPHA_BLEND && (variant & VARIANT_TRANSMISSIVE) === 0;
       const descriptor = {
-        label: `pbr:v${variant}`,
-        layout: this.pipelineLayout,
-        shader: this.shader,
+        label: `pbr:v${variant}:f${features}`,
+        ...this._shaderFor(variant),
         vertexEntry: skinned ? 'vsSkinned' : 'vs',
+        fragmentEntry: ambient ? 'fsAO' : undefined,
         buffers: skinned ? [VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT] : [VERTEX_LAYOUT],
-        targets: [{ format: HDR_FORMAT, blend: state.blend }],
+        targets: ambient
+          ? [{ format: HDR_FORMAT, blend: state.blend }, { format: AMBIENT_FORMAT }]
+          : [{ format: HDR_FORMAT, blend: state.blend }],
         primitive: state.primitive,
         depth: state.depth,
-        constants: state.constants,
+        constants: { ...state.constants, ...featureConstants(features) },
       };
-      this._pipelineByVariant.set(variant, descriptor);
+      set.forward.set(variant, descriptor);
       pending.push(descriptor);
     }
     await this.pipelines.warm(pending);
-    if (this.oit) await this._ensureOitVariants(wanted);
+    if (this.oit) await this._ensureOitVariants(wanted, features);
   }
 
   /**
@@ -351,11 +519,13 @@ export class Renderer {
    * two blend states rather than one, which is why these cannot just be the
    * same descriptors with a different entry point.
    */
-  async _ensureOitVariants(variants) {
+  async _ensureOitVariants(variants, features = 0) {
+    const set = this._variantSets.get(features);
     const pending = [];
     for (const variant of variants) {
-      if ((variant & 3) !== ALPHA_BLEND) continue;
-      const known = this._oitPipelineByVariant.get(variant);
+      // Transmissive ones never go to OIT: they draw in their own pass.
+      if ((variant & 3) !== ALPHA_BLEND || (variant & VARIANT_TRANSMISSIVE) !== 0) continue;
+      const known = set.oit.get(variant);
       if (known) { pending.push(known); continue; }
 
       const state = variantPipelineState(variant);
@@ -364,9 +534,8 @@ export class Renderer {
       // blended mesh under OIT drew in its rest pose.
       const skinned = (variant & VARIANT_SKINNED) !== 0;
       const descriptor = {
-        label: `pbr-oit:v${variant}`,
-        layout: this.pipelineLayout,
-        shader: this.shader,
+        label: `pbr-oit:v${variant}:f${features}`,
+        ...this._shaderFor(variant),
         vertexEntry: skinned ? 'vsSkinned' : 'vs',
         buffers: skinned ? [VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT] : [VERTEX_LAYOUT],
         fragmentEntry: 'fsOIT',
@@ -388,12 +557,88 @@ export class Renderer {
         // and never written: a blended surface does not occlude what is behind
         // it, and the whole point of this path is that order does not matter.
         depth: { format: DEPTH_FORMAT, depthCompare: DEPTH_COMPARE, depthWriteEnabled: false },
-        constants: state.constants,
+        constants: { ...state.constants, ...featureConstants(features) },
       };
-      this._oitPipelineByVariant.set(variant, descriptor);
+      set.oit.set(variant, descriptor);
       pending.push(descriptor);
     }
     await this.pipelines.warm(pending);
+  }
+
+  /**
+   * A scene's probe set, made at its environment's resolution and mips so one
+   * roughness indexes probes and sky alike. Made again -- every probe then
+   * waiting for a capture -- if the environment changes size.
+   */
+  _probesFor(scene, environment) {
+    if (scene.reflectionProbes.length === 0) return null;
+    let set = this._probeSets.get(scene);
+    if (set && (set.size !== environment.size || set.mips !== environment.prefilterMips)) {
+      set.destroy();
+      for (const probe of scene.reflectionProbes) probe.captured = false;
+      set = undefined;
+    }
+    if (!set) {
+      set = new ProbeSet(this.rhi, environment.size, environment.prefilterMips);
+      this._probeSets.set(scene, set);
+    }
+    if (set.sceneRevision !== scene.probeRevision) {
+      set.upload(scene.reflectionProbes);
+      set.sceneRevision = scene.probeRevision;
+    }
+    return set;
+  }
+
+  /**
+   * Render each probe's six faces from where it stands, prefilter them as the
+   * environment is prefiltered, and store them in the scene's probe set.
+   * Every probe the scene has unless given a list. A load-time cost: six
+   * scene renders and a prefilter each.
+   */
+  async captureReflectionProbes(scene, probes = scene.reflectionProbes) {
+    const environment = scene.environment;
+    if (!environment) throw new Error('captureReflectionProbes: the scene has no environment');
+    if (probes.length === 0) return;
+    // Built before any frame reads probes, so render() never has to compile.
+    await this._enableFeatures(FEATURE_PROBES);
+    const set = this._probesFor(scene, environment);
+    const size = environment.size;
+    if (this._captureColor?.width !== size) {
+      this._captureColor?.destroy();
+      this._captureDepth?.destroy();
+      this._captureColor = createTexture(this.rhi, {
+        label: 'probe-capture', size: [size, size], format: HDR_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      this._captureDepth = createTexture(this.rhi, {
+        label: 'probe-capture-depth', size: [size, size], format: DEPTH_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      });
+    }
+    const target = {
+      width: size, height: size,
+      colorView: this._captureColor.createView(), depthView: this._captureDepth.createView(),
+    };
+    for (const probe of probes) {
+      const cube = new Environment(this.rhi, {
+        capture: true, size, prefilterMips: environment.prefilterMips, label: 'probe',
+      });
+      // Near enough for anything in the box: a thousandth of its diagonal.
+      const near = 1e-3 * Math.hypot(probe.max[0] - probe.min[0], probe.max[1] - probe.min[1], probe.max[2] - probe.min[2]);
+      FACE_CAMERAS.forEach(({ forward, up }, face) => {
+        const camera = new Camera({ fovY: Math.PI / 2, near });
+        camera.position.set(probe.position);
+        camera.target.set([0, 1, 2].map((a) => probe.position[a] + forward[a]));
+        camera.up.set(up);
+        this.render(scene, camera, null, target);
+        flipInto(this.rhi, target.colorView, cubeFaceView(cube.environment, face));
+      });
+      cube.convolve();
+      set.store(set.slotFor(probe), cube.prefiltered);
+      cube.destroy();
+      probe.captured = true;
+    }
+    scene.probeRevision++;
   }
 
   _frameBindGroup(environment) {
@@ -418,6 +663,14 @@ export class Renderer {
           { binding: 12, resource: { buffer: this.morph.deltaBuffer } },
           { binding: 13, resource: { buffer: this.morph.weightBuffer } },
           { binding: 14, resource: { buffer: this.directionalBuffer } },
+          { binding: 15, resource: this.shadows.localView },
+          { binding: 16, resource: { buffer: this.shadows.localBuffer } },
+          { binding: 17, resource: { buffer: this.shadows.cascadeList } },
+          { binding: 18, resource: this.opaqueCopy.view },
+          { binding: 19, resource: this._frameProbes?.view ?? this._noProbes.view },
+          { binding: 20, resource: { buffer: this._frameProbes?.buffer ?? this._noProbes.buffer } },
+          { binding: 21, resource: this.decals.view },
+          { binding: 22, resource: { buffer: this.decals.buffer } },
         ],
       });
       this._frameBindGroups.set(environment, bindGroup);
@@ -426,17 +679,47 @@ export class Renderer {
   }
 
   _createDirectionalBuffer(count) {
-    return this.rhi.device.createBuffer({
+    return createBuffer(this.rhi, {
       label: 'directionals',
       size: count * DIRECTIONAL_FLOATS * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
   }
 
-  render(scene, camera, jobs = null) {
+  /**
+   * `target`: render into { width, height, colorView, depthView } instead of
+   * the canvas -- linear HDR, before post, and with no reflection probes read,
+   * since a probe capture is what renders into one. See captureReflectionProbes.
+   */
+  render(scene, camera, jobs = null, target = null) {
     const rhi = this.rhi;
     const environment = scene.environment;
     if (!environment) throw new Error('Renderer: the scene has no environment');
+    const width = target?.width ?? rhi.width;
+    const height = target?.height ?? rhi.height;
+    const depthView = target?.depthView ?? rhi.depthView();
+
+    // This scene's probes, uploaded again when its set of them changed. None
+    // while capturing: the probe being captured would be read half-written.
+    const probes = target === null ? this._probesFor(scene, environment) : null;
+    // The pipelines that read probes and decals only when there are any to
+    // read. A set not built yet starts building, and this frame draws
+    // without what it adds.
+    const decalCount = this.decals.prepare(scene);
+    const features = (probes !== null && probes.count > 0 ? FEATURE_PROBES : 0) | (decalCount > 0 ? FEATURE_DECALS : 0);
+    if (!this._variantSets.has(features)) this._enableFeatures(features).catch((error) => console.error(error));
+    const variantSet = this._readySet(features);
+    this._pipelineByVariant = variantSet.forward;
+    this._oitPipelineByVariant = variantSet.oit;
+    if (this.decals.revision !== this._decalRevision) {
+      this._decalRevision = this.decals.revision;
+      this._frameBindGroups = new WeakMap();
+    }
+    if (probes !== this._frameProbes || probes?.revision !== this._frameProbesRevision) {
+      this._frameProbes = probes;
+      this._frameProbesRevision = probes?.revision;
+      this._frameBindGroups = new WeakMap();
+    }
 
     const p = this.profiler;
     p?.frameStart();
@@ -444,7 +727,7 @@ export class Renderer {
     this.stats.recomposed = scene.update(jobs);
     const tAfterTransforms = now();
     p?.mark('transforms');
-    camera.update(rhi.aspect);
+    camera.update(width / height);
     frustumFromViewProjection(this.frustum, camera.viewProjection);
     p?.mark('camera');
 
@@ -490,13 +773,13 @@ export class Renderer {
     // is exactly the point: a readback would cost a pipeline stall.
     // The pyramid is sized to the surface, so it is rebuilt on resize. Doing it
     // before the cull means the bind group always points at a live texture.
-    this.hzb.resize(rhi.width, rhi.height, rhi.depthView());
+    this.hzb.resize(width, height, depthView);
     this.gpu.bindHzb(this.hzb.view);
     // Weights first: draw data records where each instance's slice begins,
     // and the gather below is what decides those offsets.
     this.morph.update(scene);
     this.gpu.update(scene, this.frustum, this.hzb, camera.viewProjection, writeDrawData,
-      this.skinPalette.offsets, this.morph);
+      this.skinPalette.offsets, this.morph, camera.projection[5]);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
     p?.mark('draw data');
 
@@ -579,13 +862,33 @@ export class Renderer {
     const lightRange = this.lightDistance ?? Math.max(sceneDepth, floor);
 
     this.shadows.shadowDistance = shadowRange;
-    this.skybox.update(camera, 1.0);
     // Lights are scene objects: their position and aim live in their
     // transforms, which have composed by now. Copied into the packed array
     // here, immediately before upload, so a light parented to something that
     // moved this frame is lit from where it is rather than where it was.
-    // Before the shadow fit, because the sun is one of them.
+    // Before the shadow fit, which reads the directional lights' directions.
     scene.refreshLights();
+    // After the lights, whose colours the fog scatters.
+    packFog(this._fogData, 0, this.fog, scene.directionals, scene.directionalCount, DIRECTIONAL_FLOATS);
+    this.skybox.update(camera, 1.0, this.fog === null ? null : this._fogData);
+    // Materials a clip changed since the last frame. Uploaded here rather than
+    // by the player, because the scene does not own the GPU.
+    if (scene.changedMaterials.size > 0) {
+      for (const [id, record] of scene.changedMaterials) this.materials.update(id, record);
+      scene.changedMaterials.clear();
+    }
+    p?.mark('lights');
+    // Every casting light's shadow views: the directional lights' cascades,
+    // then point and spot views. Each writes its slot into the light's record,
+    // so both run before the records are uploaded. Growing either array
+    // replaces what the frame group names.
+    this.shadows.update(camera, scene);
+    this.shadows.updateLocal(scene, camera);
+    if (this._shadowRevision !== this.shadows.revision) {
+      this._frameBindGroups = new WeakMap();
+      this._shadowRevision = this.shadows.revision;
+    }
+    // The directional records go up after the fit, which wrote their slots.
     if (scene.directionalCount > this.directionalCapacity) {
       this.directionalBuffer.destroy();
       this.directionalCapacity = grownCapacity(this.directionalCapacity, scene.directionalCount);
@@ -596,10 +899,8 @@ export class Renderer {
       rhi.queue.writeBuffer(this.directionalBuffer, 0, scene.directionals, 0,
         scene.directionalCount * DIRECTIONAL_FLOATS);
     }
-    p?.mark('lights');
-    this.shadows.update(camera, scene.sunDirection);
     p?.mark('shadow fit');
-    this.clusters.update(scene, camera, lightRange);
+    this.clusters.update(scene, camera, lightRange, width, height, this.decals.spheres, decalCount);
     // Growing the light list replaced lightBuffer, which every cached frame
     // bind group names. Dropping the cache rebuilds them on next use.
     if (this._clusterRevision !== this.clusters.buffersRevision) {
@@ -613,40 +914,46 @@ export class Renderer {
     // Exposure moved to the tonemap pass, where it applies BEFORE the curve.
     // Scaling an already-compressed image would only wash it out.
     this.frameData[19] = 1.0;
-    // The shader wants the direction TOWARD the light; the scene stores the
-    // direction light travels, which is what a user means by "sun direction".
-    this.frameData[20] = -scene.sunDirection[0];
-    this.frameData[21] = -scene.sunDirection[1];
-    this.frameData[22] = -scene.sunDirection[2];
-    this.frameData[23] = environment.prefilterMips;
-    this.frameData.set(scene.sunColor, 24);
-    this.frameData[27] = this.shadows.activeCascades;
-
-    // Cascade matrices (4 x mat4), splits, texel sizes, then the bias params.
-    this.frameData.set(this.shadows.matrices, 28);
-    this.frameData.set(this.shadows.splits, 92);
-    this.frameData.set(this.shadows.texelSizes, 96);
-    this.frameData[100] = this.shadows.normalBias;
-    this.frameData[101] = this.shadows.size;
+    this.frameData[20] = environment.prefilterMips;
+    // Cascades a casting directional light has, zero when none casts. Their
+    // matrices are per light, in the cascade list; the slices are shared.
+    this.frameData[24] = this.shadows.activeCascades;
+    this.frameData.set(this.shadows.splits, 28);
+    this.frameData.set(this.shadows.texelSizes, 32);
+    this.frameData[36] = this.shadows.normalBias;
+    this.frameData[37] = this.shadows.size;
+    // Where the first cascade's slice begins, for the tap spacing that walks
+    // each cascade's blur up to the next one's (directionalVisibility in pbr.js).
+    this.frameData[38] = camera.near;
+    this.frameData[39] = this.shadows.localSize;
+    if (this.ao !== null) {
+      const radius = this.ao.radius ?? (this._hasSceneBounds
+        ? 0.5 * Math.hypot(this._sceneMax[0] - this._sceneMin[0], this._sceneMax[1] - this._sceneMin[1],
+          this._sceneMax[2] - this._sceneMin[2]) / 32
+        : 1);
+      this.aoPass.update(camera, radius, width, height);
+    }
 
     // Cluster grid dims are u32 in the shader, so they are written through a
     // Uint32 view of the same buffer rather than as floats.
     // The grid follows the viewport aspect, so the shader is told the shape
     // this frame has rather than a constant it would disagree with.
-    this.frameU32[104] = this.clusters.gridX;
-    this.frameU32[105] = this.clusters.gridY;
-    this.frameU32[106] = CLUSTER_Z;
-    this.frameU32[107] = this.clusters.lightCount;
-    this.frameData[108] = this.clusters.sliceScale;
-    this.frameData[109] = this.clusters.sliceBias;
-    this.frameData[110] = this.clusters.tileSize[0];
-    this.frameData[111] = this.clusters.tileSize[1];
+    this.frameU32[40] = this.clusters.gridX;
+    this.frameU32[41] = this.clusters.gridY;
+    this.frameU32[42] = CLUSTER_Z;
+    this.frameU32[43] = this.clusters.lightCount;
+    this.frameData[44] = this.clusters.sliceScale;
+    this.frameData[45] = this.clusters.sliceBias;
+    this.frameData[46] = this.clusters.tileSize[0];
+    this.frameData[47] = this.clusters.tileSize[1];
     // The view axis, for view depth in the shader. The view matrix's third row
     // is the camera's +Z in world space; the camera looks down -Z.
-    this.frameData[112] = -camera.view[2];
-    this.frameData[113] = -camera.view[6];
-    this.frameData[114] = -camera.view[10];
-    this.frameData[115] = scene.directionalCount;   // a value; see the shader
+    this.frameData[48] = -camera.view[2];
+    this.frameData[49] = -camera.view[6];
+    this.frameData[50] = -camera.view[10];
+    this.frameData[51] = scene.directionalCount;   // a value; see the shader
+    this.frameData.set(this._fogData, 52);
+    this.frameData[64] = probes?.count ?? 0;
     rhi.queue.writeBuffer(this.frameBuffer, 0, this.frameData);
     p?.mark('clusters + frame uniform');
 
@@ -661,11 +968,12 @@ export class Renderer {
     const graph = this.graph;
     graph.begin();
 
-    const surface = graph.importTexture('surface', rhi.currentColorView());
+    const surface = target === null ? graph.importTexture('surface', rhi.currentColorView()) : null;
     // Imported but NOT external: the device owns the memory, and nothing reads
     // it after the frame, so the graph is free to derive `discard` for it.
-    const depth = graph.importTexture('depth', rhi.depthView(), { external: false });
+    const depth = graph.importTexture('depth', depthView, { external: false });
     const shadowMap = graph.importTexture('shadows', this.shadows.view);
+    const localShadowMap = graph.importTexture('local-shadows', this.shadows.localView);
 
     const clusterBounds = graph.importBuffer('cluster-bounds', this.clusters.boundsBuffer);
     const lightBuffer = graph.importBuffer('lights', this.clusters.lightBuffer);
@@ -691,8 +999,22 @@ export class Renderer {
       visibleResource: visibleEarly,
     });
 
+    // Shadows draw the level of detail the camera chose. Only when there is
+    // any: otherwise they walk the static order, and this pass is not run.
+    const shadowReads = [];
+    if (this.gpu.hasLod) {
+      const indirectShadow = graph.importBuffer('indirect:shadow', this.gpu.indirectBuffer);
+      const visibleShadow = graph.importBuffer('visible:shadow', this.gpu.visibleBuffer);
+      this.gpu.addCullPass(graph, {
+        phase: CULL_SHADOW,
+        boundsResource: drawDataBuffer,
+        indirectResource: indirectShadow,
+        visibleResource: visibleShadow,
+      });
+      shadowReads.push(indirectShadow, visibleShadow);
+    }
     this.shadows.addPasses(
-      graph, shadowMap, this.gpu, this.drawBindGroup, this.skinPalette, this.morph,
+      graph, shadowMap, this.gpu, this.drawBindGroup, this.skinPalette, this.morph, localShadowMap, shadowReads,
     );
     this.clusters.addPasses(graph, {
       boundsResource: clusterBounds,
@@ -704,19 +1026,31 @@ export class Renderer {
     // Geometry renders into a linear HDR target, not the swap chain. Bloom has
     // to see that a highlight was at 60x white rather than clipped to 1, and
     // one pass at the end tonemaps the result into the sRGB surface.
-    const sceneColor = graph.createTexture('scene-hdr', {
-      width: rhi.width,
-      height: rhi.height,
+    // A target takes the HDR picture itself: nothing after this is for it.
+    const sceneColor = target !== null ? graph.importTexture('capture', target.colorView) : graph.createTexture('scene-hdr', {
+      width,
+      height,
       format: HDR_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
+
+    // The opaque passes' ambient term, when ambient occlusion is on.
+    const ambient = this.ao === null ? null : graph.createTexture('ambient', {
+      width,
+      height,
+      format: AMBIENT_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    const black = { r: 0, g: 0, b: 0, a: 1 };
 
     // EARLY. Everything that was on screen last frame, which is both the
     // picture so far and the set of occluders the pyramid is built from.
     graph.addPass({
       name: 'forward:early',
-      reads: [shadowMap, lightBuffer, clusterIndices, clusterCounts, indirectEarly, visibleEarly],
-      color: [{ resource: sceneColor, clear: { r: 0, g: 0, b: 0, a: 1 } }],
+      reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts, indirectEarly, visibleEarly],
+      color: ambient === null
+        ? [{ resource: sceneColor, clear: black }]
+        : [{ resource: sceneColor, clear: black }, { resource: ambient, clear: { r: 0, g: 0, b: 0, a: 0 } }],
       depth: { resource: depth, clear: DEPTH_CLEAR_VALUE },
       execute: this._forwardEarly,
     });
@@ -737,38 +1071,84 @@ export class Renderer {
       hzbResources: hzbLevels,
     });
 
+    // Transmissive surfaces need the opaque scene finished and copied before
+    // they draw, so blended ones -- which must come after them -- leave the
+    // late pass for one of their own, as they already do for ambient occlusion.
+    const transmissive = this._transmissiveCount > 0;
+    // Sprites draw after the opaque scene and before anything blended, so
+    // they push blended geometry out of the late pass too.
+    const sprites = this.sprites.prepare(scene, camera, environment, width, height);
+    // Particles likewise; and during a probe capture they are seen, not moved.
+    const emitters = this.particles.prepare(scene, camera, environment, target !== null);
+    this._blendInLate = !this.oit && ambient === null && !transmissive && sprites === 0 && emitters === 0;
+
     // LATE. Whatever the fresh pyramid says is visible and was not drawn above,
     // then the blended geometry, which has to follow every opaque draw. No
     // clear on either attachment: the graph derives `load` from the early pass
     // having written them.
     graph.addPass({
       name: 'forward:late',
-      reads: [shadowMap, lightBuffer, clusterIndices, clusterCounts, indirectLate, visibleLate],
-      color: [{ resource: sceneColor }],
+      reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts, indirectLate, visibleLate],
+      color: ambient === null ? [{ resource: sceneColor }] : [{ resource: sceneColor }, { resource: ambient }],
       depth: { resource: depth },
       execute: this._forwardLate,
     });
+
+    // Ambient occlusion on the finished opaque depth, then the blended
+    // geometry the late pass left for after it.
+    if (ambient !== null) {
+      this.aoPass.addPasses(graph, { depth, ambient, sceneColor, width, height });
+    }
+
+    // Sprites, on the finished opaque scene: before the transmission copy, so
+    // glass shows what is behind it, and before blended geometry.
+    this.sprites.addPass(graph, { sceneColor, depth });
+    this.particles.addPasses(graph, { sceneColor, depth });
+
+    // Transmission: the opaque scene copied down a mip chain, then the
+    // transmissive surfaces, which read it.
+    if (transmissive) {
+      if (this.opaqueCopy.ensure(width, height)) this._frameBindGroups = new WeakMap();
+      const behind = this.opaqueCopy.addPasses(graph, sceneColor);
+      graph.addPass({
+        name: 'forward:transmission',
+        reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts, ...behind],
+        color: [{ resource: sceneColor }],
+        depth: { resource: depth },
+        execute: this._forwardTransmission,
+      });
+    }
+
+    if (!this.oit && !this._blendInLate) {
+      graph.addPass({
+        name: 'forward:blend',
+        reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts],
+        color: [{ resource: sceneColor }],
+        depth: { resource: depth },
+        execute: this._forwardBlend,
+      });
+    }
 
     // OIT, when it is on. Blended geometry skipped the pass above, so it is
     // drawn here into its own two targets in whatever order it comes -- that
     // is the point -- and composited over the scene by the resolve.
     if (this.oit) {
       const accum = graph.createTexture('oit-accum', {
-        width: rhi.width,
-        height: rhi.height,
+        width,
+        height,
         format: OIT_ACCUM_FORMAT,
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
       });
       const reveal = graph.createTexture('oit-reveal', {
-        width: rhi.width,
-        height: rhi.height,
+        width,
+        height,
         format: OIT_REVEAL_FORMAT,
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
       });
 
       graph.addPass({
         name: 'oit',
-        reads: [shadowMap, lightBuffer, clusterIndices, clusterCounts],
+        reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts],
         color: [
           // accum starts empty; reveal starts at 1, meaning all background.
           { resource: accum, clear: { r: 0, g: 0, b: 0, a: 0 } },
@@ -788,13 +1168,12 @@ export class Renderer {
       });
     }
 
-    this.post.addPasses(graph, {
-      sceneColor,
-      surface,
-      width: rhi.width,
-      height: rhi.height,
-      exposure: this.exposure,
-    });
+    if (target === null) {
+      // Depth of field last in HDR, on everything drawn, before bloom and the tonemap.
+      const lensed = this.dof ? this.dofPass.addPasses(graph, { sceneColor, depth, camera, width, height, dof: this.dof }) : sceneColor;
+      this.post.addPasses(graph, { sceneColor: lensed, surface, width, height, exposure: this.exposure });
+      this.debug.addPass(graph, { surface, depth, viewProjection: camera.viewProjection });
+    }
 
     graph.compile();
     const tAfterGraph = now();
@@ -815,6 +1194,7 @@ export class Renderer {
     this.timing.total = tEnd - tFrame;
     p?.mark('encode');
     rhi.queue.submit([encoder.finish()]);
+    if (target === null) this.debug.clear();
     // After the submit, never before: the command buffer above writes the
     // buffer this maps, and a buffer with a map pending cannot be written.
     this.gpuTiming.readback();
@@ -847,6 +1227,15 @@ export class Renderer {
     this.skinPalette.destroy();
     this.morph.destroy();
     this.skybox.destroy();
+    this.opaqueCopy.destroy();
+    this.debug.destroy();
+    this.sprites.destroy();
+    this.particles.destroy();
+    this.decals.destroy();
+    this.dofPass.destroy();
+    this._captureColor?.destroy();
+    this._captureDepth?.destroy();
+    this.aoPass?.destroy();
   }
 
   /**
@@ -866,6 +1255,8 @@ export class Renderer {
     const gpu = this.gpu;
     this.transparentList.clear();
     this.stats.transparent = 0;
+    this.stats.transparentDraws = 0;
+    this._transmissiveCount = 0;
     if (gpu.transparentCount === 0) return;
 
     const near = camera.near;
@@ -873,10 +1264,14 @@ export class Renderer {
     vec3Sub(FORWARD, camera.target, camera.position);
     vec3Normalize(FORWARD, FORWARD);
 
+    const projectionScale = camera.projection[5];
     for (let t = 0; t < gpu.transparentCount; t++) {
       const i = gpu.transparentItems[t];
       const o = i * 3;
-      if (!frustumTestAABB(this.frustum, scene.worldMin, scene.worldMax, o)) continue;
+      // The level the camera shows is the level that casts, on screen or not.
+      const selected = !gpu.hasLod || gpu.lodSelected(i, camera.viewProjection, projectionScale);
+      gpu.casterSelected[t] = selected ? 1 : 0;
+      if (!selected || !frustumTestAABB(this.frustum, scene.worldMin, scene.worldMax, o)) continue;
 
       // VIEW DEPTH to the bounds centre, not radial distance: the bucket runs
       // it through the projection's own near/depth curve, which is defined
@@ -888,6 +1283,7 @@ export class Renderer {
       const depth = Math.max(dx * FORWARD[0] + dy * FORWARD[1] + dz * FORWARD[2], near);
 
       const materialId = scene.renderableMaterial[i];
+      if (this.materials.isTransmissive(materialId)) this._transmissiveCount++;
       this.transparentList.push(
         transparentSortKey(
           this.materials.pipelineIdOf[materialId],
@@ -957,7 +1353,7 @@ export class Renderer {
         boundPipeline = pipeline;
       }
       if (materialId !== boundMaterial) {
-        pass.setBindGroup(GROUP_MATERIAL, this.materials.bindGroup(materialId));
+        pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(materialId));
         boundMaterial = materialId;
       }
 
@@ -976,7 +1372,7 @@ export class Renderer {
     // Blended geometry, strictly after every opaque draw. With OIT on it is
     // drawn into its own targets by a later pass instead, and needs no order
     // at all -- which is the whole reason that path exists.
-    if (!this.oit) this._encodeTransparent(pass, this._pipelineByVariant, boundPipeline, boundMaterial);
+    if (this._blendInLate) this._encodeTransparent(pass, this._pipelineByVariant, boundPipeline, boundMaterial, false);
   }
 
   /**
@@ -1002,12 +1398,11 @@ export class Renderer {
    * indirect draws only. So the shader is the same one the batches use, with a
    * batch base of zero.
    */
-  _encodeTransparent(pass, pipelineByVariant, boundPipeline = null, boundMaterial = -1) {
+  _encodeTransparent(pass, pipelineByVariant, boundPipeline = null, boundMaterial = -1, transmissive = false) {
     const scene = this._frameScene;
     const gpu = this.gpu;
     const payloads = this.transparentList.payloads;
     const transparentCount = this.transparentList.count;
-    this.stats.transparentDraws = 0;
     if (transparentCount === 0) return;
 
     pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.transparentBatchOffset()]);
@@ -1018,6 +1413,9 @@ export class Renderer {
     while (k < transparentCount) {
       const i = payloads[k];
       const materialId = scene.renderableMaterial[i];
+      // Transmissive items draw in their own pass, blended ones in theirs;
+      // a run never mixes the two, since it is one material.
+      if (this.materials.isTransmissive(materialId) !== transmissive) { k++; continue; }
       const primitive = scene.renderablePrimitive[i];
       const skinned = scene.renderableSkin[i] >= 0;
       const mirrored = gpu.itemMirrored[i];
@@ -1042,7 +1440,7 @@ export class Renderer {
         boundPipeline = pipeline;
       }
       if (materialId !== boundMaterial) {
-        pass.setBindGroup(GROUP_MATERIAL, this.materials.bindGroup(materialId));
+        pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(materialId));
         boundMaterial = materialId;
       }
       // Buffers too only when they change: two runs of one mesh split by
@@ -1134,7 +1532,7 @@ export class Renderer {
   _encodeOIT(pass) {
     pass.setBindGroup(GROUP_FRAME, this._frameBindGroup(this._frameEnvironment));
     this.pipelineLayout.bindEmptyGroups(pass);
-    this._encodeTransparent(pass, this._oitPipelineByVariant);
+    this._encodeTransparent(pass, this._oitPipelineByVariant, null, -1, false);
   }
 }
 

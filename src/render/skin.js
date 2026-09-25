@@ -13,7 +13,7 @@
 
 import { mat4Multiply, mat4MultiplyAffine } from '../core/math/mat4.js';
 import { grownCapacity } from '../core/grow.js';
-import { storageCapacity } from '../rhi/buffer.js';
+import { storageCapacity, createBuffer } from '../rhi/buffer.js';
 import { handleIndex } from '../core/handle.js';
 
 /** Bytes per joint matrix: a mat4x4 of f32. */
@@ -24,7 +24,7 @@ export class SkinPalette {
     this.rhi = rhi;
     this.capacity = capacity;
     this.data = new Float32Array(capacity * 16);
-    this.buffer = rhi.device.createBuffer({
+    this.buffer = createBuffer(rhi, {
       label: 'joint-palette',
       size: capacity * JOINT_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -91,7 +91,7 @@ export class SkinPalette {
     );
     this.data = new Float32Array(capacity * 16);
     this.buffer.destroy();
-    this.buffer = this.rhi.device.createBuffer({
+    this.buffer = createBuffer(this.rhi, {
       label: 'joint-palette',
       size: capacity * JOINT_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,

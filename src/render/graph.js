@@ -47,6 +47,7 @@
 
 import { DEBUG, assert } from '../core/assert.js';
 import { growArray } from '../core/grow.js';
+import { createTexture } from '../rhi/texture.js';
 
 /** What an attachment declared without a clear value, but cleared, clears to. */
 const TRANSPARENT_BLACK = Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
@@ -701,7 +702,7 @@ export class RenderGraph {
     }
 
     const d = resource.desc;
-    const texture = this.rhi.device.createTexture({
+    const texture = createTexture(this.rhi, {
       label: `graph:${resource.name}`,
       size: [d.width, d.height, d.depthOrArrayLayers],
       format: d.format,

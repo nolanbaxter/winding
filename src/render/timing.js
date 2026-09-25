@@ -33,6 +33,8 @@
 // finding which pass dominates, not for proving a change made the frame faster.
 // Doing that honestly needs both versions measured in one process, interleaved.
 
+import { createBuffer } from '../rhi/buffer.js';
+
 const QUERIES_PER_PASS = 2;
 const NS_PER_MS = 1e6;
 
@@ -118,7 +120,7 @@ export class GpuProfiler {
 
     // Resolve target and the ring that gets read. Separate because a buffer
     // with QUERY_RESOLVE cannot also be MAP_READ.
-    this.resolveBuffer = device.createBuffer({
+    this.resolveBuffer = createBuffer(this.rhi, {
       label: 'pass-timing-resolve',
       size: bytes,
       usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
@@ -127,7 +129,7 @@ export class GpuProfiler {
     this._ring = [];
     for (let i = 0; i < this.depth; i++) {
       this._ring.push({
-        buffer: device.createBuffer({
+        buffer: createBuffer(this.rhi, {
           label: `pass-timing-read${i}`,
           size: bytes,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,

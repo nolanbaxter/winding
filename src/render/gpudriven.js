@@ -27,8 +27,10 @@
 
 import { DEBUG, assert } from '../core/assert.js';
 import { compileShader } from '../rhi/shader.js';
+import { sharedPipelines } from '../rhi/pipeline.js';
+import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { grownCapacity, growArray } from '../core/grow.js';
-import { storageCapacity } from '../rhi/buffer.js';
+import { storageCapacity, createBuffer } from '../rhi/buffer.js';
 import { FRUSTUM_PLANE_COUNT } from '../core/math/frustum.js';
 
 /**
@@ -73,6 +75,18 @@ export function addToRuns(runs, i, mergeGap) {
 }
 
 
+/**
+ * Cull phases, each writing its own slice of the indirect arguments and the
+ * visible list: early (last frame's visible set), late (against this frame's
+ * depth), and shadow (every caster at the level of detail the camera chose,
+ * which runs only when the scene has LOD groups).
+ */
+export const CULL_PHASES = 3;
+export const CULL_SHADOW = 2;
+
+/** An item's bounds: min, max (w = coverage range), and its LOD sphere. */
+const BOUNDS_FLOATS = 12;
+
 const CULL_SHADER = /* wgsl */ `
 struct CullParams {
   planes        : array<vec4<f32>, ${FRUSTUM_PLANE_COUNT}>,
@@ -90,12 +104,20 @@ struct CullParams {
   // phases share both buffers and never touch each other's half.
   indirectBase  : u32,
   visibleBase   : u32,
-  pad           : u32,
+  // The projection's y scale: 1 / tan(fovY / 2), or 1 / half-height for an
+  // orthographic camera. With clip w it gives a sphere's size on screen.
+  projectionScale : f32,
 };
 
+/**
+ * An item's box, and its level of detail. minPoint.w and maxPoint.w are the
+ * screen coverage it draws between; lod is its LOD group's bounding sphere,
+ * world centre and radius, radius 0 for an item that is in no group.
+ */
 struct Bounds {
   minPoint : vec4<f32>,
   maxPoint : vec4<f32>,
+  lod      : vec4<f32>,
 };
 
 struct DrawArgs {
@@ -185,6 +207,21 @@ fn occluded(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
   return nearest < farthest;
 }
 
+/**
+ * Whether this is the level of detail its group shows. Coverage is the group
+ * sphere's diameter on screen over the screen's height: radius * scale / w,
+ * which is exact for a perspective camera and an orthographic one alike --
+ * w is the view depth for one and 1 for the other. A group behind the eye
+ * counts as filling the screen, so its finest level stands.
+ */
+fn lodSelected(item : u32) -> bool {
+  let sphere = bounds[item].lod;
+  if (sphere.w <= 0.0) { return true; }
+  let w = (params.viewProj * vec4<f32>(sphere.xyz, 1.0)).w;
+  let coverage = select(3.0e38, sphere.w * params.projectionScale / w, w > 0.0);
+  return coverage >= bounds[item].minPoint.w && coverage < bounds[item].maxPoint.w;
+}
+
 /** The same positive-vertex test the CPU path uses, over the same five planes. */
 fn inFrustum(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
   for (var p = 0u; p < ${FRUSTUM_PLANE_COUNT}u; p = p + 1u) {
@@ -222,7 +259,16 @@ fn cull(@builtin(global_invocation_id) id : vec3<u32>) {
   // be back-to-front, and the atomic hands out slots in thread-completion
   // order. The CPU orders those items instead.
   let batched = batch != NOT_BATCHED;
-  let visibleNow = inFrustum(boxMin, boxMax);
+
+  if (params.phase == 2u) {
+    // SHADOWS. Every caster, on screen or not -- one off to the side still
+    // casts onto what is -- but only at the level of detail the camera chose,
+    // or a group would cast every one of its levels at once.
+    if (batched && lodSelected(item)) { emit(batch, item); }
+    return;
+  }
+
+  let visibleNow = inFrustum(boxMin, boxMax) && lodSelected(item);
 
   if (params.phase == 0u) {
     // EARLY. Draw whatever was on screen last frame, with no depth test at all:
@@ -282,47 +328,47 @@ export class GpuDriven {
 
     // Per-object data, indexed by the shader rather than bound per draw.
     this._allocateDrawData(capacity);
-    this.drawDataBuffer = device.createBuffer({
+    this.drawDataBuffer = createBuffer(rhi, {
       label: 'draw-data',
       size: capacity * DRAW_DATA_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
-    this.boundsData = new Float32Array(capacity * 8);
-    this.boundsBuffer = device.createBuffer({
+    this.boundsData = new Float32Array(capacity * BOUNDS_FLOATS);
+    this.boundsBuffer = createBuffer(rhi, {
       label: 'cull-bounds',
-      size: capacity * 32,
+      size: capacity * BOUNDS_FLOATS * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
     this.itemBatch = new Uint32Array(capacity);
     this.itemMirrored = new Uint8Array(capacity);
-    this.itemBatchBuffer = device.createBuffer({
+    this.itemBatchBuffer = createBuffer(rhi, {
       label: 'item-batch',
       size: capacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
     this.batchFirst = new Uint32Array(this.batchCapacity);
-    this.batchFirstBuffer = device.createBuffer({
+    this.batchFirstBuffer = createBuffer(rhi, {
       label: 'batch-first',
       size: this.batchCapacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
-    this.indirectData = new Uint32Array(this.batchCapacity * 2 * (INDIRECT_BYTES / 4));
-    this.indirectBuffer = device.createBuffer({
+    this.indirectData = new Uint32Array(this.batchCapacity * CULL_PHASES * (INDIRECT_BYTES / 4));
+    this.indirectBuffer = createBuffer(rhi, {
       label: 'indirect-args',
-      size: this.batchCapacity * 2 * INDIRECT_BYTES,
+      size: this.batchCapacity * CULL_PHASES * INDIRECT_BYTES,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
-    // Doubled, because the two cull phases write disjoint halves of it. Phase
-    // p's batch b lives at `p * capacity + batchFirst[b]`, and the blended tail
-    // sits past opaqueCount inside the early half.
-    this.visibleBuffer = device.createBuffer({
+    // One slice per cull phase, which write disjoint slices of it. Phase p's
+    // batch b lives at `p * capacity + batchFirst[b]`, and the blended tail
+    // sits past opaqueCount inside the early slice.
+    this.visibleBuffer = createBuffer(rhi, {
       label: 'visible-items',
-      size: capacity * 2 * 4,
+      size: capacity * CULL_PHASES * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
@@ -330,7 +376,7 @@ export class GpuDriven {
     // phase, which is the only one that has tested against current depth.
     // Persistent -- this is the entire memory two-phase culling carries between
     // frames, and it replaces trusting a frame-old pyramid.
-    this.visibleFlagsBuffer = device.createBuffer({
+    this.visibleFlagsBuffer = createBuffer(rhi, {
       label: 'visible-last-frame',
       size: capacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -340,7 +386,7 @@ export class GpuDriven {
     // The shadow pass draws every caster, so it indexes a static list in batch
     // order rather than the GPU-compacted one.
     this.batchOrder = new Uint32Array(capacity);
-    this.batchOrderBuffer = device.createBuffer({
+    this.batchOrderBuffer = createBuffer(rhi, {
       label: 'batch-order',
       size: capacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -349,27 +395,26 @@ export class GpuDriven {
     // Per-batch uniform: the base index into the visible list. Bound with a
     // dynamic offset, which is the one small thing still done per draw.
     this.alignment = rhi.limits.minUniformBufferOffsetAlignment;
-    // capacity * 2 + 1: one slot per (phase, batch), plus a final slot holding
-    // a base of 0, which is what the transparent draws bind. They index the
-    // visible list absolutely, by firstInstance, rather than relative to a
-    // batch base.
-    this.batchStaging = new ArrayBuffer(this.alignment * (this.batchCapacity * 2 + 1));
-    this.batchBuffer = device.createBuffer({
+    // One slot per (phase, batch), plus two for the blended draws, which
+    // index the visible list absolutely, by firstInstance: a base of 0 for the
+    // camera's, and the shadow slice's base for the shadow pass's.
+    this.batchStaging = new ArrayBuffer(this.alignment * (this.batchCapacity * CULL_PHASES + 2));
+    this.batchBuffer = createBuffer(rhi, {
       label: 'batch-info',
       size: this.batchStaging.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // planes(5 * 16) + viewProj(64) + 4 u32 + (phase, indirectBase, visibleBase, pad)
+    // planes(5 * 16) + viewProj(64) + 4 u32 + (phase, indirectBase, visibleBase, projectionScale)
     this.cullParams = new ArrayBuffer(FRUSTUM_PLANE_COUNT * 16 + 64 + 16 + 16);
     this.cullParamsF32 = new Float32Array(this.cullParams);
     this.cullParamsU32 = new Uint32Array(this.cullParams);
     // One buffer, one slot per phase, so a single dispatch pair needs no
     // rewrite between the two.
     this.cullParamsStride = Math.max(this.alignment, this.cullParams.byteLength);
-    this.cullParamsBuffer = device.createBuffer({
+    this.cullParamsBuffer = createBuffer(rhi, {
       label: 'cull-params',
-      size: this.cullParamsStride * 2,
+      size: this.cullParamsStride * CULL_PHASES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -390,7 +435,9 @@ export class GpuDriven {
     /** Slots [0, opaqueCount) of the visible list belong to the cull shader. */
     this.opaqueCount = 0;
 
-    this._cullExecute = [(pass) => this._dispatch(pass, 0), (pass) => this._dispatch(pass, 1)];
+    this._cullExecute = [0, 1, 2].map((phase) => (pass) => this._dispatch(pass, phase));
+    /** Whether any renderable is in an LOD group, which is when the shadow phase runs. */
+    this.hasLod = false;
     this._needsFullUpload = true;
     /** Bumped by _grow. The renderer's draw bind group names batchBuffer. */
     this.buffersRevision = 0;
@@ -417,14 +464,15 @@ export class GpuDriven {
       ],
     });
 
-    this.pipeline = device.createComputePipeline({
+    this.pipeline = sharedPipelines(device).compute({
       label: 'gpu-cull',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
-      compute: { module: shader.module, entryPoint: 'cull' },
+      layout: createPipelineLayout(device, { 0: this.layout }, 'gpu-cull'),
+      shader,
+      entry: 'cull',
     });
 
     this._makeBindGroup = (hzbView, phase) => device.createBindGroup({
-      label: `gpu-cull:${phase === 0 ? 'early' : 'late'}`,
+      label: `gpu-cull:${['early', 'late', 'shadow'][phase]}`,
       layout: this.layout,
       entries: [
         {
@@ -483,7 +531,7 @@ export class GpuDriven {
     const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 
     this._allocateDrawData(capacity);
-    this.boundsData = new Float32Array(capacity * 8);
+    this.boundsData = new Float32Array(capacity * BOUNDS_FLOATS);
     this.itemBatch = new Uint32Array(capacity);
     this.itemMirrored = new Uint8Array(capacity);
     this.batchOrder = new Uint32Array(capacity);
@@ -495,14 +543,14 @@ export class GpuDriven {
       this.visibleBuffer, this.batchOrderBuffer, this.visibleFlagsBuffer,
     ]) buffer.destroy();
 
-    this.drawDataBuffer = device.createBuffer({ label: 'draw-data', size: capacity * DRAW_DATA_BYTES, usage: STORAGE });
-    this.boundsBuffer = device.createBuffer({ label: 'cull-bounds', size: capacity * 32, usage: STORAGE });
-    this.itemBatchBuffer = device.createBuffer({ label: 'item-batch', size: capacity * 4, usage: STORAGE });
-    this.visibleBuffer = device.createBuffer({ label: 'visible-items', size: capacity * 2 * 4, usage: STORAGE });
+    this.drawDataBuffer = createBuffer(this.rhi, { label: 'draw-data', size: capacity * DRAW_DATA_BYTES, usage: STORAGE });
+    this.boundsBuffer = createBuffer(this.rhi, { label: 'cull-bounds', size: capacity * BOUNDS_FLOATS * 4, usage: STORAGE });
+    this.itemBatchBuffer = createBuffer(this.rhi, { label: 'item-batch', size: capacity * 4, usage: STORAGE });
+    this.visibleBuffer = createBuffer(this.rhi, { label: 'visible-items', size: capacity * CULL_PHASES * 4, usage: STORAGE });
     // Fresh and therefore all zero: after a grow, item indices have moved and
     // last frame's flags describe objects that are no longer at those slots.
-    this.visibleFlagsBuffer = device.createBuffer({ label: 'visible-last-frame', size: capacity * 4, usage: STORAGE });
-    this.batchOrderBuffer = device.createBuffer({ label: 'batch-order', size: capacity * 4, usage: STORAGE });
+    this.visibleFlagsBuffer = createBuffer(this.rhi, { label: 'visible-last-frame', size: capacity * 4, usage: STORAGE });
+    this.batchOrderBuffer = createBuffer(this.rhi, { label: 'batch-order', size: capacity * 4, usage: STORAGE });
 
     this.capacity = capacity;
     this._needsFullUpload = true;
@@ -544,23 +592,22 @@ export class GpuDriven {
     this.batchSize = growArray(this.batchSize, capacity);
 
     this.batchFirst = new Uint32Array(capacity);
-    this.indirectData = new Uint32Array(capacity * 2 * (INDIRECT_BYTES / 4));
-    // capacity * 2 + 1: one slot per (phase, batch), plus a final slot holding
-    // a base of 0 for the blended draws.
-    this.batchStaging = new ArrayBuffer(this.alignment * (capacity * 2 + 1));
+    this.indirectData = new Uint32Array(capacity * CULL_PHASES * (INDIRECT_BYTES / 4));
+    // One slot per (phase, batch), plus the blended draws' two.
+    this.batchStaging = new ArrayBuffer(this.alignment * (capacity * CULL_PHASES + 2));
 
     this.batchFirstBuffer.destroy();
     this.indirectBuffer.destroy();
     this.batchBuffer.destroy();
 
-    this.batchFirstBuffer = device.createBuffer({
+    this.batchFirstBuffer = createBuffer(this.rhi, {
       label: 'batch-first', size: capacity * 4, usage: STORAGE,
     });
-    this.indirectBuffer = device.createBuffer({
-      label: 'indirect-args', size: capacity * 2 * INDIRECT_BYTES,
+    this.indirectBuffer = createBuffer(this.rhi, {
+      label: 'indirect-args', size: capacity * CULL_PHASES * INDIRECT_BYTES,
       usage: GPUBufferUsage.INDIRECT | STORAGE,
     });
-    this.batchBuffer = device.createBuffer({
+    this.batchBuffer = createBuffer(this.rhi, {
       label: 'batch-info', size: this.batchStaging.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
@@ -578,10 +625,7 @@ export class GpuDriven {
   }
 
   _rebuildBindGroups() {
-    this.bindGroups = [
-      this._makeBindGroup(this._hzbView, 0),
-      this._makeBindGroup(this._hzbView, 1),
-    ];
+    this.bindGroups = [0, 1, 2].map((phase) => this._makeBindGroup(this._hzbView, phase));
   }
 
   /**
@@ -604,10 +648,11 @@ export class GpuDriven {
     this.batchCount = 0;
     this.transparentCount = 0;
     this.blendedCasters.length = 0;
-    this.blendedCasters.length = 0;
+    this.hasLod = false;
 
     for (let i = 0; i < count; i++) {
       const material = scene.renderableMaterial[i];
+      if (scene.renderableLodSlot[i] >= 0) this.hasLod = true;
       // Recorded for every item, batched or not: the blended draws are issued
       // one at a time and still need to know their winding.
       const mirrored = isMirrored(scene.transforms.world, scene.renderableMatrixSlot[i] * 16);
@@ -679,9 +724,9 @@ export class GpuDriven {
       this.batchOrder[this.opaqueCount + k] = this.transparentItems[k];
     }
 
-    // Per-batch uniform holding that slice's base index, once per phase. The
-    // late phase's half of the visible list starts a whole capacity along.
-    for (let phase = 0; phase < 2; phase++) {
+    // Per-batch uniform holding that slice's base index, once per phase. Each
+    // phase's slice of the visible list starts a whole capacity along.
+    for (let phase = 0; phase < CULL_PHASES; phase++) {
       for (let b = 0; b < this.batchCount; b++) {
         const slot = phase * this.batchCapacity + b;
         // The visible list is still renderable-sized -- only the slot table is
@@ -692,13 +737,25 @@ export class GpuDriven {
     }
     // The transparent draws' base, always 0: they address the visible list
     // through firstInstance, which a direct draw may set freely.
-    this.transparentBatchSlot = this.batchCapacity * 2;
+    this.transparentBatchSlot = this.batchCapacity * CULL_PHASES;
     new Uint32Array(this.batchStaging, this.transparentBatchSlot * this.alignment, 1)[0] = 0;
+    // With LOD, the shadow pass reads the shadow slice, not the static order,
+    // so the blended casters are copied into that slice's tail -- past every
+    // slot the shadow phase can emit to, as the camera's are.
+    new Uint32Array(this.batchStaging, (this.transparentBatchSlot + 1) * this.alignment, 1)[0] =
+      CULL_SHADOW * this.capacity;
+    /** Per blended item, in transparentItems order: whether its LOD level shows this frame. */
+    if (!(this.casterSelected?.length >= this.transparentCount)) this.casterSelected = new Uint8Array(this.capacity);
+    this.casterSelected.fill(1);
 
     const queue = this.rhi.queue;
     queue.writeBuffer(this.itemBatchBuffer, 0, this.itemBatch, 0, count);
     queue.writeBuffer(this.batchFirstBuffer, 0, this.batchFirst, 0, Math.max(this.batchCount, 1));
     queue.writeBuffer(this.batchOrderBuffer, 0, this.batchOrder, 0, Math.max(this.opaqueCount + this.transparentCount, 1));
+    if (this.hasLod && this.transparentCount > 0) {
+      queue.writeBuffer(this.visibleBuffer, (CULL_SHADOW * this.capacity + this.opaqueCount) * 4,
+        this.transparentItems, 0, this.transparentCount);
+    }
     queue.writeBuffer(this.batchBuffer, 0, this.batchStaging);
     // Item indices have just been reassigned, so last frame's flags describe
     // whatever used to occupy those slots. Starting from zero costs one frame
@@ -714,7 +771,7 @@ export class GpuDriven {
   }
 
   /** Upload this frame's transforms, bounds and reset argument buffer. */
-  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets, morph) {
+  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets, morph, projectionScale = 1) {
     // A DIFFERENT scene needs rebuilding even when its revision happens to
     // match, and it usually does: every scene's first add() takes it to 1. The
     // check used to be on the revision alone, so rendering a second scene
@@ -771,14 +828,37 @@ export class GpuDriven {
       this.drawDataU32[drawFloat + 30] = m >= 0 ? morph.offsets[m] : 0;
       this.drawDataU32[drawFloat + 31] = m >= 0 ? primitive.morphCountStride : 0;
 
-      const b = i * 8;
+      const b = i * BOUNDS_FLOATS;
       const o = i * 3;
       this.boundsData[b] = scene.worldMin[o];
       this.boundsData[b + 1] = scene.worldMin[o + 1];
       this.boundsData[b + 2] = scene.worldMin[o + 2];
+      this.boundsData[b + 3] = scene.renderableCoverage[i * 2];
       this.boundsData[b + 4] = scene.worldMax[o];
       this.boundsData[b + 5] = scene.worldMax[o + 1];
       this.boundsData[b + 6] = scene.worldMax[o + 2];
+      this.boundsData[b + 7] = scene.renderableCoverage[i * 2 + 1];
+      // The group's sphere, through the group node's world matrix: every
+      // level measures the same one, so no distance shows two levels or none.
+      const lodSlot = scene.renderableLodSlot[i];
+      if (lodSlot >= 0) {
+        const w = scene.transforms.world;
+        const m = lodSlot * 16;
+        const s = scene.renderableLodSphere;
+        const x = s[i * 4];
+        const y = s[i * 4 + 1];
+        const z = s[i * 4 + 2];
+        this.boundsData[b + 8] = w[m] * x + w[m + 4] * y + w[m + 8] * z + w[m + 12];
+        this.boundsData[b + 9] = w[m + 1] * x + w[m + 5] * y + w[m + 9] * z + w[m + 13];
+        this.boundsData[b + 10] = w[m + 2] * x + w[m + 6] * y + w[m + 10] * z + w[m + 14];
+        this.boundsData[b + 11] = s[i * 4 + 3] * Math.sqrt(Math.max(
+          w[m] * w[m] + w[m + 1] * w[m + 1] + w[m + 2] * w[m + 2],
+          w[m + 4] * w[m + 4] + w[m + 5] * w[m + 5] + w[m + 6] * w[m + 6],
+          w[m + 8] * w[m + 8] + w[m + 9] * w[m + 9] + w[m + 10] * w[m + 10],
+        ));
+      } else {
+        this.boundsData[b + 11] = 0;
+      }
 
       addToRuns(runs, i, mergeGap);
     }
@@ -791,7 +871,7 @@ export class GpuDriven {
     // shader raises the count with atomicAdd, so resetting here is what makes
     // the frame idempotent -- forget it and counts accumulate until every batch
     // draws the whole scene.
-    for (let phase = 0; phase < 2; phase++) {
+    for (let phase = 0; phase < CULL_PHASES; phase++) {
       for (let b = 0; b < this.batchCount; b++) {
         const primitive = this.batchPrimitive[b];
         const o = (phase * this.batchCapacity + b) * 5;
@@ -810,6 +890,7 @@ export class GpuDriven {
     this.cullParamsU32[planeFloats + 17] = hzb.levelCount;
     this.cullParamsF32[planeFloats + 18] = hzb.width;
     this.cullParamsF32[planeFloats + 19] = hzb.height;
+    this.cullParamsF32[planeFloats + 23] = projectionScale;
 
     const queue = this.rhi.queue;
     const drawFloats = DRAW_DATA_BYTES / 4;
@@ -821,7 +902,7 @@ export class GpuDriven {
         this.drawData, low * drawFloats, span * drawFloats,
       );
       queue.writeBuffer(
-        this.boundsBuffer, low * 32, this.boundsData, low * 8, span * 8,
+        this.boundsBuffer, low * BOUNDS_FLOATS * 4, this.boundsData, low * BOUNDS_FLOATS, span * BOUNDS_FLOATS,
       );
     }
     // Both halves: phase 1 writes at capacity, so a partial write would leave
@@ -831,7 +912,7 @@ export class GpuDriven {
     // One params slot per phase. Only the last four words differ, but writing
     // whole slots keeps the two descriptions independent rather than sharing a
     // prefix that a future field could quietly break.
-    for (let phase = 0; phase < 2; phase++) {
+    for (let phase = 0; phase < CULL_PHASES; phase++) {
       this.cullParamsU32[planeFloats + 20] = phase;
       this.cullParamsU32[planeFloats + 21] = phase * this.batchCapacity;
       this.cullParamsU32[planeFloats + 22] = phase * this.capacity;
@@ -850,7 +931,7 @@ export class GpuDriven {
    */
   addCullPass(graph, { phase, boundsResource, indirectResource, visibleResource, hzbResources = [] }) {
     graph.addPass({
-      name: phase === 0 ? 'cull:early' : 'cull:late',
+      name: `cull:${['early', 'late', 'shadow'][phase]}`,
       type: 'compute',
       reads: [boundsResource, ...hzbResources],
       writes: [indirectResource, visibleResource],
@@ -871,6 +952,26 @@ export class GpuDriven {
   /** Dynamic offset for the zero-base slot the ordered draws bind. */
   transparentBatchOffset() {
     return this.transparentBatchSlot * this.alignment;
+  }
+
+  /** The same, for the shadow pass's blended casters when it reads the shadow slice. */
+  shadowTransparentBatchOffset() {
+    return (this.transparentBatchSlot + 1) * this.alignment;
+  }
+
+  /**
+   * lodSelected from the cull shader, on the CPU, for the items it never
+   * sees: the blended ones, which are ordered here. Reads the bounds as last
+   * uploaded, which is this frame's once update() has run.
+   */
+  lodSelected(item, viewProjection, projectionScale) {
+    const b = item * BOUNDS_FLOATS;
+    const radius = this.boundsData[b + 11];
+    if (radius <= 0) return true;
+    const vp = viewProjection;
+    const w = vp[3] * this.boundsData[b + 8] + vp[7] * this.boundsData[b + 9] + vp[11] * this.boundsData[b + 10] + vp[15];
+    const coverage = w > 0 ? radius * projectionScale / w : 3.0e38;
+    return coverage >= this.boundsData[b + 3] && coverage < this.boundsData[b + 7];
   }
 
   /**

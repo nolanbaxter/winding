@@ -19,6 +19,7 @@ import {
 } from '../src/scene/gltf/images.js';
 import { TransformStore } from '../src/scene/transform.js';
 import { unweldAndComputeFlatNormals } from '../src/scene/gltf/tangents.js';
+import { decodeAttributes, decodeTriangles, decodeIndexSequence, FILTERS } from '../src/scene/gltf/meshopt.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -641,6 +642,87 @@ await atest('takes bounds from the accessor min/max the spec requires', async ()
   vecClose(bounds.max, [1, 1, 0], EPS, 'max');
 });
 
+await atest('quantized attributes decode, and their bounds come from the decoded positions', async () => {
+  // KHR_mesh_quantization: the unit quad as normalized SHORT positions, BYTE
+  // normals and UNSIGNED_SHORT UVs, with the position bounds written in
+  // integer units, as some exporters do. Required, so it must be accepted.
+  const S = 32767;
+  const { bytes, views } = packBuffer([
+    Int16Array.from([0, 0, 0, 0, S, 0, 0, 0, S, S, 0, 0, 0, S, 0, 0]),   // xyz + pad, 8 bytes a vertex
+    Int8Array.from([0, 0, 127, 0, 0, 0, 127, 0, 0, 0, 127, 0, 0, 0, 127, 0]),
+    Uint16Array.from([0, 0, 65535, 0, 65535, 65535, 0, 65535]),
+    QUAD.indices,
+  ]);
+  const json = {
+    asset: { version: '2.0' },
+    extensionsUsed: ['KHR_mesh_quantization'],
+    extensionsRequired: ['KHR_mesh_quantization'],
+    buffers: [{ byteLength: bytes.length }],
+    bufferViews: [
+      { buffer: 0, ...views[0], byteStride: 8 },
+      { buffer: 0, ...views[1], byteStride: 4 },
+      { buffer: 0, ...views[2] },
+      { buffer: 0, ...views[3] },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5122, normalized: true, count: 4, type: 'VEC3', min: [0, 0, 0], max: [S, S, 0] },
+      { bufferView: 1, componentType: 5120, normalized: true, count: 4, type: 'VEC3' },
+      { bufferView: 2, componentType: 5123, normalized: true, count: 4, type: 'VEC2' },
+      { bufferView: 3, componentType: 5123, count: 6, type: 'SCALAR' },
+    ],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, indices: 3 }] }],
+    nodes: [{ mesh: 0 }],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  };
+  const model = await loadGLTF(makeGLB(json, bytes));
+  const primitive = model.meshes[0].primitives[0];
+  const v = primitive.vertices;
+  const stride = VERTEX_STRIDE_FLOATS;
+  vecClose(v.subarray(2 * stride, 2 * stride + 3), [1, 1, 0], 1e-4, 'position of the far corner');
+  vecClose(v.subarray(3, 6), [0, 0, 1], 1e-6, 'normal');
+  vecClose(v.subarray(2 * stride + 6, 2 * stride + 8), [1, 1], 1e-6, 'uv');
+  vecClose(primitive.bounds.max, [1, 1, 0], 1e-4, 'bounds in decoded units, not the file\'s integers');
+});
+
+
+await atest('texture transforms become the matrix the extension defines, per texture', async () => {
+  // The expected matrix is built exactly as the extension's GLSL writes it:
+  // column-major mat3s, translation * rotation * scale.
+  const glsl = (offset, rotation, scale) => {
+    const c = Math.cos(rotation), s = Math.sin(rotation);
+    const T = [1, 0, 0, 0, 1, 0, offset[0], offset[1], 1];
+    const R = [c, s, 0, -s, c, 0, 0, 0, 1];
+    const S = [scale[0], 0, 0, 0, scale[1], 0, 0, 0, 1];
+    const mul = (a, b) => Array.from({ length: 9 }, (_, i) => {
+      const col = Math.floor(i / 3), row = i % 3;
+      return a[row] * b[col * 3] + a[3 + row] * b[col * 3 + 1] + a[6 + row] * b[col * 3 + 2];
+    });
+    const m = mul(mul(T, R), S);
+    return [m[0], m[3], m[6], m[1], m[4], m[7]];   // its two rows
+  };
+  const { glb, json } = animatedGLB();
+  json.extensionsUsed = ['KHR_texture_transform'];
+  json.extensionsRequired = ['KHR_texture_transform'];
+  json.textures = [{}];
+  json.materials = [{
+    pbrMetallicRoughness: {
+      baseColorTexture: { index: 0, extensions: { KHR_texture_transform: { offset: [0.5, 0.25], rotation: 0.7, scale: [2, 3] } } },
+    },
+    normalTexture: { index: 0, texCoord: 0, extensions: { KHR_texture_transform: { rotation: Math.PI / 2, texCoord: 1 } } },
+  }];
+  const model = await loadGLTF(makeGLB(json, parseContainer(glb).binary));
+  const t = model.materials[0].uvTransforms;
+  vecClose([...t.subarray(0, 6)], glsl([0.5, 0.25], 0.7, [2, 3]), 1e-6, 'base colour');
+  vecClose([...t.subarray(6, 12)], [1, 0, 0, 0, 1, 0], 0, 'metal/rough has none: the identity');
+  vecClose([...t.subarray(12, 18)], glsl([0, 0], Math.PI / 2, [1, 1]), 1e-6, 'normal');
+  assert.equal(model.materials[0].uvSets.normal, 1, 'the extension\'s texCoord overrides the reference\'s');
+
+  json.materials[0].pbrMetallicRoughness.baseColorTexture.extensions.KHR_texture_transform.rotation = Infinity;
+  await assert.rejects(loadGLTF(makeGLB(json, parseContainer(glb).binary)), /baseColor texture transform rotation must be a finite number/);
+});
+
+
 await atest('generates tangents when UVs exist but TANGENT does not', async () => {
   const model = await loadGLTF(quadGLB());
   const v0 = model.meshes[0].primitives[0].vertices;
@@ -777,7 +859,7 @@ await atest('an unsupported primitive mode names the mode', async () => {
 
 await atest('a required extension we cannot honor is refused up front', async () => {
   const json = { asset: { version: '2.0' }, extensionsRequired: ['KHR_draco_mesh_compression'] };
-  await assert.rejects(() => loadGLTF(makeGLB(json, null)), /KHR_draco/);
+  await assert.rejects(() => loadGLTF(makeGLB(json, null)), /KHR_draco.*gltf-transform meshopt/);
 });
 
 // ------------------------------------------------ lights and cameras
@@ -892,6 +974,151 @@ await atest('emissive strength lifts the emissive factor past 1', async () => {
   await loadGLTF(makeGLB(json, null));   // accepted when required, too
 });
 
+await atest('unlit, ior and specular are read, and their textures kept with their own UVs', async () => {
+  const transform = { KHR_texture_transform: { offset: [0.5, 0], texCoord: 1 } };
+  const json = {
+    asset: { version: '2.0' },
+    extensionsUsed: ['KHR_materials_unlit', 'KHR_materials_ior', 'KHR_materials_specular', 'KHR_texture_transform'],
+    extensionsRequired: ['KHR_materials_unlit', 'KHR_materials_ior', 'KHR_materials_specular'],
+    textures: [{ source: 0 }, { source: 1 }],
+    images: [{ uri: 'a.png' }, { uri: 'b.png' }],
+    materials: [
+      { extensions: { KHR_materials_unlit: {} } },
+      {
+        extensions: {
+          KHR_materials_ior: { ior: 1.33 },
+          KHR_materials_specular: {
+            specularFactor: 0.5, specularColorFactor: [1, 0.5, 0.25],
+            specularTexture: { index: 0 }, specularColorTexture: { index: 1, extensions: transform },
+          },
+        },
+      },
+      { extensions: { KHR_materials_ior: { ior: 0 } } },
+      {},
+    ],
+  };
+  const [unlit, specular, infinite, plain] = (await loadGLTF(makeGLB(json, null))).materials;
+  assert.equal(unlit.unlit, true);
+  assert.equal(plain.unlit, false);
+  close(specular.ior, 1.33);
+  assert.equal(infinite.ior, 0, 'the spec keeps 0 for an index of infinity');
+  assert.equal(plain.ior, 1.5, 'and 1.5 without the extension');
+  assert.equal(specular.specular, 0.5);
+  assert.deepEqual([...specular.specularColor], [1, 0.5, 0.25]);
+  assert.deepEqual([plain.specular, ...plain.specularColor], [1, 1, 1, 1]);
+  assert.equal(specular.textures.specular, 0);
+  assert.equal(specular.textures.specularColor, 1);
+  assert.equal(specular.uvSets.specularColor, 1, "the transform's texCoord");
+  // Rows follow the core five: the specular colour is the seventh texture.
+  assert.deepEqual([...specular.uvTransforms.subarray(36, 42)], [1, -0, 0.5, 0, 1, 0]);
+  assert.deepEqual([...usedImages(json)].sort(), [0, 1], 'and their images are decoded');
+
+  // A string, too: JSON has no Infinity to write.
+  for (const ior of [0.5, -1, '2']) {
+    json.materials[2].extensions.KHR_materials_ior.ior = ior;
+    await assert.rejects(loadGLTF(makeGLB(json, null)), /ior must be at least 1, or 0/);
+  }
+});
+
+await atest('clearcoat and sheen are read, with nothing of either by default', async () => {
+  const json = {
+    asset: { version: '2.0' },
+    extensionsRequired: ['KHR_materials_clearcoat', 'KHR_materials_sheen'],
+    extensionsUsed: ['KHR_materials_clearcoat', 'KHR_materials_sheen'],
+    textures: [{ source: 0 }],
+    images: [{ uri: 'a.png' }],
+    materials: [{
+      extensions: {
+        KHR_materials_clearcoat: {
+          clearcoatFactor: 1, clearcoatRoughnessFactor: 0.25,
+          clearcoatTexture: { index: 0 }, clearcoatRoughnessTexture: { index: 0 },
+          clearcoatNormalTexture: { index: 0, scale: 0.5, texCoord: 1 },
+        },
+        KHR_materials_sheen: { sheenColorFactor: [0.5, 0.25, 1], sheenRoughnessFactor: 0.75, sheenRoughnessTexture: { index: 0 } },
+      },
+    }, {}],
+  };
+  const [both, plain] = (await loadGLTF(makeGLB(json, null))).materials;
+  assert.deepEqual([both.clearcoat, both.clearcoatRoughness, both.clearcoatNormalScale], [1, 0.25, 0.5]);
+  assert.deepEqual([...both.sheenColor, both.sheenRoughness], [0.5, 0.25, 1, 0.75]);
+  assert.deepEqual([both.textures.clearcoat, both.textures.clearcoatRoughness, both.textures.clearcoatNormal], [0, 0, 0]);
+  assert.equal(both.uvSets.clearcoatNormal, 1);
+  assert.equal(both.textures.sheenColor, -1);
+  assert.deepEqual([plain.clearcoat, plain.clearcoatRoughness, plain.clearcoatNormalScale], [0, 0, 1]);
+  assert.deepEqual([...plain.sheenColor, plain.sheenRoughness], [0, 0, 0, 0]);
+});
+
+await atest('anisotropy and iridescence are read, with none of either by default', async () => {
+  const json = {
+    asset: { version: '2.0' },
+    extensionsRequired: ['KHR_materials_anisotropy', 'KHR_materials_iridescence'],
+    extensionsUsed: ['KHR_materials_anisotropy', 'KHR_materials_iridescence'],
+    textures: [{ source: 0 }],
+    images: [{ uri: 'a.png' }],
+    materials: [{
+      extensions: {
+        KHR_materials_anisotropy: { anisotropyStrength: 0.5, anisotropyRotation: 1, anisotropyTexture: { index: 0 } },
+        KHR_materials_iridescence: {
+          iridescenceFactor: 1, iridescenceIor: 1.8, iridescenceThicknessMinimum: 200, iridescenceThicknessMaximum: 600,
+          iridescenceThicknessTexture: { index: 0 },
+        },
+      },
+    }, {}],
+  };
+  const [both, plain] = (await loadGLTF(makeGLB(json, null))).materials;
+  assert.deepEqual([both.anisotropyStrength, both.anisotropyRotation, both.textures.anisotropy], [0.5, 1, 0]);
+  assert.deepEqual(
+    [both.iridescence, both.iridescenceIor, both.iridescenceThicknessMinimum, both.iridescenceThicknessMaximum],
+    [1, 1.8, 200, 600],
+  );
+  assert.deepEqual([both.textures.iridescenceThickness, both.textures.iridescence], [0, -1]);
+  assert.deepEqual([plain.anisotropyStrength, plain.anisotropyRotation, plain.iridescence], [0, 0, 0]);
+  assert.deepEqual([plain.iridescenceIor, plain.iridescenceThicknessMinimum, plain.iridescenceThicknessMaximum], [1.3, 100, 400]);
+});
+
+await atest('transmission and volume are read; an attenuation distance must be positive', async () => {
+  const json = {
+    asset: { version: '2.0' },
+    extensionsRequired: ['KHR_materials_transmission', 'KHR_materials_volume'],
+    extensionsUsed: ['KHR_materials_transmission', 'KHR_materials_volume'],
+    textures: [{ source: 0 }],
+    images: [{ uri: 'a.png' }],
+    materials: [{
+      extensions: {
+        KHR_materials_transmission: { transmissionFactor: 0.75, transmissionTexture: { index: 0 } },
+        KHR_materials_volume: { thicknessFactor: 2, thicknessTexture: { index: 0 }, attenuationDistance: 0.5, attenuationColor: [1, 0.5, 0.25] },
+      },
+    }, {}],
+  };
+  const [glass, plain] = (await loadGLTF(makeGLB(json, null))).materials;
+  assert.deepEqual([glass.transmission, glass.thickness, glass.attenuationDistance], [0.75, 2, 0.5]);
+  assert.deepEqual([...glass.attenuationColor], [1, 0.5, 0.25]);
+  assert.deepEqual([glass.textures.transmission, glass.textures.thickness], [0, 0]);
+  assert.deepEqual([plain.transmission, plain.thickness, plain.attenuationDistance], [0, 0, Infinity],
+    'no attenuation: JSON cannot write infinity, so leaving it out is how a file asks');
+  assert.deepEqual([...plain.attenuationColor], [1, 1, 1]);
+  for (const distance of [0, -1, 'far']) {
+    json.materials[0].extensions.KHR_materials_volume.attenuationDistance = distance;
+    await assert.rejects(loadGLTF(makeGLB(json, null)), /attenuationDistance must be positive/);
+  }
+});
+
+await atest('MSFT_lod: levels and coverage are read, and a bad hint is named', async () => {
+  const doc = (lod, extras) => makeGLB({
+    asset: { version: '2.0' },
+    extensionsUsed: ['MSFT_lod'],
+    nodes: [{ extensions: { MSFT_lod: lod }, extras }, {}, {}],
+  }, null);
+  const model = await loadGLTF(doc({ ids: [1, 2] }, { MSFT_screencoverage: [0.5, 0.2, 0.01] }));
+  assert.deepEqual(model.nodes[0].lod, { ids: [1, 2], coverage: [0.5, 0.2, 0.01] });
+  assert.equal(model.nodes[1].lod, null);
+  assert.deepEqual((await loadGLTF(doc({ ids: [1] }))).nodes[0].lod, { ids: [1], coverage: null });
+  await assert.rejects(loadGLTF(doc({ ids: [0] })), /MSFT_lod ids must name other nodes/);
+  await assert.rejects(loadGLTF(doc({ ids: [7] })), /MSFT_lod ids must name other nodes/);
+  await assert.rejects(loadGLTF(doc({ ids: [1, 2] }, { MSFT_screencoverage: [0.5, 0.2] })), /3 decreasing coverages/);
+  await assert.rejects(loadGLTF(doc({ ids: [1] }, { MSFT_screencoverage: [0.2, 0.5] })), /decreasing/);
+});
+
 await atest('a malformed light, camera or index is refused by name', async () => {
   // Each of these used to load: into NaN, a silently dropped light or camera,
   // a hard-edged or never-shining light, or a camera that failed every frame.
@@ -989,8 +1216,8 @@ await atest('KHR_lights_punctual is accepted as a required extension', async () 
   }));
   assert.equal(model.lights.length, 1);
   await assert.rejects(
-    () => loadGLTF(sceneryGLB({ nodes: [{}], required: ['KHR_lights_punctual', 'EXT_meshopt_compression'] })),
-    (error) => /EXT_meshopt/.test(error.message) && !/KHR_lights/.test(error.message),
+    () => loadGLTF(sceneryGLB({ nodes: [{}], required: ['KHR_lights_punctual', 'KHR_draco_mesh_compression'] })),
+    (error) => /KHR_draco/.test(error.message) && !/KHR_lights/.test(error.message),
     'only the extension it cannot honour is named',
   );
 });
@@ -1284,6 +1511,129 @@ await atest('rejects a sampler whose value count does not match its times', asyn
     loadGLTF(makeGLB(json, parseContainer(glb).binary)),
     /2 times but 9 values/,
   );
+});
+
+// ------------------------------------------------------ KHR_animation_pointer
+
+console.log('\nKHR_animation_pointer');
+
+/**
+ * animatedGLB with its one channel aimed by pointer, its output accessor
+ * retyped to `type`, and whatever the pointer needs added to the document.
+ */
+function pointerGLB(pointer, { type = 'VEC3', edit = () => {} } = {}) {
+  const width = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 }[type];
+  const { glb, json } = animatedGLB({ values: new Array(2 * width).fill(0.5) });
+  json.accessors[5].type = type;
+  json.animations[0].channels[0].target = { path: 'pointer', extensions: { KHR_animation_pointer: { pointer } } };
+  json.extensionsUsed = ['KHR_animation_pointer'];
+  json.materials = [{ pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1] } }];
+  json.cameras = [
+    { type: 'perspective', perspective: { yfov: 0.8, znear: 0.1 } },
+    { type: 'orthographic', orthographic: { xmag: 1, ymag: 1, znear: 0, zfar: 10 } },
+  ];
+  json.extensions = { KHR_lights_punctual: { lights: [{ type: 'point' }, { type: 'spot' }, { type: 'directional' }] } };
+  edit(json);
+  return makeGLB(json, parseContainer(glb).binary);
+}
+
+await atest('a pointer at a node\'s TRS is the channel the core form would be', async () => {
+  const model = await loadGLTF(pointerGLB('/nodes/0/translation'));
+  const [channel] = model.animations[0].channels;
+  assert.equal(channel.node, 0);
+  assert.equal(channel.path, 'translation');
+  assert.equal(channel.components, 3);
+});
+
+await atest('pointers at materials, lights and cameras become property channels', async () => {
+  const cases = [
+    ['/materials/0/pbrMetallicRoughness/baseColorFactor', 'VEC4', 'material/0/baseColorFactor', 4],
+    ['/materials/0/extensions/KHR_materials_emissive_strength/emissiveStrength', 'SCALAR', 'material/0/emissiveStrength', 1],
+    ['/materials/0/occlusionTexture/strength', 'SCALAR', 'material/0/occlusionStrength', 1],
+    ['/extensions/KHR_lights_punctual/lights/1/spot/outerConeAngle', 'SCALAR', 'light/1/outerAngle', 1],
+    ['/extensions/KHR_lights_punctual/lights/0/color', 'VEC3', 'light/0/color', 3],
+    ['/cameras/0/perspective/yfov', 'SCALAR', 'camera/0/fovY', 1],
+    ['/cameras/1/orthographic/ymag', 'SCALAR', 'camera/1/halfHeight', 1],
+    ['/materials/0/pbrMetallicRoughness/baseColorTexture/extensions/KHR_texture_transform/offset', 'VEC2', 'material/0/uv0.offset', 2],
+    ['/materials/0/emissiveTexture/extensions/KHR_texture_transform/rotation', 'SCALAR', 'material/0/uv4.rotation', 1],
+    ['/materials/0/extensions/KHR_materials_ior/ior', 'SCALAR', 'material/0/ior', 1],
+    ['/materials/0/extensions/KHR_materials_specular/specularColorFactor', 'VEC3', 'material/0/specularColor', 3],
+    ['/materials/0/extensions/KHR_materials_specular/specularTexture/extensions/KHR_texture_transform/scale', 'VEC2', 'material/0/uv5.scale', 2],
+    ['/materials/0/extensions/KHR_materials_clearcoat/clearcoatFactor', 'SCALAR', 'material/0/clearcoat', 1],
+    ['/materials/0/extensions/KHR_materials_clearcoat/clearcoatNormalTexture/scale', 'SCALAR', 'material/0/clearcoatNormalScale', 1],
+    ['/materials/0/extensions/KHR_materials_sheen/sheenColorFactor', 'VEC3', 'material/0/sheenColor', 3],
+    ['/materials/0/extensions/KHR_materials_sheen/sheenRoughnessFactor', 'SCALAR', 'material/0/sheenRoughness', 1],
+    ['/materials/0/extensions/KHR_materials_anisotropy/anisotropyRotation', 'SCALAR', 'material/0/anisotropyRotation', 1],
+    ['/materials/0/extensions/KHR_materials_iridescence/iridescenceThicknessMaximum', 'SCALAR', 'material/0/iridescenceThicknessMaximum', 1],
+    ['/materials/0/extensions/KHR_materials_transmission/transmissionFactor', 'SCALAR', 'material/0/transmission', 1],
+    ['/materials/0/extensions/KHR_materials_volume/attenuationColor', 'VEC3', 'material/0/attenuationColor', 3],
+  ];
+  for (const [pointer, type, key, components] of cases) {
+    const model = await loadGLTF(pointerGLB(pointer, { type }));
+    const [channel] = model.animations[0].channels;
+    assert.equal(channel.path, 'property', pointer);
+    assert.equal(channel.key, key, pointer);
+    assert.equal(channel.components, components, pointer);
+    assert.deepEqual(model.animations[0].ignored, [], pointer);
+  }
+});
+
+await atest('a pointer at nothing this engine renders is set aside and listed', async () => {
+  const unused = [
+    '/materials/0/extensions/KHR_materials_dispersion/dispersion',
+    '/cameras/0/perspective/aspectRatio',
+    '/cameras/1/orthographic/xmag',
+    '/cameras/1/perspective/yfov',                          // not a perspective camera
+    '/extensions/KHR_lights_punctual/lights/0/spot/innerConeAngle', // a point light
+    '/extensions/KHR_lights_punctual/lights/2/range',       // directional
+    '/nodes/0/extensions/KHR_node_visibility/visible',
+  ];
+  for (const pointer of unused) {
+    const model = await loadGLTF(pointerGLB(pointer, { type: 'SCALAR' }));
+    assert.equal(model.animations[0].channels.length, 0, pointer);
+    assert.deepEqual(model.animations[0].ignored, [pointer]);
+  }
+});
+
+await atest('a pointer past the end of its array is refused', async () => {
+  for (const [pointer, what] of [
+    ['/materials/3/alphaCutoff', 'material 3'],
+    ['/nodes/9/scale', 'node 9'],
+    ['/extensions/KHR_lights_punctual/lights/5/intensity', 'light 5'],
+    ['/cameras/2/perspective/znear', 'camera 2'],
+  ]) {
+    await assert.rejects(loadGLTF(pointerGLB(pointer, { type: pointer.endsWith('scale') ? 'VEC3' : 'SCALAR' })),
+      new RegExp(`there is no ${what}`), pointer);
+  }
+  await assert.rejects(loadGLTF(pointerGLB('/nodes/0/weights/0', { type: 'SCALAR' })), /no morph target 0/);
+  await assert.rejects(loadGLTF(pointerGLB(undefined)), /pointer channel with no pointer/);
+});
+
+await atest('a pointer channel\'s accessor must be as wide as its property', async () => {
+  await assert.rejects(
+    loadGLTF(pointerGLB('/materials/0/pbrMetallicRoughness/baseColorFactor', { type: 'VEC3' })),
+    /baseColorFactor \(4 components\) from a 3-component accessor/,
+  );
+});
+
+await atest('KHR_animation_pointer may be required', async () => {
+  const model = await loadGLTF(pointerGLB('/nodes/0/translation', {
+    edit: (json) => { json.extensionsRequired = ['KHR_animation_pointer']; },
+  }));
+  assert.equal(model.animations[0].channels.length, 1);
+});
+
+await atest('a material keeps its emissive factor and strength apart, as well as their product', async () => {
+  const model = await loadGLTF(pointerGLB('/nodes/0/translation', {
+    edit: (json) => {
+      json.materials[0].emissiveFactor = [0.5, 0.25, 1];
+      json.materials[0].extensions = { KHR_materials_emissive_strength: { emissiveStrength: 4 } };
+    },
+  }));
+  const [material] = model.materials;
+  assert.deepEqual([...material.emissiveFactor], [0.5, 0.25, 1]);
+  assert.equal(material.emissiveStrength, 4);
+  assert.deepEqual([...material.emissive], [2, 1, 4]);
 });
 
 // ------------------------------------------------------- degenerate input
@@ -2075,6 +2425,184 @@ test('only images a material samples are decoded', () => {
     materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } }, normalTexture: { index: 1 } }],
   };
   assert.deepEqual([...usedImages(json)].sort(), [0, 2]);
+});
+
+// ------------------------------------------------------------------ meshopt
+
+console.log('\nmeshopt compression');
+
+// Streams from meshoptimizer's own test suite (demo/tests.cpp), made by its
+// encoder: an oracle this decoder shares no code with. Four vertices of 12
+// bytes each -- three u16 position components, two bytes, two u16 UVs.
+const MO_VERTICES = [[0, 0, 0, 0], [300, 0, 500, 0], [0, 300, 0, 500], [300, 300, 500, 500]];
+const moVertexBytes = () => {
+  const out = new Uint8Array(48), view = new DataView(out.buffer);
+  MO_VERTICES.forEach(([x, y, u, v], i) => {
+    view.setUint16(i * 12, x, true); view.setUint16(i * 12 + 2, y, true);
+    view.setUint16(i * 12 + 8, u, true); view.setUint16(i * 12 + 10, v, true);
+  });
+  return out;
+};
+const MO_V0 = Uint8Array.from([
+  0xa0, 0x01, 0x3f, 0x00, 0x00, 0x00, 0x58, 0x57, 0x58, 0x01, 0x26, 0x00, 0x00, 0x00, 0x01, 0x0c,
+  0x00, 0x00, 0x00, 0x58, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x3f, 0x00,
+  0x00, 0x00, 0x17, 0x18, 0x17, 0x01, 0x26, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x00, 0x00, 0x00, 0x17,
+  0x01, 0x08, ...new Array(35).fill(0),
+]);
+const MO_V1 = Uint8Array.from([
+  0xa1, 0xee, 0xaa, 0xee, 0x00, 0x4b, 0x4b, 0x4b, 0x00, 0x00, 0x4b, 0x00, 0x00, 0x7d, 0x7d, 0x7d,
+  0x00, 0x00, 0x7d, ...new Array(22).fill(0), 0x62, 0x00, 0x62,
+]);
+// Made by a custom encoder to use every feature of version 1.
+const MO_V1_ALL = Uint8Array.from([
+  0xa1, 0xd4, 0x94, 0xd4, 0x01, 0x0e, 0x00, 0x58, 0x57, 0x58, 0x02, 0x02, 0x12, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x0e, 0x00, 0x7d, 0x7d, 0x7d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7d, 0x00, 0x00,
+  ...new Array(20).fill(0), 0x00, 0x01, 0x62,
+]);
+
+test('meshopt attribute streams decode to the reference bytes, both versions', () => {
+  assert.deepEqual(decodeAttributes(MO_V0, 4, 12), moVertexBytes(), 'version 0');
+  assert.deepEqual(decodeAttributes(MO_V1, 4, 12, true), moVertexBytes(), 'version 1');
+  assert.deepEqual(decodeAttributes(MO_V1_ALL, 4, 12, true), moVertexBytes(), 'every version 1 feature');
+  assert.throws(() => decodeAttributes(MO_V1, 4, 12, false), /starts 0xa1/, 'EXT defines version 0 only');
+
+  // 16-bit channel deltas over 16 elements of 8 bytes.
+  const deltas = Uint8Array.from([
+    0xa1, 0x99, 0x99, 0x01, 0x2a, 0xaa, 0xaa, 0xaa, 0x02, 0x04, 0x44, 0x44, 0x44, 0x43, 0x33, 0x33,
+    0x33, 0x02, 0x06, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x02, 0x08, 0x88, 0x88, 0x88, 0x87,
+    0x77, 0x77, 0x77, ...new Array(14).fill(0), 0xf8, 0x00, 0xf8, 0x00, 0xf0, 0x00, 0xf0, 0x00, 0x01, 0x01,
+  ]);
+  assert.deepEqual([...new Uint16Array(decodeAttributes(deltas, 16, 8, true).buffer)], [
+    248, 248, 240, 240, 249, 250, 243, 244, 250, 252, 246, 248, 251, 254, 249, 252,
+    252, 256, 252, 256, 253, 258, 255, 260, 254, 260, 258, 264, 255, 262, 261, 268,
+    256, 264, 264, 272, 257, 262, 267, 268, 258, 260, 270, 264, 259, 258, 273, 260,
+    260, 256, 276, 256, 261, 254, 279, 252, 262, 252, 282, 248, 263, 250, 285, 244,
+  ]);
+});
+
+test('a meshopt stream that is short or overlong is refused, not read past', () => {
+  // Every truncation of a valid stream, and one extra byte.
+  for (let n = 0; n < MO_V0.length; n++) {
+    assert.throws(() => decodeAttributes(MO_V0.subarray(0, n), 4, 12), Error, `${n} bytes`);
+  }
+  assert.throws(() => decodeAttributes(Uint8Array.from([...MO_V0, 0]), 4, 12), /left over/);
+});
+
+test('meshopt triangle and index streams decode to the reference indices', () => {
+  // Restarts, the codes either side of the last index, and a code-table triangle.
+  const tricky = Uint8Array.from([
+    0xe1, 0xf0, 0x10, 0xfe, 0x1f, 0x3d, 0x00, 0x0a, 0x00, 0x76, 0x87, 0x56, 0x67, 0x78, 0xa9, 0x86,
+    0x65, 0x89, 0x68, 0x98, 0x01, 0x69, 0x00, 0x00,
+  ]);
+  const expected = [0, 1, 2, 2, 1, 3, 0, 1, 2, 2, 1, 5, 2, 1, 4];
+  assert.deepEqual([...new Uint32Array(decodeTriangles(tricky, 15, 4).buffer)], expected);
+  assert.deepEqual([...new Uint16Array(decodeTriangles(tricky, 15, 2).buffer)], expected);
+
+  // The suite's version-0 stream uses no code the versions disagree on, so
+  // with a version-1 header it is one; it covers 0xff, all three explicit.
+  const explicit = Uint8Array.from([
+    0xe1, 0xf0, 0x10, 0xfe, 0xff, 0xf0, 0x0c, 0xff, 0x02, 0x02, 0x02, 0x00, 0x76, 0x87, 0x56, 0x67,
+    0x78, 0xa9, 0x86, 0x65, 0x89, 0x68, 0x98, 0x01, 0x69, 0x00, 0x00,
+  ]);
+  assert.deepEqual([...new Uint32Array(decodeTriangles(explicit, 12, 4).buffer)], [0, 1, 2, 2, 1, 3, 4, 6, 5, 7, 8, 9]);
+
+  // By hand from the spec: (0 1 2) from the table, then the newest edge
+  // (0, 2) with the vertex one back in the FIFO, 1.
+  const fifo = Uint8Array.from([0xe1, 0xf0, 0x01, ...new Array(16).fill(0)]);
+  assert.deepEqual([...new Uint16Array(decodeTriangles(fifo, 6, 2).buffer)], [0, 1, 2, 0, 2, 1]);
+  const badTable = Uint8Array.from([0xe1, 0xf0, 0x01, 0xf0, ...new Array(15).fill(0)]);
+  assert.throws(() => decodeTriangles(badTable, 6, 2), /code table/);
+
+  const sequence = Uint8Array.from([0xd1, 0x00, 0x04, 0xcd, 0x01, 0x04, 0x07, 0x98, 0x1f, 0x00, 0x00, 0x00, 0x00]);
+  assert.deepEqual([...new Uint32Array(decodeIndexSequence(sequence, 6, 4).buffer)], [0, 1, 51, 2, 49, 1000]);
+});
+
+test('meshopt filters decode to the reference values', () => {
+  const run = (Type, values, filter, stride) => {
+    const data = Type.from(values);
+    FILTERS[filter](new Uint8Array(data.buffer), data.length / (stride / Type.BYTES_PER_ELEMENT), stride);
+    return [...data];
+  };
+  assert.deepEqual(run(Uint8Array, [0, 1, 127, 0, 0, 187, 127, 1, 255, 1, 127, 0, 14, 130, 127, 1], 'OCTAHEDRAL', 4),
+    [0, 1, 127, 0, 0, 159, 82, 1, 255, 1, 127, 0, 1, 130, 241, 1]);
+  assert.deepEqual(run(Uint16Array, [0, 1, 2047, 0, 0, 1870, 2047, 1, 2017, 1, 2047, 0, 14, 1300, 2047, 1], 'OCTAHEDRAL', 8),
+    [0, 16, 32767, 0, 0, 32621, 3088, 1, 32764, 16, 471, 0, 307, 28541, 16093, 1]);
+  assert.deepEqual(run(Uint16Array, [0, 1, 0, 0x7fc, 0, 1870, 0, 0x7fd, 2017, 1, 0, 0x7fe, 14, 1300, 0, 0x7ff], 'QUATERNION', 8),
+    [32767, 0, 11, 0, 0, 25013, 0, 21166, 11, 0, 23504, 22830, 158, 14715, 0, 29277]);
+  assert.deepEqual(run(Uint32Array, [0, 0xff000003, 0x02fffff7, 0xfe7fffff], 'EXPONENTIAL', 4),
+    [0, 0x3fc00000, 0xc2100000, 0x49fffffe]);
+  // By hand from the spec, K = 8: Y 100, Co 10, Cg -5 is (115, 95, 95), and
+  // a 7-bit alpha of 65 under its marker bit widens, low bit repeated, to 131.
+  assert.deepEqual(run(Uint8Array, [100, 10, 256 - 5, 0x80 | 65], 'COLOR', 4), [115, 95, 95, 131]);
+});
+
+// A GLB whose vertices and indices are both compressed views over a fallback
+// buffer that has no data at all, which is how gltfpack writes one.
+function meshoptGLB({ extension = 'EXT_meshopt_compression', vertices = MO_V0, count = 4 } = {}) {
+  const indices = Uint8Array.from([0xe1, 0xf0, 0x10, ...new Array(16).fill(0)]);   // 0 1 2, 2 1 3
+  const vertexBytes = Math.ceil(vertices.length / 4) * 4;
+  const binary = new Uint8Array(vertexBytes + indices.length);
+  binary.set(vertices);
+  binary.set(indices, vertexBytes);
+  const compressed = (byteOffset, byteLength, byteStride, mode, count) =>
+    ({ [extension]: { buffer: 0, byteOffset, byteLength, byteStride, mode, count } });
+  const json = {
+    asset: { version: '2.0' },
+    extensionsUsed: [extension, 'KHR_mesh_quantization'],
+    extensionsRequired: [extension, 'KHR_mesh_quantization'],
+    buffers: [{ byteLength: binary.length }, { byteLength: 60, extensions: { [extension]: { fallback: true } } }],
+    bufferViews: [
+      { buffer: 1, byteLength: 12 * count, byteStride: 12, extensions: compressed(0, vertices.length, 12, 'ATTRIBUTES', count) },
+      { buffer: 1, byteOffset: 48, byteLength: 12, extensions: compressed(vertexBytes, indices.length, 2, 'TRIANGLES', 6) },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5123, count: 4, type: 'VEC3', min: [0, 0, 0], max: [300, 300, 0] },
+      { bufferView: 0, byteOffset: 8, componentType: 5123, normalized: true, count: 4, type: 'VEC2' },
+      { bufferView: 1, componentType: 5123, count: 6, type: 'SCALAR' },
+    ],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, indices: 2 }] }],
+    nodes: [{ mesh: 0 }],
+    scenes: [{ nodes: [0] }],
+  };
+  return { json, binary };
+}
+
+await atest('a meshopt-compressed GLB loads as the geometry it encodes, fallback never read', async () => {
+  for (const [extension, vertices] of [['EXT_meshopt_compression', MO_V0], ['KHR_meshopt_compression', MO_V1_ALL]]) {
+    const { json, binary } = meshoptGLB({ extension, vertices });
+    const primitive = (await loadGLTF(makeGLB(json, binary))).meshes[0].primitives[0];
+    assert.equal(primitive.indexCount, 6, extension);
+    // No normals, so the importer unwelds: one vertex per corner, in index order.
+    [0, 1, 2, 2, 1, 3].forEach((index, corner) => {
+      const [x, y, u, v] = MO_VERTICES[index];
+      const o = corner * VERTEX_STRIDE_FLOATS;
+      vecClose(primitive.vertices.subarray(o, o + 3), [x, y, 0], 0, `${extension} corner ${corner} position`);
+      vecClose(primitive.vertices.subarray(o + 6, o + 8), [u / 65535, v / 65535], 1e-7, `${extension} corner ${corner} uv`);
+    });
+  }
+});
+
+await atest('meshopt views that break the extension\'s rules are refused with the rule', async () => {
+  const load = (edit) => {
+    const { json, binary } = meshoptGLB();
+    edit(json);
+    return loadGLTF(makeGLB(json, binary), { maxBytes: 1 << 20 });
+  };
+  await assert.rejects(load((j) => { j.bufferViews[0].extensions.EXT_meshopt_compression.byteStride = 16; }), /byteStride 12 but its meshopt data has 16/);
+  await assert.rejects(load((j) => { j.bufferViews[0].extensions.EXT_meshopt_compression.filter = 'COLOR'; }), /filter "COLOR"/);
+  await assert.rejects(load((j) => { j.bufferViews[0].extensions.EXT_meshopt_compression.filter = 'QUATERNION'; }), /QUATERNION on a 12-byte stride/);
+  await assert.rejects(load((j) => { j.bufferViews[1].extensions.EXT_meshopt_compression.count = 4; }), /decodes to 2 x 4/);
+  await assert.rejects(load((j) => { j.bufferViews[1].extensions.EXT_meshopt_compression.byteLength = 18; }), /meshopt data that/);
+  // A few bytes can claim any count; the claim is checked before allocating.
+  await assert.rejects(load((j) => {
+    j.bufferViews[0].byteLength = j.bufferViews[0].extensions.EXT_meshopt_compression.count = 1 << 20;
+    j.bufferViews[0].byteLength *= 12;
+  }), /largest buffer is 1048576/);
+  // An uncompressed view onto the fallback buffer reads nothing, loudly.
+  await assert.rejects(load((j) => { delete j.bufferViews[1].extensions; }), /of a 0-byte buffer/);
 });
 
 console.log(`\n${passed} checks passed\n`);

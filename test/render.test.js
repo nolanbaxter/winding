@@ -1,5 +1,15 @@
 // Sort keys, draw lists and world bounds. Run: node test/render.test.js
 
+import { EXTENSION_TEXTURES } from '../src/scene/gltf/images.js';
+import { SHEEN_ALBEDO, SHEEN_TABLE_SIZE, sheenAlbedo, sheenTablePoint } from '../src/render/sheen.js';
+import { fogCoefficients, packFog, FOG_WGSL, VISIBILITY_CONTRAST } from '../src/render/fog.js';
+import { packProbes, FACE_CAMERAS, PROBE_FLOATS } from '../src/render/probes.js';
+import { distanceField, layoutText, SPREAD } from '../src/render/text.js';
+import { parseCube, whiteBalanceMatrix, planckianXY, packGrading } from '../src/render/grading.js';
+import { lensCoefficients } from '../src/render/dof.js';
+import { textRecord } from '../src/scene/scene.js';
+import { probeRecord } from '../src/scene/scene.js';
+import { parseHDR, halfBits, toHalfRGBA } from '../src/render/hdr.js';
 import assert from 'node:assert/strict';
 
 import { aabbTransform, aabbBoundingSphere, aabbUnion, aabbSetEmpty } from '../src/core/math/aabb.js';
@@ -14,13 +24,16 @@ import { quatCreate, quatSetAxisAngle } from '../src/core/math/quat.js';
 import { vec3Create } from '../src/core/math/vec3.js';
 import { Camera } from '../src/scene/camera.js';
 import { Scene } from '../src/scene/scene.js';
-import { GpuDriven, DRAW_DATA_BYTES } from '../src/render/gpudriven.js';
+import { GpuDriven, DRAW_DATA_BYTES, CULL_PHASES } from '../src/render/gpudriven.js';
 import { SkinPalette } from '../src/render/skin.js';
 import { MorphStore } from '../src/render/morph.js';
 import { PipelineCache } from '../src/rhi/pipeline.js';
 import { createBuffer, storageCapacity } from '../src/rhi/buffer.js';
 import { grownCapacity } from '../src/core/grow.js';
-import { PBR_SHADER } from '../src/render/shaders/pbr.js';
+import { pbrShader } from '../src/render/shaders/pbr.js';
+
+/** The forward shader with every extension texture bound, as a roomy device builds it. */
+const PBR_SHADER = pbrShader(EXTENSION_TEXTURES.length);
 import { SHADOW_SHADER } from '../src/render/shadows.js';
 import { OIT_RESOLVE_SHADER } from '../src/render/shaders/oit.js';
 import { HZB_SHADER } from '../src/render/hzb.js';
@@ -587,8 +600,8 @@ function growableGpu(materials) {
   gpu.batchMirrored = new Uint8Array(gpu.batchCapacity);
   gpu.batchSkinned = new Uint8Array(gpu.batchCapacity);
   gpu.batchSize = new Uint32Array(gpu.batchCapacity);
-  gpu.indirectData = new Uint32Array(gpu.batchCapacity * 2 * 5);
-  gpu.batchStaging = new ArrayBuffer(gpu.alignment * (gpu.batchCapacity * 2 + 1));
+  gpu.indirectData = new Uint32Array(gpu.batchCapacity * CULL_PHASES * 5);
+  gpu.batchStaging = new ArrayBuffer(gpu.alignment * (gpu.batchCapacity * CULL_PHASES + 2));
   gpu.batchPrimitive = [];
   gpu.blendedCasters = [];
   gpu.buffersRevision = 0;
@@ -597,7 +610,7 @@ function growableGpu(materials) {
     'batchBuffer', 'visibleFlagsBuffer', 'indirectBuffer',
     'drawDataBuffer', 'boundsBuffer', 'visibleBuffer']) gpu[k] = { destroy() {} };
   gpu._allocateDrawData(gpu.capacity);
-  gpu.boundsData = new Float32Array(gpu.capacity * 8);
+  gpu.boundsData = new Float32Array(gpu.capacity * 12);
   return gpu;
 }
 
@@ -747,6 +760,31 @@ test('batch tables grow on batch count, and carry over what the loop wrote', () 
     running += gpu.batchSize[b];
   }
   assert.equal(running, COUNT);
+});
+
+test('the CPU level-of-detail test matches the cull shader: coverage is radius * scale / w', () => {
+  const gpu = growableGpu({ isTransparent: () => true });
+  // A sphere of radius 2 at the origin, drawn between coverage 0.25 and 0.5.
+  // The camera sits `distance` along +z looking down -z, so the sphere's clip
+  // w -- its view depth -- is that distance: only w's row matters here.
+  const b = gpu.boundsData;
+  b.set([0, 0, 0, 0.25], 0);
+  b.set([0, 0, 0, 0.5], 4);
+  b.set([0, 0, 0, 2], 8);
+  const at = (distance, scale = 1) => {
+    const viewProjection = new Float32Array(16);
+    viewProjection[11] = -1;
+    viewProjection[15] = distance;
+    return gpu.lodSelected(0, viewProjection, scale);
+  };
+  assert.equal(at(3), false, 'coverage 0.67: a finer level shows');
+  assert.equal(at(5), true, 'coverage 0.4');
+  assert.equal(at(4), false, 'coverage 0.5 exactly: the range is [low, high), so the finer level has it');
+  assert.equal(at(8), true, 'coverage 0.25 exactly: this level has it');
+  assert.equal(at(9), false, 'coverage 0.22: a coarser level');
+  assert.equal(at(-1), false, 'behind the eye counts as filling the screen');
+  b[11] = 0;
+  assert.equal(at(3), true, 'in no group: always');
 });
 
 test('the batch tables do not grow with renderables that share a batch', () => {
@@ -983,12 +1021,185 @@ test('every shader that reads DrawData agrees on its layout', () => {
     'the declared struct does not match the stride the CPU writes');
 });
 
+test('the sheen albedo table is the integral of the sheen BRDF', () => {
+  // Every entry integrated again. On a mismatch the whole fresh table is
+  // printed, ready to paste into render/sheen.js.
+  const fresh = [];
+  for (let y = 0; y < SHEEN_TABLE_SIZE; y++) {
+    for (let x = 0; x < SHEEN_TABLE_SIZE; x++) fresh.push(sheenAlbedo(...sheenTablePoint(x, y)));
+  }
+  const worst = Math.max(...fresh.map((e, i) => Math.abs(e - SHEEN_ALBEDO[i])));
+  if (!(worst <= 6e-5)) {
+    const rows = [];
+    for (let y = 0; y < SHEEN_TABLE_SIZE; y++) {
+      rows.push(`  ${fresh.slice(y * SHEEN_TABLE_SIZE, (y + 1) * SHEEN_TABLE_SIZE).map((e) => e.toFixed(4)).join(', ')},`);
+    }
+    console.log(rows.join('\n'));
+  }
+  assert.ok(worst <= 6e-5, `an entry is off by ${worst}; the fresh table is printed above`);
+  // And 128 steps a side has converged: four times as many moves nothing
+  // past the table's own precision, at the most peaked entry it has.
+  assert.ok(Math.abs(sheenAlbedo(0.09375, 0.2) - sheenAlbedo(0.09375, 0.2, 512)) < 1e-3);
+});
+
+test('fog visibility is where contrast falls to 2%, and bad options are named', () => {
+  const { extinction, inverseScaleHeight } = fogCoefficients({ visibility: 150 });
+  assert.ok(Math.abs(Math.exp(-extinction * 150) - VISIBILITY_CONTRAST) < 1e-12);
+  assert.equal(inverseScaleHeight, 0, 'no scale height: the same density everywhere');
+  assert.equal(fogCoefficients({ visibility: 150, scaleHeight: 20 }).inverseScaleHeight, 1 / 20);
+  for (const [options, why] of [
+    [{}, /visibility/], [{ visibility: -1 }, /visibility/], [{ visibility: Infinity }, /visibility/],
+    [{ visibility: 10, height: NaN }, /height/], [{ visibility: 10, scaleHeight: 0 }, /scaleHeight/],
+    [{ visibility: 10, albedo: [1, 1] }, /albedo/], [{ visibility: 10, albedo: [1, -1, 1] }, /albedo/],
+  ]) assert.throws(() => fogCoefficients(options), why);
+});
+
+test('fog scatters each directional light isotropically, times its albedo', () => {
+  // Two lights, eight floats each, colour times intensity at 4..6.
+  const directionals = Float32Array.of(0, -1, 0, 0, 4 * Math.PI, 0, 0, 0, 0, -1, 0, 0, 0, 2 * Math.PI, 0, 0);
+  const out = new Float32Array(16).fill(9);
+  packFog(out, 2, { visibility: 100, albedo: [0.5, 1, 1] }, directionals, 2, 8);
+  assert.deepEqual([...out.subarray(10, 13)], [0.5, 0.5, 0], 'albedo x colour / 4 pi, summed');
+  assert.equal(out[1], 9, 'nothing written outside its twelve');
+  packFog(out, 2, null, directionals, 2, 8);
+  assert.deepEqual([...out.subarray(2, 14)], new Array(12).fill(0), 'no fog: zeros, and extinction 0 turns it off');
+});
+
+test('a reflection probe is checked, centred by default, and packed smallest box first', () => {
+  const room = probeRecord({ min: [-5, 0, -5], max: [5, 4, 5] });
+  assert.deepEqual([...room.position], [0, 2, 0], 'the box centre');
+  assert.equal(room.blend, 0);
+  for (const [options, why] of [
+    [{ min: [0, 0, 0], max: [1, 1] }, /max must be three/],
+    [{ min: [0, 0, 0], max: [1, 0, 1] }, /above min on every axis/],
+    [{ min: [0, 0, 0], max: [1, 1, 1], position: [2, 0, 0] }, /inside the box/],
+    [{ min: [0, 0, 0], max: [1, 1, 1], blend: -1 }, /blend/],
+  ]) assert.throws(() => probeRecord(options), why);
+
+  const closet = probeRecord({ min: [0, 0, 0], max: [1, 2, 1], blend: 0.25 });
+  const hall = probeRecord({ min: [-20, 0, -20], max: [20, 5, 20] });
+  const pending = probeRecord({ min: [0, 0, 0], max: [1, 1, 1] });
+  room.captured = closet.captured = hall.captured = true;
+  const layers = new Map([[room, 0], [closet, 1], [hall, 2], [pending, 3]]);
+  const { data, count } = packProbes([hall, room, pending, closet], layers);
+  assert.equal(count, 3, 'a probe never captured has nothing to show');
+  assert.deepEqual([0, 1, 2].map((k) => data[k * PROBE_FLOATS + 7]), [1, 0, 2], 'closet, room, hall');
+  assert.equal(data[3], 0.25, 'blend in min.w');
+});
+
+test('each probe face camera is right-handed, so the copy into the cube is one mirror across u', () => {
+  // cubeDirection(face, u, v) is what the shader samples. With right = forward
+  // x up, the camera image mirrored across u shows forward - u' right - v' up
+  // at (u', v') in [-1, 1] -- which must be that direction exactly.
+  const cube = [
+    (u, v) => [1, -v, -u], (u, v) => [-1, -v, u], (u, v) => [u, 1, v],
+    (u, v) => [u, -1, -v], (u, v) => [u, -v, 1], (u, v) => [-u, -v, -1],
+  ];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  FACE_CAMERAS.forEach(({ forward, up }, face) => {
+    const right = cross(forward, up);
+    for (const [u, v] of [[0.5, -0.25], [-1, 1]]) {
+      const shown = forward.map((f, a) => f - u * right[a] - v * up[a]);
+      assert.deepEqual(shown.map((x) => x + 0), cube[face](u, v).map((x) => x + 0), `face ${face} at ${u}, ${v}`);
+    }
+  });
+});
+
+test('a glyph distance field is the exact distance to its edge, 0.5 on it', () => {
+  // A disc of radius 6 in a 24 x 24 raster: texels well inside and outside
+  // it hold their true distance to the circle, scaled by SPREAD.
+  const W = 24;
+  const coverage = new Float32Array(W * W);
+  for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) coverage[y * W + x] = Math.hypot(x - 12, y - 12) < 6 ? 1 : 0;
+  const field = distanceField(coverage, W, W);
+  const at = (x, y) => field[y * W + x] / 255;
+  const expected = (x, y) => Math.min(Math.max(0.5 - (Math.hypot(x - 12, y - 12) - 6) / (2 * SPREAD), 0), 1);
+  for (const [x, y] of [[12, 12], [12, 9], [12, 16], [12, 20], [4, 12], [15, 15]]) {
+    assert.ok(Math.abs(at(x, y) - expected(x, y)) < 0.08, `texel ${x}, ${y}: ${at(x, y).toFixed(3)} against ${expected(x, y).toFixed(3)}`);
+  }
+  // A half-covered texel sits on the edge.
+  coverage[12 * W + 18] = 0.5;
+  assert.ok(Math.abs(distanceField(coverage, W, W)[12 * W + 18] / 255 - 0.5) < 0.01);
+});
+
+test('text lays out by advance, aligns each line, and puts its anchor at the origin', () => {
+  const glyph = (advance) => ({ advance, left: 0, width: advance, height: 1, descent: 0 });
+  const metrics = { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', glyph(0.5)], ['b', glyph(1)], [' ', { advance: 0.25, left: 0, width: 0, height: 0, descent: 0 }]]) };
+  const one = layoutText('ab a', metrics, { anchor: [0, 0] });
+  assert.deepEqual(one.map((g) => g.char), ['a', 'b', 'a'], 'a space advances and draws nothing');
+  assert.deepEqual(one.map((g) => g.x), [0, 0.5, 1.75]);
+  assert.deepEqual(one.map((g) => +g.y.toFixed(6)), [0.2, 0.2, 0.2], 'on the baseline, above the descent, from the bottom left');
+  const two = layoutText('ab\na', metrics, { align: 'right', anchor: [1, 1] });
+  assert.equal(two[2].x, -0.5, 'the short line pushed right, and the block anchored at its top right');
+  assert.ok(two[2].y < two[0].y, 'the second line below the first');
+  const centred = layoutText('b', metrics);
+  assert.deepEqual([centred[0].x, +centred[0].y.toFixed(6)], [-0.5, -0.3], 'centred by default');
+  assert.throws(() => layoutText('a', metrics, { align: 'justify' }), /align/);
+});
+
+test('a text takes a loadFont font, rasterises what it uses, and names a bad option', () => {
+  const asked = [];
+  const font = { metrics: { ascent: 0.8, descent: 0.2, glyphs: new Map() }, ensure: (t) => asked.push(t) };
+  const record = textRecord({ font, text: 'hi', size: 2 });
+  assert.deepEqual(asked, ['hi']);
+  assert.deepEqual([record.facing, record.pixels, [...record.color].join()], ['camera', false, '1,1,1,1']);
+  for (const [options, why] of [
+    [{ text: 'x', size: 1 }, /font must be/], [{ font, text: 'x' }, /size must be positive/],
+    [{ font, text: 'x', size: 1, facing: 'down' }, /facing/], [{ font, text: 'x', size: 1, anchor: [0] }, /anchor/],
+  ]) assert.throws(() => textRecord(options), why);
+});
+
+test('a .cube LUT parses red-fastest, keeps its domain, and a malformed one is named', () => {
+  const rows = [];
+  for (let b = 0; b < 2; b++) for (let g = 0; g < 2; g++) for (let r = 0; r < 2; r++) rows.push(`${r} ${g} ${b}`);
+  const cube = parseCube(['# a comment', 'TITLE "identity"', 'LUT_3D_SIZE 2', 'DOMAIN_MAX 2 2 2', ...rows].join('\n'));
+  assert.equal(cube.size, 2);
+  assert.deepEqual([...cube.data.subarray(3, 6)], [1, 0, 0], 'the second entry is red: red varies fastest');
+  assert.deepEqual(cube.domainMax, [2, 2, 2]);
+  assert.throws(() => parseCube('LUT_3D_SIZE 2\n0 0 0'), /has 1/);
+  assert.throws(() => parseCube('LUT_1D_SIZE 4'), /1D/);
+  assert.throws(() => parseCube('LUT_3D_SIZE 2\nnot a row'), /cannot read/);
+});
+
+test('white balance makes exactly the named light white, and D65 is left alone', () => {
+  const lightRGB = (T) => {
+    const [x, y] = planckianXY(T);
+    const X = x / y;
+    const Z = (1 - x - y) / y;
+    return [3.2404542 * X - 1.5371385 - 0.4985314 * Z, -0.9692660 * X + 1.8760108 + 0.0415560 * Z, 0.0556434 * X - 0.2040259 + 1.0572252 * Z];
+  };
+  for (const T of [2000, 3200, 5000, 10000]) {
+    const m = whiteBalanceMatrix(T);
+    const out = m.map((row) => row[0] * lightRGB(T)[0] + row[1] * lightRGB(T)[1] + row[2] * lightRGB(T)[2]);
+    assert.ok(Math.max(...out) - Math.min(...out) < 1e-3 * Math.max(...out), `${T} K comes out white: ${out}`);
+  }
+  // 6504 K is on the Planckian locus; D65 is a hair off it. Near, not exact.
+  const d65 = whiteBalanceMatrix(6504);
+  d65.forEach((row, i) => row.forEach((v, j) => assert.ok(Math.abs(v - (i === j ? 1 : 0)) < 0.04)));
+  assert.throws(() => whiteBalanceMatrix(1000), /1667 K to 25000 K/);
+  const packed = packGrading(new Float32Array(20), null);
+  assert.deepEqual([...packed.subarray(0, 12)], [1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0], 'no grading: the identity, and no LUT');
+  assert.throws(() => packGrading(new Float32Array(20), { contrast: 0 }), /contrast/);
+});
+
+test('the lens: the circle of confusion from focal length, f-stop and focus', () => {
+  // 50 mm on full frame is a vertical field of view of 2 atan(12 / 50).
+  const fov = 2 * Math.atan(12 / 50);
+  const { scale, largest } = lensCoefficients({ focusDistance: 2, fStop: 2 }, fov, 1000);
+  // A = 25 mm; c at infinity = A f / (S - f) = 0.025 * 0.05 / 1.95 m on the sensor.
+  const expected = (0.025 * 0.05 / 1.95) / 0.024 * 1000;
+  assert.ok(Math.abs(scale - expected) < 1e-9);
+  assert.equal(largest, Math.abs(scale));
+  assert.throws(() => lensCoefficients({ focusDistance: 0.01, fStop: 2 }, fov, 1000), /past the lens/);
+  assert.throws(() => lensCoefficients({ focusDistance: 2, fStop: 0 }, fov, 1000), /fStop/);
+});
+
 test('no shader template contains a stray backtick', () => {
   // This has bitten twice: a backtick in a WGSL comment terminates the
   // template literal, and the file then fails to parse with an error pointing
   // at whatever word followed it. Cheap to check, invisible to review.
   const shaders = {
-    PBR_SHADER, OIT_RESOLVE_SHADER, HZB_SHADER, CLUSTER_SHADER, POST_SHADER,
+    PBR_SHADER, OIT_RESOLVE_SHADER, HZB_SHADER, CLUSTER_SHADER, POST_SHADER, FOG_WGSL,
   };
   for (const [name, source] of Object.entries(shaders)) {
     assert.ok(source && source.length > 0, `${name} is empty, so it was truncated`);
@@ -1223,10 +1434,22 @@ function labellingRhi() {
     createBindGroup: (descriptor) => { bindGroups.push(descriptor); return descriptor; },
   };
   return {
-    rhi: { device, queue: { writeTexture() {}, writeBuffer() {} }, limits: { minUniformBufferOffsetAlignment: 256 } },
+    rhi: { device, queue: { writeTexture() {}, writeBuffer() {} }, limits: { minUniformBufferOffsetAlignment: 256, maxSampledTexturesPerShaderStage: 16 } },
     bindGroups,
   };
 }
+
+test('only a material the extended shader draws binds the extension slots', () => {
+  const { rhi, bindGroups } = labellingRhi();
+  const materials = new MaterialRegistry(rhi, { capacity: 4 });
+  const plain = materials.register({ ...DEFAULT_MATERIAL, name: 'plain' });
+  assert.equal(materials.shadingGroup(plain), materials.bindGroup(plain), 'one group, the core one');
+  assert.equal(bindGroups.at(-1).entries.length, 7, 'uniform, five maps and the sampler');
+  const coat = materials.register({ ...DEFAULT_MATERIAL, name: 'coat', clearcoat: 1 });
+  assert.notEqual(materials.shadingGroup(coat), materials.bindGroup(coat), 'its own pipelines bind a second group');
+  assert.equal(bindGroups.at(-1).entries.length, 7 + materials.extensionSlots);
+  assert.equal(bindGroups.at(-2).entries.length, 7, 'and the shadow pass still gets the core one');
+});
 
 test('a material with no maps binds white everywhere a factor scales it', () => {
   // The bug: emissive fell back to a BLACK 1x1, and the shader multiplies that
@@ -1285,7 +1508,7 @@ function blendedFrame(items) {
   };
   // Already sorted: payload k is renderable k.
   renderer.transparentList = { count: items.length, payloads: items.map((_, k) => k) };
-  renderer.materials = { variants: items.map(() => 0), bindGroup: (id) => `material:${id}` };
+  renderer.materials = { variants: items.map(() => 0), shadingGroup: (id) => `material:${id}`, isTransmissive: () => false };
   renderer.pipelines = { get: (v) => `pipeline:${v}` };
   renderer.drawBindGroup = 'draws';
   renderer.stats = { transparentDraws: 0 };
@@ -1421,7 +1644,7 @@ await (async () => {
   // still compiling has to be waited on, and only warm() knows which.
   const handed = [];
   const renderer = Object.assign(Object.create(Renderer.prototype), {
-    _pipelineByVariant: new Map(), _oitPipelineByVariant: new Map(),
+    _variantSets: new Map([[0, { forward: new Map(), oit: new Map(), ready: true }]]),
     pipelines: { warm: async (descs) => handed.push(descs.length) },
     oit: true, pipelineLayout: {}, shader: {},
   });
@@ -1431,6 +1654,29 @@ await (async () => {
   assert.deepEqual(handed, [4, 4, 4, 4], 'forward and OIT, both times');
   passed++;
   console.log('  ok  a second load hands warm() the variants the first already asked for');
+})();
+
+await (async () => {
+  // Probe-reading pipelines only once probes exist, and then for everything:
+  // what was loaded before, and what is loaded after.
+  const renderer = Object.assign(Object.create(Renderer.prototype), {
+    _variantSets: new Map([[0, { forward: new Map(), oit: new Map(), ready: true }]]),
+    pipelines: { warm: async () => {} },
+    oit: false, pipelineLayout: {}, shader: {}, ao: null,
+  });
+  await renderer.ensureVariants([0]);
+  assert.equal(renderer._variantSets.size, 1, 'no probes, no probe pipelines');
+  await renderer._enableFeatures(1);
+  const [plain, withProbes] = renderer._variantSets.values();
+  assert.equal(withProbes.ready, true);
+  assert.equal(renderer._readySet(3), withProbes, 'probes and decals asked for, probes ready: the probes set');
+  assert.deepEqual([...withProbes.forward.keys()], [...plain.forward.keys()]);
+  assert.ok([...plain.forward.values()].every((d) => d.constants.PROBES === 0 && d.constants.DECALS === 0));
+  assert.ok([...withProbes.forward.values()].every((d) => d.constants.PROBES === 1 && d.constants.DECALS === 0));
+  await renderer.ensureVariants([4]);
+  assert.equal(withProbes.forward.size, plain.forward.size, 'a later load gets both');
+  passed++;
+  console.log('  ok  probe pipelines are built when probes are, for every variant then and after');
 })();
 
 await (async () => {
@@ -1465,6 +1711,124 @@ await (async () => {
   assert.equal(failing._compiling.size, 0, 'and it is forgotten, so the next warm() tries again');
   passed++;
   console.log('  ok  a failed compile is retried, not cached');
+
+  // get() per draw: the same object comes back without building its key
+  // again, and an equal descriptor built separately still shares the pipeline.
+  let built = 0;
+  const syncCache = new PipelineCache({ createRenderPipeline: () => ({ n: ++built }) });
+  const one = syncCache.get(desc);
+  let keyed = 0;
+  const watched = new Proxy(desc, { get(target, name) { if (name === 'constants') keyed++; return target[name]; } });
+  syncCache.get(watched);
+  assert.equal(keyed, 1, 'a new object is keyed');
+  keyed = 0;
+  syncCache.get(watched);
+  assert.equal(keyed, 0, 'and not again');
+  assert.equal(syncCache.get({ ...desc }), one, 'equal descriptors, one pipeline');
+  assert.equal(built, 1);
+  passed++;
+  console.log('  ok  get() keys a descriptor once, and equal ones share a pipeline');
 })();
+
+// ------------------------------------------------------------------ .hdr maps
+
+console.log('\n.hdr environment maps');
+
+/** An .hdr file: header lines, a blank line, the size line, then `pixels`. */
+function hdrFile(sizeLine, pixels, headers = ['FORMAT=32-bit_rle_rgbe']) {
+  const text = ['#?RADIANCE', ...headers, '', sizeLine, ''].join('\n');
+  return Uint8Array.from([...Buffer.from(text, 'latin1'), ...pixels]);
+}
+
+/** What parseHDR makes of one RGBE pixel. */
+const rgbeValue = (m, e) => (m + 0.5) * 2 ** (e - 136);
+
+test('flat pixels decode by Radiance\'s own formula, top row first', () => {
+  // 2x1: (128, 64, 0 | 129) and a zero exponent, which is black.
+  const { width, height, data } = parseHDR(hdrFile('-Y 1 +X 2', [128, 64, 0, 129, 200, 200, 200, 0]));
+  assert.equal(width, 2); assert.equal(height, 1);
+  close(data[0], rgbeValue(128, 129), 1e-12);
+  close(data[1], rgbeValue(64, 129), 1e-12);
+  close(data[2], rgbeValue(0, 129), 1e-12);
+  assert.deepEqual([...data.subarray(3)], [0, 0, 0]);
+});
+
+test('run-length scanlines decode, one channel at a time', () => {
+  // Width 8: the smallest the new-style runs are allowed at.
+  const runs = [
+    130, 10, 134, 20,          // R: 2 x 10, then 6 x 20
+    8, 1, 2, 3, 4, 5, 6, 7, 8, // G: 8 literals
+    136, 0,                    // B: 8 x 0
+    136, 128,                  // E: 8 x 128
+  ];
+  const { data } = parseHDR(hdrFile('-Y 1 +X 8', [2, 2, 0, 8, ...runs]));
+  const f = 2 ** (128 - 136);
+  close(data[0], 10.5 * f, 1e-12, 'R, first run');
+  close(data[3 * 5], 20.5 * f, 1e-12, 'R, second run');
+  close(data[3 * 7 + 1], 8.5 * f, 1e-12, 'G, last literal');
+  close(data[3 * 7 + 2], 0.5 * f, 1e-12, 'B');
+});
+
+test('the old repeat marker copies the pixel before it, and +Y rows are bottom first', () => {
+  const pixel = [100, 50, 25, 130];
+  const { data } = parseHDR(hdrFile('+Y 2 +X 3', [...pixel, 1, 1, 1, 2, ...new Array(12).fill(0)]));
+  // The file's first row is the image's BOTTOM row.
+  for (let x = 0; x < 3; x++) close(data[(3 + x) * 3], rgbeValue(100, 130), 1e-12, `bottom row ${x}`);
+  assert.deepEqual([...data.subarray(0, 9)], new Array(9).fill(0), 'top row, the file\'s last');
+});
+
+test('a literal run of exactly 128 is literal, and stacked repeats count in bytes', () => {
+  // 128 is the longest literal; one more is the shortest repeat.
+  const literal = Array.from({ length: 128 }, (_, i) => i);
+  const channels = [128, ...literal, 128, ...literal, 128, ...literal, 255, 128, 129, 128];
+  const { data } = parseHDR(hdrFile('-Y 1 +X 128', [2, 2, 0, 128, ...channels]));
+  close(data[3 * 127], 127.5 * 2 ** -8, 1e-12, 'the last literal');
+
+  // Two markers in a row: 2, then 1 shifted a byte -- 3 + 256 pixels, then one more.
+  const bytes = [9, 9, 9, 130, 1, 1, 1, 2, 1, 1, 1, 1, 5, 5, 5, 130];
+  const { data: rows } = parseHDR(hdrFile('-Y 1 +X 260', bytes));
+  close(rows[3 * 258], 9.5 * 2 ** -6, 1e-12, 'pixel 258 is still a repeat');
+  close(rows[3 * 259], 5.5 * 2 ** -6, 1e-12, 'pixel 259 is the next one');
+});
+
+test('EXPOSURE divides out of every pixel', () => {
+  const { data } = parseHDR(hdrFile('-Y 1 +X 1', [128, 128, 128, 128], ['EXPOSURE=2', 'EXPOSURE=4']));
+  close(data[0], rgbeValue(128, 128) / 8, 1e-12);
+});
+
+test('a malformed file says what is wrong, and never reads past its end', () => {
+  const cases = [
+    [Uint8Array.from(Buffer.from('P6\n1 1\n255\n')), /not a Radiance file/],
+    [Uint8Array.from(Buffer.from('#?RADIANCE\nFORMAT=32-bit_rle_rgbe')), /header never ends/],
+    [hdrFile('-Y 1 +X 1', [0, 0, 0, 0], ['FORMAT=32-bit_rle_xyze']), /32-bit_rle_xyze is not supported/],
+    [hdrFile('+X 1 -Y 1', [0, 0, 0, 0]), /orientations are supported/],
+    [hdrFile('-Y 1 +X 2', [1, 2, 3, 4]), /pixel data ends early/],
+    [hdrFile('-Y 1 +X 8', [2, 2, 0, 8, 137, 1]), /run is longer than its scanline/],
+    [hdrFile('-Y 1 +X 8', [2, 2, 0, 8, 0]), /run is longer than its scanline/],
+    [hdrFile('-Y 1 +X 2', [1, 1, 1, 1, 0, 0, 0, 0]), /repeat with no pixel before it/],
+    [hdrFile('-Y 1 +X 2', [9, 9, 9, 9, 1, 1, 1, 5]), /run is longer than its scanline/],
+    [hdrFile('-Y 1 +X 1', [0, 0, 0, 0], ['EXPOSURE=0']), /EXPOSURE=0 is not a positive number/],
+  ];
+  for (const [bytes, message] of cases) assert.throws(() => parseHDR(bytes), message);
+  assert.throws(() => parseHDR(hdrFile('-Y 2 +X 9000', []), { maxDimension: 8192 }), /9000x2 map is past this device's 8192/);
+});
+
+test('half floats round to nearest, hold at the largest finite, and flush the unrepresentable', () => {
+  assert.equal(halfBits(1), 0x3c00);
+  assert.equal(halfBits(0.5), 0x3800);
+  assert.equal(halfBits(2), 0x4000);
+  assert.equal(halfBits(65504), 0x7bff);
+  assert.equal(halfBits(1e9), 0x7bff, 'a sun past f16 holds at 65504, not infinity');
+  assert.equal(halfBits(2 ** -24), 1, 'the smallest subnormal');
+  assert.equal(halfBits(2 ** -26), 0);
+  assert.equal(halfBits(-3), 0);
+  assert.equal(halfBits(NaN), 0);
+  assert.equal(halfBits(1 + 1 / 2048 + 1e-9), 0x3c01, 'just past half a step rounds up');
+  assert.equal(halfBits(2 - 2 ** -12), 0x4000, 'rounding up past the mantissa carries into the exponent');
+  // Every exact power of two in the normal range, where log2 can slip an ulp.
+  for (let e = -14; e <= 15; e++) assert.equal(halfBits(2 ** e), (e + 15) << 10, `2^${e}`);
+  assert.deepEqual([...toHalfRGBA(Float32Array.of(1, 0.5, 2))], [0x3c00, 0x3800, 0x4000, 0x3c00]);
+});
+
 
 console.log(`\n${passed} checks passed\n`);

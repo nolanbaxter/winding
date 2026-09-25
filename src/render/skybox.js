@@ -9,9 +9,11 @@ import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { DEPTH_FORMAT } from '../rhi/device.js';
 import { HDR_FORMAT } from './post.js';
+import { createBuffer } from '../rhi/buffer.js';
+import { FOG_WGSL } from './fog.js';
 
-/** right(16) + up(16) + forward(16) + (tanHalfFov, aspect, exposure, pad)(16) */
-const PARAMS_BYTES = 64;
+/** right, up, forward, lens, then the eye and the fog's three: eight vec4s. */
+const PARAMS_BYTES = 128;
 
 const SKYBOX_SHADER = /* wgsl */ `
 struct Params {
@@ -19,11 +21,17 @@ struct Params {
   up      : vec4<f32>,
   forward : vec4<f32>,
   lens    : vec4<f32>,      // x = tan(fovY/2), y = aspect, z = exposure
+  eye     : vec4<f32>,
+  fog     : vec4<f32>,      // as the frame's; see render/fog.js
+  fogAlbedo : vec4<f32>,
+  fogLight  : vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params      : Params;
 @group(0) @binding(1) var          environment : texture_cube<f32>;
 @group(0) @binding(2) var          envSampler  : sampler;
+@group(0) @binding(3) var          irradiance  : texture_cube<f32>;
+${FOG_WGSL}
 
 struct VertexOut {
   @builtin(position) position : vec4<f32>,
@@ -52,12 +60,18 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
   );
   // Linear HDR: the sun disc really is 60x white, and the post stack is what
   // brings it into range.
-  return vec4<f32>(textureSampleLevel(environment, envSampler, direction, 0.0).rgb, 1.0);
+  let sky = textureSampleLevel(environment, envSampler, direction, 0.0).rgb;
+  if (params.fog.x <= 0.0) { return vec4<f32>(sky, 1.0); }
+  // A ray to infinity: all fog, unless it rises out of a thinning layer.
+  let through = exp(-fogDepth(params.fog, params.eye.xyz, direction, -1.0));
+  let inscatter = params.fogAlbedo.rgb * fogMeanRadiance(irradiance, envSampler) + params.fogLight.rgb;
+  return vec4<f32>(sky * through + inscatter * (1.0 - through), 1.0);
 }
 `;
 
 export class SkyboxPass {
-  static async create(rhi, pipelines) {
+  /** `ambientFormat`: the forward passes' second target, when ambient occlusion is on. */
+  static async create(rhi, pipelines, ambientFormat = null) {
     const shader = await compileShader(rhi.device, SKYBOX_SHADER, 'skybox.wgsl');
 
     const layout = rhi.device.createBindGroupLayout({
@@ -66,10 +80,11 @@ export class SkyboxPass {
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
       ],
     });
 
-    const buffer = rhi.device.createBuffer({
+    const buffer = createBuffer(rhi, {
       label: 'skybox', size: PARAMS_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
@@ -78,7 +93,11 @@ export class SkyboxPass {
       label: 'skybox',
       layout: createPipelineLayout(rhi.device, { 0: layout }, 'skybox'),
       shader,
-      targets: [{ format: HDR_FORMAT }],
+      // The sky has no ambient term to occlude: its second target, when there
+      // is one, keeps the zero it was cleared to.
+      targets: ambientFormat === null
+        ? [{ format: HDR_FORMAT }]
+        : [{ format: HDR_FORMAT }, { format: ambientFormat, writeMask: 0 }],
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       // Drawn first, writing no depth and testing nothing, so everything else
       // draws over it normally. Simpler to reason about than fighting the
@@ -111,6 +130,7 @@ export class SkyboxPass {
           { binding: 0, resource: { buffer: this.buffer } },
           { binding: 1, resource: environment.environmentView },
           { binding: 2, resource: environment.sampler },
+          { binding: 3, resource: environment.irradianceView },
         ],
       });
       this._bindGroups.set(environment, bindGroup);
@@ -118,7 +138,8 @@ export class SkyboxPass {
     return bindGroup;
   }
 
-  update(camera, exposure) {
+  /** `fog`: the frame's 12 fog floats (see packFog), or null. */
+  update(camera, exposure, fog = null) {
     // The view matrix's rows are the camera basis expressed in world space.
     const v = camera.view;
     this.data[0] = v[0]; this.data[1] = v[4]; this.data[2] = v[8];
@@ -127,6 +148,9 @@ export class SkyboxPass {
     this.data[12] = Math.tan(camera.fovY * 0.5);
     this.data[13] = camera.aspect;
     this.data[14] = exposure;
+    this.data.set(camera.position, 16);
+    if (fog === null) this.data.fill(0, 20, 32);
+    else this.data.set(fog, 20);
     this.rhi.queue.writeBuffer(this.buffer, 0, this.data);
   }
 

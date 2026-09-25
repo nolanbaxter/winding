@@ -7,6 +7,228 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-25
+
+### Added
+
+- **Point and spot light shadows.** `castShadow` on `addLight` and `setLight`:
+  - A spot light gets one perspective view down its cone, and a point light six, one per cube face.
+    A spot wider than 45° takes six too.
+  - Every view is a layer of one depth array, drawn by the same caster passes as the cascades, so
+    alpha cutouts, hashed glass and skinned meshes cast there too.
+  - Only lights whose reach is on screen get views.
+  - The views are `shadows.localSize` texels a side (512 by default), up to the device's
+    array-layer limit, which is read from the adapter.
+- **HDR environments.** `engine.loadEnvironment(url)` decodes a Radiance `.hdr`
+  panorama and bakes it into the ambient light, reflections and background.
+  `new Environment(rhi, { map })` takes one already decoded.
+  - The cube size comes from the map (W / 4).
+  - Each cube texel reads the map at the mip level where their texel sizes match.
+  - The decoder checks every length before trusting it. `parseHDR` is exported.
+- **`KHR_texture_transform`.** Each texture's offset, rotation and scale, applied in the
+  shader, and in the shadow pass's alpha lookups, so a cutout's shadow matches its texture. A
+  transformed normal map has its slopes turned back through the inverse matrix, or bumps would light
+  from the wrong side. The extension's `texCoord` override is honoured, and clips can animate
+  any transform through `KHR_animation_pointer`.
+- **`KHR_mesh_quantization`.** Attributes stored as 8- and 16-bit integers. The importer already
+  decoded them; bounds for normalized positions are now computed from the decoded values, because
+  exporters disagree about which units `min`/`max` use.
+- **Antialiasing, on by default.** FXAA 3.11 (quality preset 12, its reference settings) after
+  tone mapping. `{ antialias: false }` turns it off. It costs about 0.3 ms at 720p on Intel Iris Xe.
+- **Ambient occlusion.** `{ ao: true }` or `{ ao: { radius } }` turns on ground-truth AO from the
+  depth buffer, at half resolution.
+  - It's taken out of the ambient term only. An open surface is left exactly as it was: each pixel
+    is divided by what the same slices see of an open surface.
+  - Blended geometry draws after it, in a pass of its own.
+  - It costs about 2.4 ms at 720p on Intel Iris Xe.
+
+- **Animation layers.** `player.layer(name, { mask, weight, additive })`, and
+  `play(clip, { layer })`. Layers apply in order over the pose the asset
+  loaded in:
+  - a **mask** names nodes, and a layer touches only them and what is under
+    them: a wave on the upper body over a walk;
+  - an **additive** layer adds each clip's change from its own first keyframe
+    (a difference for position and morph weights, a ratio for scale, a local
+    rotation) on top of the layers beneath;
+  - fading a clip in on an empty layer fades the layer in, and
+    `stop({ layer, fade })` hands its nodes back.
+- **Blending by a value.** `play(clip, { add: true, weight })` joins the
+  playing clips without fading them, and `setWeight(clip, weight, { fade })`
+  moves one. A clip weighted to zero keeps playing, so it can come back.
+- **Phase sync.** Clips played with `sync` share a clock measured in cycles,
+  running at the weighted average of their lengths, so a walk and a run of
+  different lengths stay in step at every blend.
+- **Root motion.** `player.rootMotion({ node, vertical, apply })` moves the
+  instance by what the base layer's clips move one node by, and holds that node
+  in place:
+  - Without `node`, it's the highest node below the instance that a clip moves.
+  - The travel is measured in the instance's parent space, through every
+    rotation and scale in between, so a Z-up rig walks across the ground.
+  - A loop is a step forward, not a jump back, and blended clips move the
+    character at their weighted pace.
+  - `apply: false` only reports `player.motion`, for a controller to use.
+- **`KHR_animation_pointer`.** Clips animate light colour, intensity, range
+  and cones; camera field of view, planes and orthographic height; and material
+  base colour, emissive factor and strength, metallic, roughness, alpha cutoff,
+  normal scale and occlusion strength. They blend, fade and add like node
+  channels. The extension may be required.
+  - A light without a range keeps deriving its reach from its intensity.
+  - A value the importer would refuse is not written.
+  - A pointer past the end of its array is an error. One at something the
+    engine doesn't render is skipped and listed in `clip.ignored`.
+  - Animating a material changes it on every copy of the asset, since glTF
+    materials belong to the asset.
+- **Unlit, IOR and specular materials** (`KHR_materials_unlit`, `KHR_materials_ior`,
+  `KHR_materials_specular`). An unlit surface shows its base colour and ignores every light.
+  The index of refraction sets how much a dielectric reflects head-on, 4% at the default 1.5.
+  Specular sets how strongly, and in what colour, with the diffuse beneath giving up what the
+  layer takes, as the spec lays out. All three may be required, and their factors animate.
+  - Extension textures share bindings after the core five. Two that read one image share a
+    binding, each with its own UV set and transform.
+  - How many one material can bind comes from the device: `maxSampledTexturesPerShaderStage`,
+    less what the frame and the core maps take. A material past it is an error that names the
+    numbers.
+- **Clearcoat and sheen** (`KHR_materials_clearcoat`, `KHR_materials_sheen`). A clear coat is a
+  second smooth layer with its own roughness and, if the file gives one, its own normal map.
+  It dims everything beneath it, emission included, by what it reflects. Sheen is the soft rim
+  of cloth and velvet, layered between the base and the coat. Both may be required, and their
+  factors animate.
+  - Sheen needs its layer's directional albedo, which the spec says to look up. The table is
+    integrated from the same BRDF the shader evaluates, and a test integrates it again. It
+    sits at the end of the frame uniform, written once.
+- **Anisotropy and iridescence** (`KHR_materials_anisotropy`, `KHR_materials_iridescence`).
+  Anisotropy stretches highlights along a direction in the surface, as brushed metal does, from
+  a strength, a rotation and a direction map. Its reflection of the environment bends the same
+  way. Iridescence is a thin film whose colour shifts with the view and the film's thickness,
+  after Belcour and Barla, in the form the spec gives. It is taken once per pixel at the view,
+  not once per light. Both may be required, and their factors animate.
+- **Transmission and volume** (`KHR_materials_transmission`, `KHR_materials_volume`). Glass
+  and clear plastic show what is behind them, tinted by their base colour and blurred by their
+  roughness. A volume bends the view by its index of refraction through its thickness, and
+  dims it by its attenuation colour and distance. A light behind a transmissive surface
+  shines through it. Both may be required, and their factors animate.
+  - Behind means the opaque scene. It is copied down a mip chain once it is finished,
+    ambient occlusion included, and transmissive surfaces then draw in a pass of their own,
+    sorted, before anything blended. One transmissive surface doesn't show through another.
+  - A frame with no transmissive surface skips all of it, and the copy isn't made until one
+    appears.
+- **Materials that use none of the extension layers don't pay for them.** They draw with that
+  code compiled out, through a shader constant. Carrying it cost Sponza, which uses none of
+  it, a third of its forward time: 7.65 ms against 5.62 at 1280x720. A material that declares
+  a layer gets the full shader even at strength 0, so a clip can raise it.
+- **Fog.** `{ fog: { visibility, height, scaleHeight, albedo } }`, or `renderer.fog` at any
+  time. Exponential height fog, integrated exactly along each view ray: no marching, one
+  exponential per pixel.
+  - `visibility` is the meteorological one: the distance at which contrast falls to 2%.
+  - Without `scaleHeight` the fog is uniform. With it, the density falls by e over that
+    height above `height`, so it pools low and the sky shows above it.
+  - Its colour isn't chosen. It scatters the light arriving at it: the environment's mean
+    radiance and each directional light's share, times `albedo` (white by default).
+  - Every surface is fogged the same way (opaque, blended, OIT and transmissive), and so is
+    the sky.
+- **Debug lines.** `engine.debug.line / box / sphere / axes`, for one frame each. They're drawn
+  over the finished picture in the exact colour asked for, hidden by geometry in front unless
+  `engine.debug.depthTest` is off. A frame without any adds no pass.
+- **Levels of detail** (`MSFT_lod`, with its `MSFT_screencoverage` hint). The cull shader draws
+  each level only between its coverages, all measured on the finest level's sphere.
+  - Shadows cast the level the camera shows. A third cull phase picks it, which runs only in a
+    scene with an LOD group.
+  - Blended LOD items are chosen by the same test on the CPU, where they're sorted.
+  - Without the hint only the finest level draws. The extension may be required.
+- **Reflection probes.** `scene.addReflectionProbe({ min, max, position, blend })`, then
+  `engine.captureReflectionProbes(scene)`. Surfaces in a probe's box reflect the scene as seen
+  from it, instead of the sky.
+  - A capture is six renders of the scene into a cube, prefiltered like the environment, at
+    its resolution and mips.
+  - Reflections are box-projected, so they line up with the room rather than sitting at
+    infinity. Nested boxes resolve to the smaller, `blend` fades one in at its edges, and the
+    sky fills whatever the probes leave.
+  - Base, clear coat and sheen reflections all read them. Specular only: a probe doesn't
+    light diffuse surfaces.
+  - `renderer.render` can draw into any HDR target, which is how a capture renders.
+  - A scene without captured probes draws with the lookup compiled out. Carrying it cost
+    Sponza 6% of its forward time (6.16 ms against 5.81 at 1280x720). The pipelines that
+    read probes are built by the first capture, which is why `captureReflectionProbes`
+    is async.
+- **Sprites.** `scene.addSprite({ texture, ... })` returns a node carrying a quad that faces
+  the camera, or stands upright. It's sized in world units or in pixels, cut from an atlas,
+  pivoted and rotated. `'alpha'` sprites are sorted, `'additive'` ones need no order, and
+  `'cutout'` ones occlude. Unlit, HDR and fogged. `engine.loadTexture` loads their images.
+- **Particles.** `scene.addEmitter({ rate, lifetime, size, ... })` and `scene.burst(node, n)`,
+  born and moved on the GPU. Paths are solved in closed form, not stepped, so they don't depend on
+  the frame rate. They're sized, coloured and faded over their life, and additive by default.
+  `scene.advanceParticles(dt)` moves their clock, and `engine.run` calls it. On Intel Iris Xe at
+  720p, 100,000 live particles simulate in 0.5 ms and draw in about 4 ms.
+- **Decals.** `scene.addDecal({ texture, size })` projects an image along a node's −Z onto whatever
+  lies in its box. It changes the base colour before lighting, so it's lit, shadowed and fogged
+  like the surface under it. Surfaces facing away aren't painted.
+  - Decals are clustered by the light pass, so a fragment tests only those whose boxes reach its
+    cell. At 720p on Intel Iris Xe, 100 decals add 3.4 ms to Sponza's forward passes; tested per
+    fragment against every decal, they added 24 ms. A scene without decals compiles the test out.
+  - Pipeline sets are now keyed by feature (probes, decals). One that isn't built yet builds in
+    the background, and frames draw without that feature until it's ready.
+- **Depth of field.** `{ dof: { focusDistance, fStop, sensorHeight } }` or `renderer.dof`. Each
+  pixel's blur is the circle of confusion a real lens of the camera's field of view gives. A
+  half-resolution gather where only a nearer blur spills over, and a depth-aware composite. It
+  costs about 2.6 ms at 720p on Intel Iris Xe.
+- **Colour grading.** `{ grading }` or `engine.grading`: white balance in kelvin (Bradford), contrast
+  in stops about middle grey, saturation, and a `.cube` 3D LUT from `engine.loadLUT`. All of it
+  adds 0.08 ms to the tone-mapping pass at 720p.
+- **Text.** `engine.loadFont(css)` and `scene.addText({ font, text, size, ... })`. Glyphs are
+  rasterised by the browser into a signed-distance-field atlas that grows as needed, laid out
+  with alignment and an anchor, and drawn as sprites, so text stays sharp at any size. Sprites
+  gain `facing: 'plane'`, lying in the node's plane.
+- **meshopt compression** (`EXT_meshopt_compression`, and `KHR_meshopt_compression` with its
+  second attribute bitstream and `COLOR` filter). Compressed bufferViews are decoded as the file
+  loads, so vertices, indices and animation all come through. Written from the two
+  specifications and checked against meshoptimizer's own test streams. It decodes about 280 MB/s of
+  attributes in plain JavaScript. Fallback buffers are never fetched.
+
+### Removed
+
+- **The sun.** `scene.sun`, `scene.sunDirection` and `scene.sunColor` are gone, and a new
+  scene starts with no lights. Its environment lights it until you add one. To get the old
+  default back, add
+  `scene.addLight({ type: 'directional', direction: [-0.35, -0.55, -0.45], intensity: 3.2 })`.
+
+### Changed
+
+- **The environment's diffuse light is weighted by Fresnel,** the way direct light already was.
+  What a dielectric reflects no longer also reaches its diffuse. Rims of rough, non-metal
+  surfaces come out a little darker than before; metals are unchanged.
+- **Every GPU buffer and texture is created through `rhi` helpers** that check it against the
+  device first. A texture past the device's size or array-layer limit is now an error that names
+  it; WebGPU would have handed back an invalid one that silently drew nothing.
+- **Every pipeline is a plain descriptor through a `PipelineCache`,** compute ones included.
+  The IBL bake, the mip chain, culling and clustering share one cache per device, and the mip
+  pipeline's layout is explicit, not `'auto'`.
+- **Every light casts a shadow by the same switch.** `castShadow` works for directional,
+  point and spot lights alike. Every directional light that casts gets its own cascades, where
+  before only the brightest had one. The defaults follow cost, since glTF doesn't say:
+  directional lights cast, point and spot lights don't. A light imported from glTF takes the
+  same default as one added by hand.
+- **No seam between shadow cascades.** Each cascade's filter taps spread across its slice until,
+  at the split, they reach the next cascade's size. The blur and the normal-offset bias used to
+  double in one row of pixels there; measured on a shadow edge, 1.28 → 2.61 px became
+  2.61 → 2.67. The cost is that a cascade softens toward its far end.
+- **Faster than 0.12.0, with everything above added.** Measured on Sponza at 720p on Intel
+  Iris Xe, with both versions alternating in one page:
+  - The forward passes cost the same as before.
+  - The CPU frame is 31% shorter: 3.5 → 2.4 ms.
+  - A pipeline is looked up per draw. Its key used to be rebuilt every time, which the new
+    override constants lengthened; each descriptor now remembers its pipeline.
+  - A plain material binds only its five maps. The extension slots are bound only by materials
+    the extended shader draws.
+  - The lighting itself compiles the extension layers out of plain pipelines, like the surface
+    code that sets them.
+
+### Fixed
+
+- **A double-sided surface casts a shadow whichever side faces the light.** The shadow pass
+  draws only back faces, which suits closed meshes. A double-sided leaf, sail or sheet with its
+  front to the light cast nothing at all. Double-sided materials now draw both sides into the
+  shadow map. Single-sided ones are unchanged, and the limit that leaves is in the README.
+
 ## [0.12.0] - 2026-09-24
 
 **Three limitations, gone.** The rest of the list is either how real-time
@@ -1554,7 +1776,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/nolanbaxter/winding/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/nolanbaxter/winding/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/nolanbaxter/winding/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/nolanbaxter/winding/compare/v0.10.0...v0.10.1

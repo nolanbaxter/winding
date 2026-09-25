@@ -21,7 +21,7 @@
 // face rig is tens of megabytes. copyBufferToBuffer is what COPY_SRC is for.
 
 import { grownCapacity } from '../core/grow.js';
-import { storageCapacity } from '../rhi/buffer.js';
+import { storageCapacity, createBuffer } from '../rhi/buffer.js';
 
 /** Bytes per stored float, in both buffers. */
 export const MORPH_FLOAT_BYTES = 4;
@@ -65,7 +65,7 @@ export class MorphStore {
   }
 
   _createDeltaBuffer(capacity) {
-    return this.rhi.device.createBuffer({
+    return createBuffer(this.rhi, {
       label: 'morph-deltas',
       // COPY_SRC so growing can move the existing deltas across on the GPU.
       size: capacity * MORPH_FLOAT_BYTES,
@@ -74,7 +74,7 @@ export class MorphStore {
   }
 
   _createWeightBuffer(capacity) {
-    return this.rhi.device.createBuffer({
+    return createBuffer(this.rhi, {
       label: 'morph-weights',
       size: capacity * MORPH_FLOAT_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,

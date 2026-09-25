@@ -36,7 +36,11 @@ const OPTIONAL_FEATURES = ['timestamp-query'];
  * and morph targets, and textures and a canvas that grow with the asset and
  * the display. Requested at whatever the adapter has.
  */
-const SCALING_LIMITS = ['maxBufferSize', 'maxStorageBufferBindingSize', 'maxTextureDimension2D'];
+const SCALING_LIMITS = [
+  'maxBufferSize', 'maxStorageBufferBindingSize', 'maxTextureDimension2D', 'maxTextureArrayLayers',
+  // How many material-extension textures one material can bind at once.
+  'maxSampledTexturesPerShaderStage',
+];
 
 export async function createDevice(canvas, options = {}) {
   if (!navigator.gpu) {

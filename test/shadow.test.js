@@ -12,7 +12,10 @@ import { mat4Create, mat4OrthographicReverseZ } from '../src/core/math/mat4.js';
 import { Camera } from '../src/scene/camera.js';
 import {
   cascadeSplits, frustumSliceSphere, MAX_CASCADES, ShadowMaps, stableShadowDistance,
+  localMargin, spotViewCount, LOCAL_VIEW_FLOATS,
 } from '../src/render/shadows.js';
+import { Scene, LIGHT_FLOATS, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
+import { frustumCreate } from '../src/core/math/frustum.js';
 import { farthestDistance } from '../src/scene/bounds.js';
 
 let passed = 0;
@@ -256,20 +259,43 @@ test('snapping quantizes the box origin to whole texels', () => {
 
 console.log('\ncasters in the depth range');
 
-/** A ShadowMaps with just enough device to fit cascades in Node. */
-function nodeShadowMaps() {
+/**
+ * A ShadowMaps with just enough device to fit views in Node, both arrays set
+ * up as _init leaves them. WebGPU's default limits.
+ */
+function nodeShadowMaps(maxTextureArrayLayers = 256) {
   globalThis.GPUTextureUsage ??= { RENDER_ATTACHMENT: 16, TEXTURE_BINDING: 4, COPY_DST: 2, COPY_SRC: 1, STORAGE_BINDING: 8 };
   globalThis.GPUBufferUsage ??= { UNIFORM: 64, COPY_DST: 8, STORAGE: 128, COPY_SRC: 4 };
   globalThis.GPUShaderStage ??= { VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 };
   const rhi = {
-    device: { createTexture: () => ({ createView: () => ({}) }), createSampler: () => ({}) },
+    device: {
+      createTexture: () => ({ createView: () => ({}), destroy() {} }),
+      createBuffer: () => ({ destroy() {} }),
+      createSampler: () => ({}),
+    },
     queue: { writeBuffer() {} },
-    limits: { maxTextureDimension2D: 8192 },   // WebGPU's default
+    limits: { maxTextureDimension2D: 8192, maxTextureArrayLayers },
   };
   const maps = new ShadowMaps(rhi, {});
   maps.alignment = 256;
-  maps.cascadeStaging = new ArrayBuffer(256 * MAX_CASCADES);
+  maps._executors = [];
+  maps.revision = 0;
+  maps.localCount = 0;
+  maps.localCapacity = 0;
+  maps._localExecutors = [];
+  maps._frustum = frustumCreate();
+  maps._growCascades(maps.cascadeCount);
+  maps._growLocal(1);
   return maps;
+}
+
+/** A scene with one directional light shining along `direction`, settled. */
+function lit(direction) {
+  const scene = new Scene({ capacity: 8 });
+  scene.addLight({ type: 'directional', direction });
+  scene.update();
+  scene.refreshLights();
+  return scene;
 }
 
 /** Light-clip depth of a world point in one cascade. */
@@ -291,7 +317,7 @@ test('a caster above the floor lands inside every cascade it is in', () => {
   camera.position.set([0, 3, 8]);
   camera.target.set([0, 0.5, 0]);
   camera.update(16 / 9);
-  maps.update(camera, [-0.4, -1, -0.3]);
+  maps.update(camera, lit([-0.4, -1, -0.3]));
 
   for (const point of [[0, 1, 0], [0, 2, 0], [1, 0, 1], [0, 0.01, 0]]) {
     for (let c = 0; c < maps.activeCascades; c++) {
@@ -310,7 +336,7 @@ test('where the scene sits does not decide whether it has shadows', () => {
     camera.position.set([0, 3 + lift, 8]);
     camera.target.set([0, 0.5 + lift, 0]);
     camera.update(16 / 9);
-    maps.update(camera, [0, -1, 0]);
+    maps.update(camera, lit([0, -1, 0]));
     const z = cascadeDepth(maps, 0, [0, 1 + lift, 0]);
     assert.ok(z >= 0 && z <= 1, `lifted by ${lift}: depth ${z.toFixed(3)}`);
   }
@@ -336,7 +362,7 @@ test('turning the camera in place does not resize a single cascade', () => {
     camera.target.set([Math.sin(yaw) * 10, 0.5, 8 - Math.cos(yaw) * 10]);
     camera.update(16 / 9);
     maps.shadowDistance = stableShadowDistance(farthestDistance(camera.position, min, max), camera.near * 2);
-    maps.update(camera, [-0.4, -1, -0.3]);
+    maps.update(camera, lit([-0.4, -1, -0.3]));
     texels.push([...maps.texelSizes.subarray(0, maps.activeCascades)].join());
   }
   assert.equal(new Set(texels).size, 1, `texel sizes changed while turning: ${[...new Set(texels)].join(' | ')}`);
@@ -396,7 +422,7 @@ test('the snapped cascade box still contains its whole sphere', () => {
     camera.position.set([Math.sin(k) * 37.3, 3 + (k % 5), Math.cos(k * 1.7) * 29.1]);
     camera.target.set([Math.sin(k * 0.3) * 5, 0, Math.cos(k * 0.7) * 5]);
     camera.update(16 / 9);
-    maps.update(camera, [-0.4, -1, -0.3]);
+    maps.update(camera, lit([-0.4, -1, -0.3]));
     for (let c = 0; c < maps.activeCascades; c++) {
       const sphere = frustumSliceSphere(new Float32Array(4), camera,
         c === 0 ? camera.near : maps.splits[c - 1], maps.splits[c]);
@@ -414,5 +440,200 @@ test('the snapped cascade box still contains its whole sphere', () => {
     }
   }
 });
+
+// ------------------------------------------------ point and spot light shadows
+
+console.log('\npoint and spot light shadows');
+
+const localShadowMaps = nodeShadowMaps;
+
+/** A camera at the origin looking down -Z, updated so its frustum is real. */
+function forwardCamera() {
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.position.set([0, 0, 0]);
+  camera.target.set([0, 0, -1]);
+  camera.update(1);
+  return camera;
+}
+
+/** A light record's shadow fields: [views, first layer + 1]. */
+const shadowFields = (scene, node) => {
+  const o = scene._lightOf.get(node.entity) * LIGHT_FLOATS;
+  return [scene.lights[o + 11], scene.lights[o + 15]];
+};
+
+test('a spot light narrower than a cube face takes one view, a wider one six', () => {
+  assert.equal(spotViewCount(0.6), 1);
+  assert.equal(spotViewCount(Math.PI / 4), 1, 'exactly a cube face still fits one');
+  assert.equal(spotViewCount(Math.PI / 4 + 1e-6), 6);
+  close(localMargin(512), 512 / 508, 1e-12, 'two texels of PCF reach on each side');
+});
+
+test('only casting lights on screen get views, and their records say which', () => {
+  const scene = new Scene({ capacity: 32 });
+  const point = scene.addLight({ position: [0, 0, -5], radius: 3, castShadow: true });
+  const spot = scene.addLight({ position: [1, 0, -5], direction: [0, 0, -1], outerAngle: 0.6, radius: 3, castShadow: true });
+  const plain = scene.addLight({ position: [2, 0, -5], radius: 3 });
+  const behind = scene.addLight({ position: [0, 0, 50], radius: 3, castShadow: true });
+  scene.update();
+  scene.refreshLights();
+  const maps = localShadowMaps();
+  maps.updateLocal(scene, forwardCamera());
+
+  assert.deepEqual(shadowFields(scene, point), [6, 1], 'a cube, layers 0-5');
+  assert.deepEqual(shadowFields(scene, spot), [1, 7], 'one view, layer 6');
+  assert.deepEqual(shadowFields(scene, plain), [0, 0], 'not asked');
+  assert.deepEqual(shadowFields(scene, behind), [0, 0], 'nothing it lights is on screen');
+  assert.equal(maps.localCount, 7);
+  assert.ok(maps.localData.subarray(0, 16).some((v) => v !== 0), 'the first light\'s views survived the growth after them');
+
+  point.setLight({ castShadow: false });
+  maps.updateLocal(scene, forwardCamera());
+  assert.deepEqual(shadowFields(scene, point), [0, 0]);
+  assert.deepEqual(shadowFields(scene, spot), [1, 1], 'the spot moves up to layer 0');
+
+  // Off screen, with nothing else about it changed, it keeps no stale views:
+  // a layer left in its record would be another light's map.
+  spot.setPosition(0, 0, 50);
+  scene.update();
+  scene.refreshLights();
+  maps.updateLocal(scene, forwardCamera());
+  assert.deepEqual(shadowFields(scene, spot), [0, 0]);
+});
+
+test('point views written before the array grows come across', () => {
+  // Two point lights are twelve views: the array holds eight after the first
+  // light's six, and grows between the lights.
+  const scene = new Scene({ capacity: 32 });
+  scene.addLight({ position: [0, 0, -5], radius: 3, castShadow: true });
+  scene.addLight({ position: [1, 0, -5], radius: 3, castShadow: true });
+  scene.update();
+  scene.refreshLights();
+  const maps = localShadowMaps();
+  maps.updateLocal(scene, forwardCamera());
+  assert.equal(maps.localCount, 12);
+  for (let view = 0; view < 6; view++) {
+    const m = maps.localData.subarray(view * LOCAL_VIEW_FLOATS, view * LOCAL_VIEW_FLOATS + 16);
+    assert.ok(m.some((v) => v !== 0), `the first light's view ${view} is still there`);
+  }
+});
+
+
+test('each view looks where its light shines', () => {
+  // A point straight down a spot's axis, and one along each cube axis, land in
+  // the middle of their own view, in front of the light.
+  const scene = new Scene({ capacity: 32 });
+  scene.addLight({ position: [0, 0, -5], radius: 4, castShadow: true });
+  scene.addLight({ position: [3, 0, -5], direction: [0, -1, 0], outerAngle: 0.5, radius: 4, castShadow: true });
+  scene.update();
+  scene.refreshLights();
+  const maps = localShadowMaps();
+  maps.updateLocal(scene, forwardCamera());
+
+  const ndc = (view, [x, y, z]) => {
+    const m = maps.localData.subarray(view * LOCAL_VIEW_FLOATS, view * LOCAL_VIEW_FLOATS + 16);
+    const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+    return [(m[0] * x + m[4] * y + m[8] * z + m[12]) / w, (m[1] * x + m[5] * y + m[9] * z + m[13]) / w,
+      (m[2] * x + m[6] * y + m[10] * z + m[14]) / w];
+  };
+  const axes = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  axes.forEach(([x, y, z], face) => {
+    const [nx, ny, nz] = ndc(face, [x * 2, y * 2, -5 + z * 2]);
+    close(nx, 0, 1e-5, `face ${face} x`); close(ny, 0, 1e-5, `face ${face} y`);
+    assert.ok(nz > 0 && nz <= 1, `face ${face} depth ${nz}`);
+  });
+  const [sx, sy, sz] = ndc(6, [3, -2, -5]);
+  close(sx, 0, 1e-5, 'spot x'); close(sy, 0, 1e-5, 'spot y');
+  assert.ok(sz > 0 && sz <= 1, `spot depth ${sz}`);
+  close(maps.localData[6 * LOCAL_VIEW_FLOATS + 16], Math.tan(0.5) * localMargin(maps.localSize), 1e-6, 'its tan half-angle, with the margin');
+});
+
+test('past the device\'s array layers, a shadow view is refused by name', () => {
+  const scene = new Scene({ capacity: 32 });
+  scene.addLight({ position: [0, 0, -5], radius: 3, castShadow: true });
+  scene.addLight({ position: [1, 0, -5], radius: 3, castShadow: true });
+  scene.update();
+  scene.refreshLights();
+  const maps = localShadowMaps(8);
+  assert.throws(() => maps.updateLocal(scene, forwardCamera()), /12 point and spot shadow views is past the 8/);
+});
+
+test('a casting light goes with its node', () => {
+  const scene = new Scene({ capacity: 32 });
+  const lamp = scene.addLight({ castShadow: true });
+  const key = scene.addLight({ type: 'directional' });
+  assert.equal(scene.shadowCasters.size, 2);
+  scene.remove(lamp);
+  scene.remove(key);
+  assert.equal(scene.shadowCasters.size, 0);
+});
+
+test('every casting directional light gets cascades of its own, in slot order', () => {
+  // No light is special: each that casts takes the next slot, its cascades
+  // are layers slot * cascades + i, and its record says which slot.
+  const scene = new Scene({ capacity: 32 });
+  const a = scene.addLight({ type: 'directional', direction: [0, -1, 0] });
+  const off = scene.addLight({ type: 'directional', direction: [1, -1, 0], castShadow: false });
+  const b = scene.addLight({ type: 'directional', direction: [-1, -1, 0.5] });
+  scene.update();
+  scene.refreshLights();
+  const maps = nodeShadowMaps();
+  const camera = forwardCamera();
+  maps.update(camera, scene);
+
+  const slot = (node) => scene.directionals[scene.directionalEntity.indexOf(node.entity) * DIRECTIONAL_FLOATS + 3];
+  assert.equal(slot(a), 1);
+  assert.equal(slot(off), 0, 'not casting, no slot');
+  assert.equal(slot(b), 2);
+  assert.equal(maps.shadowedCount, 2);
+  assert.equal(maps.activeCascades, maps.cascadeCount);
+
+  // The two lights' first cascades look along their own directions: the same
+  // point lands at different light-clip positions in each.
+  const clip = (layer, [x, y, z]) => {
+    const m = maps.matrices.subarray(layer * 16, layer * 16 + 16);
+    return [m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13]];
+  };
+  const p = [1, 0, -3];
+  const inA = clip(0, p), inB = clip(maps.cascadeCount, p);
+  assert.ok(Math.abs(inA[0] - inB[0]) + Math.abs(inA[1] - inB[1]) > 1e-3, 'two lights, two views');
+
+  // The array grew from one light's cascades to two between the lights: the
+  // first light's, written before, must have come across -- the same as that
+  // light gets on its own.
+  const alone = nodeShadowMaps();
+  alone.update(camera, lit([0, -1, 0]));
+  for (let k = 0; k < maps.cascadeCount * 16; k++) close(maps.matrices[k], alone.matrices[k], 1e-6, `matrix float ${k}`);
+
+  // None casting: nothing to fit, and every lookup reads lit.
+  a.setLight({ castShadow: false });
+  b.setLight({ castShadow: false });
+  maps.update(camera, scene);
+  assert.equal(maps.shadowedCount, 0);
+  assert.equal(maps.activeCascades, 0);
+  assert.equal(slot(a) + slot(b), 0, 'stale slots cleared');
+});
+
+test('a directional light with no direction casts nothing rather than NaN', () => {
+  const scene = new Scene({ capacity: 32 });
+  const light = scene.addLight({ type: 'directional', direction: [0, -1, 0] });
+  light.setScale(0, 0, 0);   // its -Z, the direction, is now nothing
+  scene.update();
+  scene.refreshLights();
+  const maps = nodeShadowMaps();
+  maps.update(forwardCamera(), scene);
+  assert.equal(maps.shadowedCount, 0);
+  assert.ok(maps.matrices.every(Number.isFinite));
+});
+
+test('past the device\'s array layers, directional cascades are refused by name', () => {
+  const scene = new Scene({ capacity: 32 });
+  for (let i = 0; i < 3; i++) scene.addLight({ type: 'directional', direction: [i, -1, 0] });
+  scene.update();
+  scene.refreshLights();
+  const maps = nodeShadowMaps(8);
+  assert.throws(() => maps.update(forwardCamera(), scene), /12 directional shadow cascades is past the 8/);
+});
+
 
 console.log(`\n${passed} checks passed\n`);

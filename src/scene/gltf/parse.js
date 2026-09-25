@@ -9,10 +9,10 @@
 //   instantiate(model, entities, transforms);   // becomes entities
 //
 // Lights (KHR_lights_punctual) and cameras come through as data on the nodes
-// that carry them, and the scene makes them live. A directional light joins
-// the scene's others; whether it casts the shadow is Scene.sun's call -- the
-// brightest does. KHR_materials_emissive_strength scales the emissive factor.
-// No other extension is handled.
+// that carry them, and the scene makes them live. Whether one casts a shadow
+// is the scene's default for its kind, since glTF has no say in it.
+// KHR_materials_emissive_strength scales the emissive factor. SUPPORTED_EXTENSIONS
+// lists every extension read; a file that requires any other is refused.
 //
 // A MALFORMED FILE IS REFUSED, with the rule it broke, rather than loaded into
 // something quietly wrong: a NaN in a light colour spreads through bloom, an
@@ -35,6 +35,7 @@ import {
 } from '../../render/vertex.js';
 import { mat4Decompose } from '../../core/math/mat4.js';
 import { parseContainer, resolveBuffers } from './glb.js';
+import { decompressViews, MESHOPT_EXTENSIONS } from './meshopt.js';
 import {
   readAccessorAsFloat32, readAccessorAsUint32, componentCountOf, checkAccessors,
 } from './accessor.js';
@@ -50,6 +51,7 @@ import {
 // Re-exported here so importer callers do not have to know that, but there is
 // exactly one definition and this file is not it.
 import { readAnimations } from './animation.js';
+import { MATERIAL_TEXTURES, textureReference } from './images.js';
 
 export {
   VERTEX_STRIDE_FLOATS, VERTEX_STRIDE_BYTES, VERTEX_BUFFER_LAYOUT,
@@ -96,8 +98,11 @@ export async function loadGLTF(source, options = {}) {
   if (unsupported.length > 0) {
     // Loading anyway would produce geometry that is wrong in a way nothing
     // reports -- Draco-compressed buffers read as noise, quantized meshes come
-    // out the wrong size. Say so.
-    throw new Error(`glTF: requires unsupported extensions: ${unsupported.join(', ')}`);
+    // out the wrong size. Say so. Draco gets the way round it: meshopt does
+    // the same job and is read here, and gltf-transform converts one to the other.
+    const draco = unsupported.includes('KHR_draco_mesh_compression')
+      ? ' (convert Draco to meshopt, which this reads: gltf-transform meshopt in.glb out.glb)' : '';
+    throw new Error(`glTF: requires unsupported extensions: ${unsupported.join(', ')}${draco}`);
   }
 
   // Before any resource is fetched or any array allocated. `maxBytes` is the
@@ -106,8 +111,9 @@ export async function loadGLTF(source, options = {}) {
   const maxBytes = options.maxBytes ?? Infinity;
   checkAccessors(json, maxBytes);
 
-  const buffers = await resolveBuffers(json, binary, options);
-  return buildModel(json, buffers, maxBytes);
+  // Compressed bufferViews become plain ones here, before anything reads them.
+  const decoded = decompressViews(json, await resolveBuffers(json, binary, options), maxBytes);
+  return buildModel(decoded.json, decoded.buffers, maxBytes);
 }
 
 function buildModel(json, buffers, maxBytes = Infinity) {
@@ -509,6 +515,10 @@ function checkLength(array, vertexCount, components, name) {
 function accessorBounds(json, accessorIndex) {
   const accessor = json.accessors?.[accessorIndex];
   if (!accessor?.min || !accessor?.max) return null;
+  // Quantized positions (KHR_mesh_quantization) store integers the reader
+  // normalizes, and exporters disagree on which side of that the bounds are
+  // written: computed from the decoded positions, they are right either way.
+  if (accessor.normalized === true) return null;
   return { min: Float32Array.from(accessor.min), max: Float32Array.from(accessor.max) };
 }
 
@@ -545,10 +555,54 @@ function finiteNumber(value, fallback, what) {
   return value;
 }
 
+/**
+ * KHR_texture_transform on one texture reference: its offset, rotation and
+ * scale, the defaults when there is none. Kept, not only folded into the
+ * matrix, because a clip can animate any one of them.
+ */
+function uvTransformPartsOf(ref, where) {
+  const t = ref?.extensions?.KHR_texture_transform;
+  return {
+    offset: t?.offset === undefined ? [0, 0] : [...finiteNumbers(t.offset, 2, `${where} texture transform offset`)],
+    rotation: finiteNumber(t?.rotation, 0, `${where} texture transform rotation`),
+    scale: t?.scale === undefined ? [1, 1] : [...finiteNumbers(t.scale, 2, `${where} texture transform scale`)],
+  };
+}
+
+/**
+ * The two rows of the matrix KHR_texture_transform defines, translation *
+ * rotation * scale, applied to (u, v, 1).
+ */
+export function uvTransformRows({ offset, rotation, scale }) {
+  const c = Math.cos(rotation);
+  const s = Math.sin(rotation);
+  // The spec's GLSL builds these column by column: rotation's first ROW is
+  // (cos, -sin) and its second (sin, cos).
+  return [c * scale[0], -s * scale[1], offset[0], s * scale[0], c * scale[1], offset[1]];
+}
+
+/** The UV set a texture reference samples: the transform's override, if it has one. */
+function texCoordOf(ref) {
+  return ref?.extensions?.KHR_texture_transform?.texCoord ?? ref?.texCoord ?? 0;
+}
+
 function readMaterials(json) {
   return (json.materials ?? []).map((material, i) => {
     const pbr = material.pbrMetallicRoughness ?? {};
     const of = (field) => `material ${i} ${field}`;
+    const refs = MATERIAL_TEXTURES.map(({ path }) => textureReference(material, path));
+    const names = MATERIAL_TEXTURES.map(({ slot }) => slot);
+    const specular = material.extensions?.KHR_materials_specular;
+    const clearcoat = material.extensions?.KHR_materials_clearcoat;
+    const sheen = material.extensions?.KHR_materials_sheen;
+    const anisotropy = material.extensions?.KHR_materials_anisotropy;
+    const iridescence = material.extensions?.KHR_materials_iridescence;
+    const transmission = material.extensions?.KHR_materials_transmission;
+    const volume = material.extensions?.KHR_materials_volume;
+    const emissiveFactor = Float32Array.from(
+      material.emissiveFactor === undefined ? [0, 0, 0] : finiteNumbers(material.emissiveFactor, 3, of('emissiveFactor')),
+    );
+    const emissiveStrength = emissiveStrengthOf(material, i);
     return {
       name: material.name ?? `material_${i}`,
       baseColorFactor: Float32Array.from(
@@ -560,11 +614,10 @@ function readMaterials(json) {
       // core spec clamps it to. Blender writes it for any emission strength
       // above 1, so ignoring it dims every such glow with nothing reported.
       // Applied here, once: the shader already takes the factor as a float.
-      emissive: Float32Array.from(
-        material.emissiveFactor === undefined ? [0, 0, 0] : finiteNumbers(material.emissiveFactor, 3, of('emissiveFactor')),
-      ).map(
-        (v) => v * emissiveStrengthOf(material, i),
-      ),
+      emissive: emissiveFactor.map((v) => v * emissiveStrength),
+      // The two it came from, for a clip that animates either one.
+      emissiveFactor,
+      emissiveStrength,
       alphaMode: material.alphaMode ?? 'OPAQUE',
       alphaCutoff: finiteNumber(material.alphaCutoff, 0.5, of('alphaCutoff')),
       doubleSided: material.doubleSided === true,
@@ -575,25 +628,59 @@ function readMaterials(json) {
       // Texture INDICES, not images. Decoding and uploading belong to the
       // texture system; resolving them here would drag the RHI into a file that
       // has no other reason to know a GPU exists.
-      textures: {
-        baseColor: pbr.baseColorTexture?.index ?? -1,
-        metallicRoughness: pbr.metallicRoughnessTexture?.index ?? -1,
-        normal: material.normalTexture?.index ?? -1,
-        occlusion: material.occlusionTexture?.index ?? -1,
-        emissive: material.emissiveTexture?.index ?? -1,
-      },
+      textures: Object.fromEntries(names.map((name, k) => [name, refs[k]?.index ?? -1])),
       // Which UV set each texture samples. glTF puts `texCoord` on the texture
       // REFERENCE, so two maps on one material can disagree -- baked occlusion
       // on set 1 beside a base colour on set 0 is the usual shape. Dropping it
       // samples the wrong pixels with no error anywhere.
-      uvSets: {
-        baseColor: pbr.baseColorTexture?.texCoord ?? 0,
-        metallicRoughness: pbr.metallicRoughnessTexture?.texCoord ?? 0,
-        normal: material.normalTexture?.texCoord ?? 0,
-        occlusion: material.occlusionTexture?.texCoord ?? 0,
-        emissive: material.emissiveTexture?.texCoord ?? 0,
-      },
+      uvSets: Object.fromEntries(names.map((name, k) => [name, texCoordOf(refs[k])])),
+      // KHR_texture_transform: each texture's parts, and its matrix rows, six
+      // floats a texture, in the slot order above.
+      uvTransformParts: refs.map((ref, k) => uvTransformPartsOf(ref, of(names[k]))),
+      // KHR_materials_unlit: the base colour, and no lighting at all.
+      unlit: material.extensions?.KHR_materials_unlit !== undefined,
+      // KHR_materials_ior: sets how much a dielectric reflects head-on.
+      ior: iorOf(material, i),
+      // KHR_materials_specular: how strongly, and in what colour.
+      specular: finiteNumber(specular?.specularFactor, 1, of('specularFactor')),
+      specularColor: Float32Array.from(
+        specular?.specularColorFactor === undefined ? [1, 1, 1] : finiteNumbers(specular.specularColorFactor, 3, of('specularColorFactor')),
+      ),
+      // KHR_materials_clearcoat: a second, clear specular layer on top.
+      clearcoat: finiteNumber(clearcoat?.clearcoatFactor, 0, of('clearcoatFactor')),
+      clearcoatRoughness: finiteNumber(clearcoat?.clearcoatRoughnessFactor, 0, of('clearcoatRoughnessFactor')),
+      clearcoatNormalScale: finiteNumber(clearcoat?.clearcoatNormalTexture?.scale, 1, of('clearcoatNormalTexture.scale')),
+      // KHR_materials_sheen: the soft rim of cloth, over everything but a coat.
+      sheenColor: Float32Array.from(
+        sheen?.sheenColorFactor === undefined ? [0, 0, 0] : finiteNumbers(sheen.sheenColorFactor, 3, of('sheenColorFactor')),
+      ),
+      sheenRoughness: finiteNumber(sheen?.sheenRoughnessFactor, 0, of('sheenRoughnessFactor')),
+      // KHR_materials_anisotropy: highlights stretched along a direction in
+      // the tangent plane, turned from the tangent by the rotation.
+      anisotropyStrength: finiteNumber(anisotropy?.anisotropyStrength, 0, of('anisotropyStrength')),
+      anisotropyRotation: finiteNumber(anisotropy?.anisotropyRotation, 0, of('anisotropyRotation')),
+      // KHR_materials_iridescence: a thin film, thickness in nanometres.
+      iridescence: finiteNumber(iridescence?.iridescenceFactor, 0, of('iridescenceFactor')),
+      iridescenceIor: finiteNumber(iridescence?.iridescenceIor, 1.3, of('iridescenceIor')),
+      iridescenceThicknessMinimum: finiteNumber(iridescence?.iridescenceThicknessMinimum, 100, of('iridescenceThicknessMinimum')),
+      iridescenceThicknessMaximum: finiteNumber(iridescence?.iridescenceThicknessMaximum, 400, of('iridescenceThicknessMaximum')),
+      // KHR_materials_transmission: how much of the light that enters the
+      // surface passes through it rather than scattering back.
+      transmission: finiteNumber(transmission?.transmissionFactor, 0, of('transmissionFactor')),
+      // KHR_materials_volume: 0 thickness is a thin wall; more is a solid the
+      // view bends through, dimmed on the way as the attenuation says.
+      thickness: finiteNumber(volume?.thicknessFactor, 0, of('thicknessFactor')),
+      attenuationDistance: attenuationDistanceOf(volume, i),
+      // Whether it declares a layer the extended shader draws. Declared, not
+      // merely non-zero: a clip may raise a coat from nothing.
+      extendedShading: EXTENDED_SHADING.some((name) => material.extensions?.[name] !== undefined),
+      attenuationColor: Float32Array.from(
+        volume?.attenuationColor === undefined ? [1, 1, 1] : finiteNumbers(volume.attenuationColor, 3, of('attenuationColor')),
+      ),
     };
+  }).map((record) => {
+    record.uvTransforms = Float32Array.from(record.uvTransformParts.flatMap(uvTransformRows));
+    return record;
   });
 }
 
@@ -625,6 +712,7 @@ function readNodes(json) {
       scale,
       children: node.children ?? [],
       mesh: node.mesh ?? -1,
+      lod: lodOf(json, node, i),
       // Which skin drives this node's mesh, or -1. The node carries it rather
       // than the mesh, because one mesh can be instanced under two skeletons.
       skin: node.skin ?? -1,
@@ -644,7 +732,20 @@ function readNodes(json) {
 // ------------------------------------------------------- lights and cameras
 
 /** Extensions this importer understands well enough to accept as required. */
-const SUPPORTED_EXTENSIONS = new Set(['KHR_lights_punctual', 'KHR_materials_emissive_strength']);
+const SUPPORTED_EXTENSIONS = new Set([
+  'KHR_lights_punctual', 'KHR_materials_emissive_strength', 'KHR_animation_pointer',
+  // Attributes as 8- and 16-bit integers. The accessor reader already undoes
+  // any normalization, so accepting it is all it asks.
+  'KHR_mesh_quantization',
+  'KHR_texture_transform',
+  'KHR_materials_unlit', 'KHR_materials_ior', 'KHR_materials_specular',
+  'KHR_materials_clearcoat', 'KHR_materials_sheen',
+  'KHR_materials_anisotropy', 'KHR_materials_iridescence',
+  'KHR_materials_transmission', 'KHR_materials_volume',
+  'MSFT_lod',
+  // Compressed bufferViews, decoded as the buffers resolve (meshopt.js).
+  ...MESHOPT_EXTENSIONS,
+]);
 
 /**
  * KHR_lights_punctual, in the terms scene.addLight uses.
@@ -700,6 +801,9 @@ function readLights(json) {
       color,
       intensity,
       radius: light.range ?? unboundedLightRadius(intensity, color),
+      // Whether the radius is the file's or derived from the brightness, which
+      // decides what an animated intensity does to it.
+      range: light.range ?? null,
       innerAngle,
       outerAngle,
     };
@@ -712,6 +816,63 @@ function isIndex(value, count) {
 }
 
 /** KHR_materials_emissive_strength's factor for a material, checked. */
+/**
+ * MSFT_lod on a node: the nodes standing in for it at lower detail, finest
+ * first, and the screen coverage each level draws down to -- the
+ * MSFT_screencoverage hint in extras, one value per level including this
+ * node's. Without the hint nothing says when to switch, so coverage is null
+ * and only this node draws, as it would for a client without the extension.
+ */
+function lodOf(json, node, i) {
+  const ids = node.extensions?.MSFT_lod?.ids;
+  if (ids === undefined) return null;
+  const count = json.nodes.length;
+  if (!Array.isArray(ids) || ids.some((id) => !(Number.isInteger(id) && id >= 0 && id < count && id !== i))) {
+    throw new Error(`glTF: node ${i} MSFT_lod ids must name other nodes, got ${JSON.stringify(ids)}`);
+  }
+  const hint = node.extras?.MSFT_screencoverage;
+  if (hint === undefined) return { ids, coverage: null };
+  if (!(Array.isArray(hint) && hint.length === ids.length + 1
+    && hint.every((c, k) => Number.isFinite(c) && c >= 0 && (k === 0 || c < hint[k - 1])))) {
+    throw new Error(
+      `glTF: node ${i} MSFT_screencoverage must be ${ids.length + 1} decreasing coverages, one a level, got ${JSON.stringify(hint)}`,
+    );
+  }
+  return { ids, coverage: hint };
+}
+
+/** The extensions only the extended shader draws; see VARIANT_EXTENDED. */
+const EXTENDED_SHADING = [
+  'KHR_materials_clearcoat', 'KHR_materials_sheen', 'KHR_materials_anisotropy',
+  'KHR_materials_iridescence', 'KHR_materials_transmission', 'KHR_materials_volume',
+];
+
+/**
+ * KHR_materials_volume's attenuation distance: positive, and infinite -- no
+ * attenuation at all -- when the file gives none. JSON has no infinity to
+ * write, so that is the only way to ask for it.
+ */
+function attenuationDistanceOf(volume, i) {
+  const distance = volume?.attenuationDistance ?? Infinity;
+  if (!(distance > 0)) {
+    throw new Error(`glTF: material ${i} attenuationDistance must be positive, got ${distance}`);
+  }
+  return distance;
+}
+
+/**
+ * KHR_materials_ior. At least 1, or exactly 0, which the spec keeps for an
+ * index of infinity -- a surface that reflects everything, as the f0 formula
+ * already gives for 0.
+ */
+function iorOf(material, i) {
+  const ior = material.extensions?.KHR_materials_ior?.ior ?? 1.5;
+  if (!(Number.isFinite(ior) && (ior >= 1 || ior === 0))) {
+    throw new Error(`glTF: material ${i} ior must be at least 1, or 0, got ${ior}`);
+  }
+  return ior;
+}
+
 function emissiveStrengthOf(material, i) {
   const strength = material.extensions?.KHR_materials_emissive_strength?.emissiveStrength ?? 1;
   if (!(Number.isFinite(strength) && strength >= 0)) {

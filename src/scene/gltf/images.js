@@ -101,16 +101,49 @@ const GLTF_LINEAR_MIPMAP_LINEAR = 9987;
 const GLTF_CLAMP_TO_EDGE = 33071;
 const GLTF_MIRRORED_REPEAT = 33648;
 
+/**
+ * Every texture a material can sample: its slot's name, where the reference
+ * sits in the material's JSON, and whether the image holds colour. The core
+ * five first, in the order their UV sets and transforms are kept, then the
+ * material extensions'. One list, so the decoder, the uploader, the importer
+ * and the animation pointers cannot disagree about what a material samples.
+ *
+ * The sRGB column is the extension specs': colours are sRGB, numbers are not.
+ */
+export const MATERIAL_TEXTURES = [
+  { slot: 'baseColor', path: 'pbrMetallicRoughness/baseColorTexture', srgb: true },
+  { slot: 'metallicRoughness', path: 'pbrMetallicRoughness/metallicRoughnessTexture', srgb: false },
+  { slot: 'normal', path: 'normalTexture', srgb: false },
+  { slot: 'occlusion', path: 'occlusionTexture', srgb: false },
+  { slot: 'emissive', path: 'emissiveTexture', srgb: true },
+  { slot: 'specular', path: 'extensions/KHR_materials_specular/specularTexture', srgb: false },
+  { slot: 'specularColor', path: 'extensions/KHR_materials_specular/specularColorTexture', srgb: true },
+  { slot: 'clearcoat', path: 'extensions/KHR_materials_clearcoat/clearcoatTexture', srgb: false },
+  { slot: 'clearcoatRoughness', path: 'extensions/KHR_materials_clearcoat/clearcoatRoughnessTexture', srgb: false },
+  { slot: 'clearcoatNormal', path: 'extensions/KHR_materials_clearcoat/clearcoatNormalTexture', srgb: false },
+  { slot: 'sheenColor', path: 'extensions/KHR_materials_sheen/sheenColorTexture', srgb: true },
+  { slot: 'sheenRoughness', path: 'extensions/KHR_materials_sheen/sheenRoughnessTexture', srgb: false },
+  { slot: 'anisotropy', path: 'extensions/KHR_materials_anisotropy/anisotropyTexture', srgb: false },
+  { slot: 'iridescence', path: 'extensions/KHR_materials_iridescence/iridescenceTexture', srgb: false },
+  { slot: 'iridescenceThickness', path: 'extensions/KHR_materials_iridescence/iridescenceThicknessTexture', srgb: false },
+  { slot: 'transmission', path: 'extensions/KHR_materials_transmission/transmissionTexture', srgb: false },
+  { slot: 'thickness', path: 'extensions/KHR_materials_volume/thicknessTexture', srgb: false },
+];
+export const CORE_TEXTURE_COUNT = 5;
+/** The extensions' textures, which share the bindings after the core five. */
+export const EXTENSION_TEXTURES = MATERIAL_TEXTURES.slice(CORE_TEXTURE_COUNT);
+
+/** The texture reference at a MATERIAL_TEXTURES path, or undefined. */
+export function textureReference(material, path) {
+  return path.split('/').reduce((node, key) => node?.[key], material);
+}
+
 /** Every image some material samples, by index. */
 export function usedImages(json) {
   const used = new Set();
   for (const material of json.materials ?? []) {
-    const pbr = material.pbrMetallicRoughness ?? {};
-    for (const reference of [
-      pbr.baseColorTexture, pbr.metallicRoughnessTexture,
-      material.normalTexture, material.occlusionTexture, material.emissiveTexture,
-    ]) {
-      const image = textureImageIndex(json, reference?.index);
+    for (const { path } of MATERIAL_TEXTURES) {
+      const image = textureImageIndex(json, textureReference(material, path)?.index);
       if (image >= 0) used.add(image);
     }
   }
@@ -249,11 +282,5 @@ function addressMode(wrap) {
  */
 export function materialTextureSlots(material) {
   const textures = material.textures ?? {};
-  return [
-    { slot: 'baseColor', texture: textures.baseColor ?? -1, srgb: true },
-    { slot: 'emissive', texture: textures.emissive ?? -1, srgb: true },
-    { slot: 'normal', texture: textures.normal ?? -1, srgb: false },
-    { slot: 'metallicRoughness', texture: textures.metallicRoughness ?? -1, srgb: false },
-    { slot: 'occlusion', texture: textures.occlusion ?? -1, srgb: false },
-  ];
+  return MATERIAL_TEXTURES.map(({ slot, srgb }) => ({ slot, texture: textures[slot] ?? -1, srgb }));
 }
