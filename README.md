@@ -4,6 +4,7 @@
 </picture>
 
 [![npm](https://img.shields.io/npm/v/winding-engine?color=%23cb3837&label=winding-engine)](https://www.npmjs.com/package/winding-engine)
+[![live demo](https://img.shields.io/badge/demo-live-e07a5f)](https://nolanbaxter.github.io/winding/demo/)
 [![API reference](https://img.shields.io/badge/API-reference-2f6f4e)](docs/API.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 

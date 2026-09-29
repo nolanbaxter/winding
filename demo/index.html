@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Winding demo</title>
+<meta name="description" content="Winding, a WebGPU rendering engine for the browser, in 3D and 2D: live scenes.">
+<link rel="icon" href="../docs/logo.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #0b0d11; --panel: rgba(17, 20, 26, 0.86); --line: #262b35; --ink: #e8eaee; --muted: #9aa1ad; --accent: #e07a5f;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header a.brand { display: flex; align-items: center; }
+  header a.brand img { height: 28px; display: block; }
+  nav { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+  nav button {
+    font: inherit; font-size: 13px; color: var(--muted); background: transparent; border: 1px solid var(--line);
+    border-radius: 999px; padding: 4px 12px; cursor: pointer;
+  }
+  nav button:hover { color: var(--ink); border-color: #3a4150; }
+  nav button[aria-current="true"] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  nav .group { color: var(--muted); font-size: 12px; align-self: center; margin: 0 2px 0 6px; text-transform: uppercase; letter-spacing: 0.06em; }
+  header .links { display: flex; gap: 14px; font-size: 13px; }
+  header .links a, .caption a { color: var(--muted); text-decoration: none; }
+  header .links a:hover, .caption a:hover { color: var(--ink); text-decoration: underline; }
+  main { position: relative; flex: 1; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: absolute; left: 16px; bottom: 16px; max-width: min(460px, calc(100% - 32px));
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; backdrop-filter: blur(6px);
+  }
+  .caption h1 { margin: 0 0 4px; font-size: 16px; }
+  .caption p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .caption .meta { margin-top: 8px; font-size: 12.5px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .overlay { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+  .overlay .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; color: var(--muted); pointer-events: auto; max-width: min(560px, calc(100% - 32px)); }
+  .overlay .card strong { color: var(--ink); }
+  .overlay img { width: 100%; border-radius: 6px; margin-top: 12px; display: block; }
+  [hidden] { display: none !important; }
+  @media (max-width: 640px) {
+    header { gap: 10px; }
+    header .links { width: 100%; }
+    .caption { left: 8px; right: 8px; bottom: 8px; max-width: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="https://github.com/nolanbaxter/winding" aria-label="Winding on GitHub"><img src="../docs/wordmark-dark.svg" alt="Winding"></a>
+  <nav id="scenes" aria-label="Scenes"></nav>
+  <div class="links">
+    <a href="https://github.com/nolanbaxter/winding">GitHub</a>
+    <a href="../docs/API.html">API reference</a>
+    <a href="https://www.npmjs.com/package/winding-engine">npm</a>
+  </div>
+</header>
+<main>
+  <canvas id="view"></canvas>
+  <div class="caption" id="caption" hidden>
+    <h1 id="title"></h1>
+    <p id="blurb"></p>
+    <div class="meta"><span id="hint"></span><a id="source" href="https://github.com/nolanbaxter/winding/blob/main/demo/scenes.js">How it's made</a></div>
+  </div>
+  <div class="overlay" id="loading" hidden><div class="card" id="loadingText">Loading…</div></div>
+  <div class="overlay" id="unsupported" hidden>
+    <div class="card">
+      <strong>This browser has no WebGPU.</strong> Winding draws with WebGPU, which Chrome, Edge and other Chromium browsers have on desktop and Android, and Safari and Firefox are bringing in. Here is what the scenes look like:
+      <img src="../docs/images/slideshow.webp" alt="Six scenes rendered in Winding, in turn">
+    </div>
+  </div>
+</main>
+<script type="module">
+import { Winding, OrbitController } from '../src/winding.js';
+import { SCENES } from './scenes.js';
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('view');
+
+function unsupported() {
+  $('unsupported').hidden = false;
+  $('scenes').hidden = true;
+}
+
+let engine = null;
+if (!navigator.gpu) unsupported();
+else {
+  try { engine = await Winding.create(canvas); } catch (error) { console.error(error); unsupported(); }
+}
+
+// What every scene is built with: the engine, and loads made once and kept,
+// so going back to a scene doesn't download or decode it again.
+const kept = new Map();
+const once = (key, make) => { if (!kept.has(key)) kept.set(key, make()); return kept.get(key); };
+const ctx = {
+  engine,
+  load: (source, key = source) => once(`model:${key}`, async () => engine.load(await source)),
+  font: (css) => once(`font:${css}`, () => engine.loadFont(css)),
+  texture: async (art) => engine.loadTexture(await createImageBitmap(art)),
+  /** Pixel art, drawn texel by texel: `paint(set)` with set(x, y, '#rrggbb'). */
+  pixels: async (w, h, paint) => {
+    const art = new OffscreenCanvas(w, h);
+    const g = art.getContext('2d');
+    paint((x, y, colour) => { g.fillStyle = colour; g.fillRect(x, y, 1, 1); });
+    return engine.loadTexture(await createImageBitmap(art), { pixelated: true });
+  },
+  logo: () => once('logo', async () => {
+    const svg = new Image();
+    svg.src = '../docs/logo.svg';
+    await svg.decode();
+    const art = new OffscreenCanvas(256, 256);
+    art.getContext('2d').drawImage(svg, 0, 0, 256, 256);
+    return engine.loadTexture(await createImageBitmap(art));
+  }),
+};
+
+// The picker: 3D scenes, then 2D.
+const buttons = new Map();
+for (const [label, kind] of [['3D', undefined], ['2D', '2d']]) {
+  const group = Object.assign(document.createElement('span'), { className: 'group', textContent: label });
+  $('scenes').append(group);
+  for (const def of SCENES.filter((s) => s.kind === kind)) {
+    const button = Object.assign(document.createElement('button'), { type: 'button', textContent: def.title.replace(/^2D /, '') });
+    button.onclick = () => { location.hash = def.id; };
+    buttons.set(def.id, button);
+    $('scenes').append(button);
+  }
+}
+
+// Orbiting turns by itself until someone takes the camera.
+let touched = false;
+canvas.addEventListener('pointerdown', () => { touched = true; });
+canvas.addEventListener('wheel', () => { touched = true; }, { passive: true });
+
+let orbit = null;
+let showing = 0;
+async function show(id) {
+  const def = SCENES.find((s) => s.id === id) ?? SCENES[0];
+  const mine = ++showing;
+  for (const [key, button] of buttons) button.setAttribute('aria-current', String(key === def.id));
+  $('title').textContent = def.title;
+  $('blurb').textContent = def.blurb;
+  $('hint').textContent = def.kind === '2d' ? '' : 'Drag to orbit, scroll to zoom, right-drag to pan.';
+  $('caption').hidden = false;
+  document.title = `${def.title} · Winding demo`;
+
+  engine.stop();
+  orbit?.detach();
+  orbit = null;
+  engine.renderer.exposure = 1;
+  engine.renderer.fog = null;
+  engine.renderer.dof = null;
+  $('loadingText').textContent = `Loading ${def.title}…`;
+  const slow = setTimeout(() => { if (mine === showing) $('loading').hidden = false; }, 150);
+  let built;
+  try {
+    built = await def.build(ctx);
+  } catch (error) {
+    console.error(error);
+    if (mine === showing) $('loadingText').textContent = `${def.title} didn't load: ${error.message}`;
+    clearTimeout(slow);
+    $('loading').hidden = false;
+    return;
+  }
+  clearTimeout(slow);
+  if (mine !== showing) return;   // another scene was asked for meanwhile
+  $('loading').hidden = true;
+
+  if (built.orbit) {
+    const { distance, yaw, pitch, target, spin = true } = built.orbit;
+    orbit = new OrbitController(built.camera, canvas, { distance, yaw, pitch, target, minDistance: distance * 0.1, maxDistance: distance * 6 });
+    built.spin = spin;
+  }
+  let time = 0;
+  engine.run(built.scene, built.camera, {
+    hud: built.hud,
+    frame: (alpha, clock) => {
+      const dt = clock.realDelta;
+      time += dt;
+      if (orbit) {
+        if (built.spin && !touched) orbit.desired.yaw += dt * 0.12;
+        orbit.update(dt);
+      }
+      built.frame?.(dt, time);
+    },
+  });
+}
+
+if (engine) {
+  addEventListener('hashchange', () => show(location.hash.slice(1)));
+  show(location.hash.slice(1));
+}
+</script>
+</body>
+</html>
