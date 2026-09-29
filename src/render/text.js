@@ -102,14 +102,31 @@ export function distanceField(coverage, width, height, spread = SPREAD) {
  *   align       'left', 'center' or 'right', each line within the block
  *   lineHeight  in ems; the font's own ascent plus descent by default
  *   anchor      [x, y] in the block, 0..1: the point placed at the node
- * Returns [{ char, x, y, width, height }] -- the ink box's lower left, and
- * size -- for characters with ink.
+ *   width       in ems: lines wrap between words to fit it, as CSS wraps
+ *               text in a box, and the block is that wide, so align and
+ *               anchor work within it. A word wider than it overflows.
+ * Returns { boxes, block }: boxes as [{ char, x, y, width, height }] -- the
+ * ink box's lower left, and size -- for characters with ink, and block as
+ * [left, bottom, right, top], the whole block.
  */
-export function layoutText(text, metrics, { align = 'left', lineHeight, anchor = [0.5, 0.5] } = {}) {
-  const lines = String(text).split('\n');
+export function layoutText(text, metrics, { align = 'left', lineHeight, anchor = [0.5, 0.5], width = Infinity } = {}) {
+  const measure = (line) => [...line].reduce((w, ch) => w + (metrics.glyphs.get(ch)?.advance ?? 0), 0);
+  const lines = [];
+  for (const paragraph of String(text).split('\n')) {
+    let line = null;
+    for (const word of paragraph.split(' ')) {
+      const longer = line === null ? word : `${line} ${word}`;
+      if (line === null || measure(longer) <= width) line = longer;
+      else {
+        lines.push(line);
+        line = word;
+      }
+    }
+    lines.push(line);
+  }
   const step = lineHeight ?? metrics.ascent + metrics.descent;
-  const widths = lines.map((line) => [...line].reduce((w, ch) => w + (metrics.glyphs.get(ch)?.advance ?? 0), 0));
-  const blockWidth = Math.max(0, ...widths);
+  const widths = lines.map(measure);
+  const blockWidth = Number.isFinite(width) ? width : Math.max(0, ...widths);
   const blockHeight = metrics.ascent + metrics.descent + step * (lines.length - 1);
   const shift = { left: 0, center: 0.5, right: 1 }[align];
   if (shift === undefined) throw new Error(`text: align is 'left', 'center' or 'right', got ${align}`);
@@ -133,7 +150,7 @@ export function layoutText(text, metrics, { align = 'left', lineHeight, anchor =
     box.x -= ox;
     box.y -= oy;
   }
-  return boxes;
+  return { boxes, block: [-ox, -blockHeight - oy, blockWidth - ox, -oy] };
 }
 
 // ----------------------------------------------------------------- fonts

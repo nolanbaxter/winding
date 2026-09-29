@@ -7,7 +7,10 @@
 import assert from 'node:assert/strict';
 
 import { Scene, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
-import { packSprites, SPRITE_FLOATS } from '../src/render/sprites.js';
+import { packSprites, SPRITE_FLOATS, SpritePass } from '../src/render/sprites.js';
+import { order2D, write2D, View2D, SPRITE2D_FLOATS } from '../src/render/view2d.js';
+import { Camera2D } from '../src/scene/camera2d.js';
+import { spriteSheet } from '../src/scene/scene.js';
 import { ringCapacity, packEmitter } from '../src/render/particles.js';
 import { packDecals, DECAL_FLOATS } from '../src/render/decals.js';
 import { Node } from '../src/scene/node.js';
@@ -181,6 +184,124 @@ test('sprites draw cutouts, then additive, then alpha from far to near, in runs 
   assert.deepEqual(runs.map((r) => [r.blend, r.count]), [['cutout', 1], ['additive', 1], ['additive', 1], ['alpha', 2]],
     'additive grouped by texture, one run each');
   assert.deepEqual([out[4 * SPRITE_FLOATS + 4], out[4 * SPRITE_FLOATS + 5]], [2, 3], 'scaled by its node');
+});
+
+test('run() skips a frame only when nothing it is drawn from has changed', () => {
+  const engine = Object.create(Winding.prototype);
+  engine.rhi = { width: 320, height: 240 };
+  const sets = new Map([[0, { ready: true }]]);
+  engine.renderer = {
+    exposure: 1, fog: null, dof: null, drawSkybox: true, shadowDistance: null, lightDistance: null, ao: null,
+    debug: { count: 0, depthTest: true }, _variantSets: sets,
+    post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, requestedLevels: 5, antialias: true, grading: null },
+  };
+  engine._drawn = null;
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.createNode();
+  const camera = new Camera({ fovY: 1, near: 0.1 });
+  camera.position.set([0, 0, 5]);
+  scene.update();
+  // What renderFrame leaves behind: composed transforms, spent moves, an updated camera.
+  const drawn = () => { scene.update(); scene.transforms.movedPending = false; camera.update(engine.rhi.width / engine.rhi.height); engine._remember(scene, camera); };
+  const check = (why, change, restore = () => {}) => {
+    drawn();
+    assert.equal(engine._idle(scene, camera), true, `settled, before: ${why}`);
+    change();
+    assert.equal(engine._idle(scene, camera), false, why);
+    restore();
+  };
+
+  assert.equal(engine._idle(scene, camera), false, 'nothing drawn yet');
+  check('a node moved', () => node.setPosition(1, 0, 0));
+  check('the camera moved', () => camera.position.set([0, 1, 5]));
+  check('a setting changed', () => { engine.renderer.exposure = 2; });
+  check('a LUT was swapped for another', () => { engine.renderer.post.grading = { lut: {} }; }, () => {});
+  check('a light changed', () => scene.addLight({ position: [0, 1, 0], radius: 2 }));
+  check('the canvas resized', () => { engine.rhi.width = 640; });
+  check('debug lines are queued', () => { engine.renderer.debug.count = 2; }, () => { engine.renderer.debug.count = 0; });
+  check('a pipeline set is still building', () => sets.set(2, { ready: false }), () => sets.delete(2));
+  check('a material changed', () => scene.changedMaterials.set(0, {}), () => scene.changedMaterials.clear());
+  const emitter = scene.addEmitter({ rate: 0, lifetime: 2, size: 0.1 });
+  check('particles were born', () => { scene.burst(emitter, 5); scene.advanceParticles(0.016); });
+  scene.emitters.get(emitter.entity).owed = 0;   // the frame that births them settles what is owed
+  scene.advanceParticles(2.1);
+  drawn();
+  assert.equal(engine._idle(scene, camera), true, 'the burst has lived out its lifetime');
+  check('invalidate() was called', () => engine.invalidate());
+});
+
+test('an overlay is part of what run() compares before skipping a frame', () => {
+  const engine = Object.create(Winding.prototype);
+  engine.rhi = { width: 320, height: 240 };
+  engine.renderer = {
+    exposure: 1, fog: null, dof: null, drawSkybox: true, shadowDistance: null, lightDistance: null, ao: null,
+    debug: { count: 0, depthTest: true }, _variantSets: new Map(),
+    post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, requestedLevels: 5, antialias: true, grading: null },
+  };
+  engine._drawn = null;
+  const scene = new Scene({ capacity: 16 });
+  const camera = new Camera({ fovY: 1, near: 0.1 });
+  camera.position.set([0, 0, 5]);
+  const hudScene = new Scene({ capacity: 16 });
+  const bar = hudScene.addShape({ size: [100, 10] });
+  const hud = engine._overlay({ scene: hudScene });
+  assert.equal(hud.camera.is2D, true, 'a plain Camera2D when none is given');
+  assert.equal(engine._overlay({ scene: hudScene }), hud, 'and the same overlay each time');
+  assert.throws(() => engine._overlay({ scene: hudScene, camera }), /Camera2D/);
+
+  const drawn = () => {
+    for (const s of [scene, hudScene]) { s.update(); s.transforms.movedPending = false; }
+    camera.update(engine.rhi.width / engine.rhi.height);
+    hud.camera.update(1, engine.rhi.width, engine.rhi.height);
+    engine._remember(scene, camera, hud);
+  };
+  drawn();
+  assert.equal(engine._idle(scene, camera, hud), true, 'settled');
+  assert.equal(engine._idle(scene, camera), false, 'the overlay went away');
+  hudScene.setShape(bar, { color: [1, 0, 0, 1] });
+  assert.equal(engine._idle(scene, camera, hud), false, 'a HUD shape changed');
+  drawn();
+  bar.setPosition(5, 5);
+  assert.equal(engine._idle(scene, camera, hud), false, 'a HUD node moved');
+  drawn();
+  hud.camera.zoom = 2;
+  assert.equal(engine._idle(scene, camera, hud), false, 'the HUD camera zoomed');
+});
+
+test('sprites are packed again only when something they are drawn from changed', () => {
+  let packs = 0;
+  const pass = Object.create(SpritePass.prototype);
+  pass._data = null;
+  pass._capacity = 1 << 20;
+  pass._buffer = {};
+  pass._params = new Float32Array(12);
+  pass._paramsBuffer = {};
+  pass.rhi = { queue: { writeBuffer(buffer) { if (buffer === pass._buffer) packs++; } } };
+  const texture = { view: {}, width: 4, height: 4 };
+  const scene = new Scene({ capacity: 8 });
+  const sprite = scene.addSprite({ texture, position: [0, 0, -5] });
+  scene.update();
+  const camera = new Camera({ fovY: 1, near: 0.1 });
+  camera.position.set([0, 0, 5]);
+  camera.target.set([0, 0, 0]);
+  camera.update(1);
+  const frame = (moved = false) => pass.prepare(scene, camera, null, 320, 240, moved);
+
+  frame(true);
+  assert.equal(packs, 1);
+  frame();
+  assert.equal(packs, 1, 'nothing changed: the last pack stands');
+  frame(true);
+  assert.equal(packs, 2, 'a transform moved');
+  camera.position.set([0, 1, 5]);
+  camera.update(1);
+  frame();
+  assert.equal(packs, 3, 'the camera moved');
+  scene.setSprite(sprite, { color: [1, 0, 0, 1] });
+  frame();
+  assert.equal(packs, 4, 'a sprite changed');
+  pass.prepare(scene, camera, null, 640, 240, false);
+  assert.equal(packs, 5, 'the viewport changed, which pixel-sized sprites read');
 });
 
 test('an emitter owes particles by its rate and carries time until a frame settles them', () => {
@@ -1333,6 +1454,390 @@ test('a survivor still reads its own skin and weights after another is removed',
   assert.equal(scene.skins[scene.renderableSkin[r]].owner, survivor.entity, 'its own palette');
   assert.equal(scene.morphs[scene.renderableMorph[r]].owner, survivor.entity, 'its own weights');
   close(survivor.weights[0], 0.9, 1e-6, 'node.weights still finds them');
+});
+
+// ---------------------------------------------------------------------------
+// 2D
+
+test('Camera2D maps the world to screen pixels, and back', () => {
+  // Default: a unit is a pixel, the origin is the top-left.
+  const camera = new Camera2D().update(2, 200, 100);
+  vecClose(camera.worldToScreen(10, 20), [10, 20]);
+
+  // Centred on (500, 300), twice as large, turned a quarter.
+  camera.position.set([500, 300]);
+  camera.anchor.set([0.5, 0.5]);
+  camera.zoom = 2;
+  camera.rotation = Math.PI / 2;
+  camera.update(2, 200, 100);
+  vecClose(camera.worldToScreen(500, 300), [100, 50], 1e-3, 'position sits at the anchor');
+  vecClose(camera.worldToScreen(510, 300), [100, 30], 1e-3, 'turned and scaled');
+  vecClose(camera.screenToWorld(100, 30), [510, 300], 1e-3, 'and back');
+
+  // The view projection takes the corners of the screen to clip space's.
+  const p = camera.projection;
+  close(p[0] * 0 + p[12], -1);
+  close(p[5] * 100 + p[13], -1);
+
+  // Snapped, the view's offset is whole pixels.
+  const snapped = new Camera2D({ position: [0.3, 0.6], pixelSnap: true }).update(2, 200, 100);
+  close(snapped.view[12], 0);
+  close(snapped.view[13], -1);
+});
+
+test('spriteSheet gives frames in reading order', () => {
+  const frames = spriteSheet({ columns: 4, rows: 2 });
+  assert.equal(frames.length, 8);
+  assert.deepEqual(frames[0], [0, 0, 0.25, 0.5]);
+  assert.deepEqual(frames[5], [0.25, 0.5, 0.5, 1]);
+  assert.deepEqual(spriteSheet({ columns: 4, rows: 2, first: 2, count: 3 })[0], [0.5, 0, 0.75, 0.5]);
+  assert.throws(() => spriteSheet({ columns: 4, rows: 2, first: 6, count: 3 }), /not all in/);
+  assert.throws(() => spriteSheet({ columns: 0 }), /whole numbers/);
+});
+
+test('2D draws by layer, then in the order added, merging runs that share a texture', () => {
+  const A = { view: {}, width: 4, height: 4 };
+  const B = { view: {}, width: 4, height: 4 };
+  const scene = new Scene({ capacity: 8 });
+  const a = scene.addSprite({ texture: B, layer: 1 });
+  const b = scene.addSprite({ texture: A });
+  const c = scene.addSprite({ texture: B });
+  const d = scene.addSprite({ texture: A, layer: 2 });
+  const { entries, runs } = order2D(scene);
+  assert.deepEqual(entries.map((e) => e[2]), [b, c, a, d].map((n) => n.entity));
+  assert.deepEqual(runs.map((r) => [r.first, r.count]), [[0, 1], [1, 2], [3, 1]]);
+  assert.deepEqual(runs.map((r) => r.texture), [A, B, A]);
+});
+
+test('write2D: frame-sized by default, mirrored by a negative scale, animated by frame', () => {
+  const sheet = { view: {}, width: 64, height: 32 };
+  const scene = new Scene({ capacity: 8 });
+  const node = scene.addSprite({ texture: sheet, position: [40, 30], animation: { frames: spriteSheet({ columns: 4, rows: 2 }), fps: 10 } });
+  node.setAngle(0.5).setScale(-1, 1, 1);
+  scene.update();
+  const out = new Float32Array(SPRITE2D_FLOATS);
+  const write = () => write2D(out, 0, scene.transforms.world, node.entity, scene.sprites.get(node.entity), null);
+
+  write();
+  vecClose(out.subarray(0, 2), [40, 30]);
+  close(out[2], 0.5, 1e-5, 'the angle survives the mirror');
+  close(out[4], -16, 1e-5, 'a frame is 16 texels wide, and mirrored');
+  close(out[5], 16, 1e-5, 'and 16 tall');
+  vecClose(out.subarray(8, 12), [0, 0, 0.25, 0.5]);
+
+  scene.advanceAnimations(0.25);
+  assert.ok(scene.spritesChanged.has(node.entity), 'a new frame marks the sprite changed');
+  write();
+  vecClose(out.subarray(8, 12), [0.5, 0, 0.75, 0.5], 1e-6, 'frame 2 at 0.25 s and 10 fps');
+
+  scene.setSprite(node, { size: [8, 4] });
+  write();
+  close(out[4], -8);
+  close(out[5], 4);
+});
+
+test('setSprite reorders only for what changes the draw order', () => {
+  const texture = { view: {}, width: 4, height: 4 };
+  const scene = new Scene({ capacity: 8 });
+  const node = scene.addSprite({ texture });
+  const order = scene.spriteOrder;
+  scene.setSprite(node, { color: [1, 0, 0, 1] });
+  assert.equal(scene.spriteOrder, order, 'a colour is written in place');
+  assert.ok(scene.spritesChanged.has(node.entity));
+  scene.setSprite(node, { layer: 3 });
+  assert.equal(scene.spriteOrder, order + 1, 'a layer moves it in the list');
+  assert.equal(scene.sprites.get(node.entity).added, 0, 'and it keeps its place within the layer');
+});
+
+test('the 2D view rewrites only the slots of what moved or changed', () => {
+  const view = Object.create(View2D.prototype);
+  view.rhi = { queue: { writeBuffer() {} } };
+  view._uniform = {};
+  view._uniformData = new Float32Array(24);
+  view._upload = () => {};
+  view._data = new Float32Array(0);
+  view._grow = function (count) {
+    if (count * SPRITE2D_FLOATS > this._data.length) this._data = new Float32Array(count * SPRITE2D_FLOATS);
+  };
+  view._buffer = {};
+  view._tilemaps = new Map();
+  view._slots = new Map();
+  view._entries = [];
+  view._runs = [];
+  view._scene = null;
+  view._order = -1;
+  view.count = 0;
+  view.written = 0;
+
+  const texture = { view: {}, width: 4, height: 4 };
+  const scene = new Scene({ capacity: 32 });
+  const nodes = [];
+  for (let i = 0; i < 10; i++) nodes.push(scene.addSprite({ texture, position: [i * 10, 0] }));
+  const camera = new Camera2D();
+  const frame = () => {
+    scene.update();
+    camera.update(1, 320, 240);
+    const t = scene.transforms;
+    view.prepare(scene, camera, 320, 240, t.movedPending ? t.moved : null);
+    t.moved.fill(0, 0, t.capacity);
+    t.movedPending = false;
+    return view.written;
+  };
+
+  assert.equal(frame(), 10, 'the first frame writes every slot');
+  assert.equal(frame(), 0, 'a still frame writes none');
+  camera.position.set([50, 50]);
+  assert.equal(frame(), 0, 'the camera is a uniform: no slot');
+  close(view._uniformData[12], -50);
+  nodes[4].setPosition(45, 5);
+  assert.equal(frame(), 1, 'one node moved: one slot');
+  close(view._data[4 * SPRITE2D_FLOATS], 45);
+  scene.setSprite(nodes[7], { color: [0, 1, 0, 1] });
+  assert.equal(frame(), 1, 'one sprite changed: one slot');
+  scene.addSprite({ texture });
+  assert.equal(frame(), 11, 'a new sprite rebuilds the list');
+  assert.equal(scene.spritesChanged.size, 0, 'and the changes are consumed');
+});
+
+test('a tilemap keeps its ids, and marks the block that changed', () => {
+  const tileset = { view: {}, width: 64, height: 32 };
+  const scene = new Scene({ capacity: 8 });
+  assert.throws(() => scene.addTilemap({ tileset, tileSize: [16, 16], columns: 4, rows: 2, tiles: [1, 2] }), /needs 8/);
+  assert.throws(() => scene.addTilemap({ tileset, tileSize: [16.5, 16], columns: 4, rows: 2 }), /whole texels/);
+  assert.throws(() => scene.addTilemap({ tileset, tileSize: [16, 16], columns: 0, rows: 2 }), /above zero/);
+
+  const map = scene.addTilemap({ tileset, tileSize: [16, 16], columns: 4, rows: 3 });
+  assert.equal(scene.tileAt(map, 1, 1), 0, 'empty to start');
+  scene.setTile(map, 1, 1, 5);
+  scene.setTiles(map, 2, 2, 2, [7, 8]);
+  assert.equal(scene.tileAt(map, 1, 1), 5);
+  assert.equal(scene.tileAt(map, 3, 2), 8);
+  assert.equal(scene.tileAt(map, 3.7, 2.2), 8, 'a point inside a tile reads it');
+  assert.equal(scene.tileAt(map, -1, 0), 0, 'off the map is empty');
+  const record = scene.tilemaps.get(map.entity);
+  assert.deepEqual(record.dirty, [1, 1, 4, 3], 'both blocks, as one');
+  assert.throws(() => scene.setTiles(map, 3, 0, 2, [1, 1]), /not inside/);
+  const flipped = (0x80000000 | 3) >>> 0;
+  scene.setTile(map, 0, 0, flipped);
+  assert.equal(scene.tileAt(map, 0, 0), flipped, 'flip bits kept');
+
+  const order = scene.spriteOrder;
+  scene.setTilemap(map, { color: [1, 0, 0, 1] });
+  assert.equal(scene.tileAt(map, 1, 1), 5, 'setTilemap keeps the tiles');
+  assert.ok(scene.spriteOrder > order);
+  assert.throws(() => scene.setTilemap(map, { columns: 8 }), /needs 24/);
+  scene.remove(map);
+  assert.equal(scene.tilemaps.size, 0);
+});
+
+test('a tilemap draws in its layer as a run of its own, one quad over the map', () => {
+  const tileset = { view: {}, width: 64, height: 32 };
+  const scene = new Scene({ capacity: 8 });
+  scene.addSprite({ texture: tileset, layer: 1 });
+  const a = scene.addTilemap({ tileset, tileSize: [16, 8], columns: 10, rows: 5, pivot: [0, 0] });
+  scene.addTilemap({ tileset, tileSize: [16, 8], columns: 10, rows: 5 });
+  const { entries, runs } = order2D(scene);
+  assert.equal(entries[0][2], a.entity, 'layer 0 first');
+  assert.deepEqual(runs.map((r) => [r.blend, r.count]), [['tilemap', 1], ['tilemap', 1], ['alpha', 1]], 'never merged');
+
+  scene.update();
+  const out = new Float32Array(SPRITE2D_FLOATS);
+  write2D(out, 0, scene.transforms.world, a.entity, scene.tilemaps.get(a.entity), null);
+  vecClose(out.subarray(4, 8), [160, 40, 0, 0], 1e-6, 'size in pixels, pivot top-left');
+  vecClose(out.subarray(8, 12), [0, 0, 10, 5], 1e-6, 'uv counts tiles');
+  vecClose(out.subarray(16, 19), [16, 8, 4], 1e-6, 'tile size, and the tileset is 4 tiles wide');
+  assert.equal(out[3], 4, 'flagged a tilemap');
+  // A 1-texel margin and 2-texel gaps: 1 + 16 + 2 + 16 + 2 + 16 = 53 of 64, and a fourth won't fit.
+  const spaced = scene.addTilemap({ tileset, tileSize: [16, 8], columns: 2, rows: 2, margin: 1, spacing: 2 });
+  scene.update();
+  write2D(out, 0, scene.transforms.world, spaced.entity, scene.tilemaps.get(spaced.entity), null);
+  assert.equal(out[18], 3, 'three tiles fit between the margins');
+  vecClose(out.subarray(20, 22), [1, 2], 1e-6, 'margin and spacing ride along');
+  assert.throws(() => scene.addTilemap({ tileset, tileSize: [16, 8], columns: 1, rows: 1, margin: 0.5 }), /whole texels/);
+});
+
+test('shapes: checked, drawn in their layer, batched together, and scaled by their node', () => {
+  const scene = new Scene({ capacity: 16 });
+  assert.throws(() => scene.addShape({ shape: 'star', size: [1, 1] }), /'rect' or 'ellipse'/);
+  assert.throws(() => scene.addShape({ size: [0, 1] }), /positive/);
+  assert.throws(() => scene.addShape({ size: [1, 1], strokeWidth: -1 }), /0 or more/);
+  const pill = scene.addShape({ size: [40, 10], radius: 99, color: [1, 0, 0, 1], stroke: [0, 0, 1, 1], strokeWidth: 2, position: [100, 50] });
+  assert.equal(scene.shapes.get(pill.entity).radius, 5, 'a corner no bigger than half the shorter side');
+  scene.addShape({ shape: 'ellipse', size: [8, 8] });
+  scene.addShape({ size: [8, 8], blend: 'additive' });
+  const texture = { view: {}, width: 4, height: 4 };
+  scene.addSprite({ texture, layer: -1 });
+
+  const { runs } = order2D(scene);
+  assert.deepEqual(runs.map((r) => [r.blend, r.count, r.texture]), [['alpha', 1, texture], ['shape', 2, null], ['shapeAdditive', 1, null]],
+    'shapes share one draw, whatever their kind');
+
+  pill.setScale(2, 3, 1);
+  scene.update();
+  const out = new Float32Array(SPRITE2D_FLOATS);
+  write2D(out, 0, scene.transforms.world, pill.entity, scene.shapes.get(pill.entity), null);
+  vecClose(out.subarray(4, 6), [80, 30], 1e-5, 'size scaled by the node');
+  vecClose(out.subarray(20, 24), [0, 0, 1, 1], 1e-6, 'the outline colour');
+  vecClose(out.subarray(12, 16), [1, 0, 0, 1], 1e-6, 'the fill');
+  vecClose(out.subarray(16, 20), [40, 15, 10, 4], 1e-5, 'half size; corner and outline by the lesser scale');
+  assert.equal(out[3], 8, 'a shape, not an ellipse');
+
+  const order = scene.spriteOrder;
+  scene.setShape(pill, { strokeWidth: 3 });
+  assert.equal(scene.spriteOrder, order, 'an outline is rewritten in place');
+  scene.setShape(pill, { blend: 'additive' });
+  assert.equal(scene.spriteOrder, order + 1, 'a blend moves it to another run');
+});
+
+test('paths: checked, batched with shapes, their points packed, their quad around the line', () => {
+  const scene = new Scene({ capacity: 16 });
+  assert.throws(() => scene.addPath({ points: [[0, 0]] }), /at least 2/);
+  assert.throws(() => scene.addPath({ points: [[0, 0], [1, NaN]] }), /point 1/);
+  scene.addShape({ size: [4, 4] });
+  const tri = scene.addPath({ points: [[0, 0], [60, 20], [0, 40]], color: [1, 0.8, 0, 1], stroke: [0, 0, 1, 1], strokeWidth: 4, lit: true, position: [100, 50] });
+  const line = scene.addPath({ points: [[-10, 5], [10, 5]], closed: false, strokeWidth: 2 });
+  const { entries, runs, points } = order2D(scene);
+  assert.deepEqual(runs.map((r) => [r.blend, r.count]), [['shape', 3]], 'shapes and paths, one draw');
+  assert.deepEqual([entries[1][3], entries[2][3]], [0, 3], 'where each path starts in the points');
+  assert.deepEqual([...points], [0, 0, 60, 20, 0, 40, -10, 5, 10, 5]);
+
+  tri.setScale(2, 2, 1);
+  scene.update();
+  const out = new Float32Array(SPRITE2D_FLOATS);
+  write2D(out, 0, scene.transforms.world, tri.entity, scene.paths.get(tri.entity), null, 0);
+  vecClose(out.subarray(8, 12), [-2, -2, 62, 42], 1e-6, 'the points, and half the line, in its own units');
+  vecClose(out.subarray(4, 8), [128, 88, 2 / 64, 2 / 44], 1e-5, 'scaled by the node; the pivot at its origin');
+  vecClose(out.subarray(16, 20), [0, 3, 4, 2], 1e-6, 'first point, count, line width, node scale');
+  vecClose(out.subarray(20, 24), [0, 0, 1, 1], 1e-6, 'the line colour');
+  assert.equal(out[3], 32 | 64 | 128, 'a path, closed, lit');
+  write2D(out, 0, scene.transforms.world, line.entity, scene.paths.get(line.entity), null, 3);
+  assert.equal(out[3], 32, 'open, unlit');
+
+  const order = scene.spriteOrder;
+  scene.setPath(tri, { color: [1, 0, 0, 1] });
+  assert.equal(scene.spriteOrder, order, 'a colour is rewritten in place');
+  assert.equal(scene.paths.get(tri.entity).points.length, 6, 'and keeps its points');
+  scene.setPath(tri, { points: [[0, 0], [1, 1], [0, 1]] });
+  assert.equal(scene.spriteOrder, order + 1, 'new points are new GPU data: rebuilt');
+});
+
+test('picking a path: inside by winding, as it fills; near its line', () => {
+  const scene = new Scene({ capacity: 16 });
+  // An L: the notch at the top right is outside, though inside its bounds.
+  const ell = scene.addPath({ points: [[0, 0], [10, 0], [10, 30], [30, 30], [30, 40], [0, 40]], color: [0, 0, 0, 0], position: [100, 100] });
+  const road = scene.addPath({ points: [[0, 0], [100, 0]], closed: false, strokeWidth: 6, position: [0, 200] });
+  const camera = new Camera2D().update(1, 400, 300, 1);
+  const hit = (x, y) => scene.pick(camera, x, y, 400, 300)?.node.entity ?? null;
+  assert.equal(hit(105, 105), ell.entity, 'in the upright, even with a clear fill');
+  assert.equal(hit(125, 135), ell.entity, 'in the foot');
+  assert.equal(hit(125, 110), null, 'in the notch: outside');
+  assert.equal(hit(50, 202.5), road.entity, 'on the line');
+  assert.equal(hit(50, 204), null, 'past half its width');
+});
+
+test('an emitter holds its layer among sprites in 2D, and takes [x, y]', () => {
+  const scene = new Scene({ capacity: 16 });
+  const texture = { view: {}, width: 4, height: 4 };
+  scene.addSprite({ texture, layer: 2 });
+  const sparks = scene.addEmitter({ lifetime: 1, size: 4, layer: 1, direction: [0, -1], acceleration: [0, 300] });
+  scene.addSprite({ texture });
+  const { entries, runs } = order2D(scene);
+  assert.deepEqual(runs.map((r) => [r.blend, r.count]), [['alpha', 1], ['emitter', 0], ['alpha', 1]], 'between the layers, taking no slot');
+  assert.equal(runs[1].emitter, sparks.entity);
+  assert.equal(entries.length, 2);
+  const record = scene.emitters.get(sparks.entity);
+  assert.deepEqual([...record.direction], [0, -1, 0]);
+  assert.deepEqual([...record.acceleration], [0, 300, 0]);
+  const order = scene.spriteOrder;
+  scene.setEmitter(sparks, { layer: 3 });
+  assert.equal(scene.spriteOrder, order + 1, 'a new layer reorders');
+});
+
+test('a light takes [x, y] in 2D, and a spot aims across the view', () => {
+  const scene = new Scene({ capacity: 8 });
+  const lamp = scene.addLight({ position: [40, 60], radius: 100 });
+  const torch = scene.addLight({ position: [0, 0], direction: [0, 1] });
+  scene.update();
+  scene.refreshLights();
+  vecClose(scene.lights.subarray(0, 4), [40, 60, 0, 100]);
+  vecClose(scene.lights.subarray(16 + 8, 16 + 11), [0, 1, 0], 1e-6, 'down the screen');
+  torch.setDirection(-1, 0);
+  scene.update();
+  scene.refreshLights();
+  vecClose(scene.lights.subarray(16 + 8, 16 + 11), [-1, 0, 0], 1e-6, 'turned to the left');
+  assert.ok(lamp.alive);
+});
+
+test('a 2D unit is a CSS pixel on any screen', () => {
+  // A 100 x 50 CSS canvas on a screen with two pixels to a CSS pixel.
+  const camera = new Camera2D({ anchor: [0.5, 0.5], position: [50, 25] }).update(2, 200, 100, 2);
+  vecClose(camera.worldToScreen(10, 20), [20, 40], 1e-4, 'twice as many canvas pixels');
+  vecClose(camera.worldToScreen(50, 25), [100, 50], 1e-4, 'and still centred');
+  vecClose(camera.screenToWorld(20, 40), [10, 20], 1e-4);
+  camera.update(2);
+  assert.equal(camera.pixelRatio, 2, 'kept between frames');
+});
+
+test('picking a 2D view finds what is drawn on top, by its real shape', () => {
+  const scene = new Scene({ capacity: 32 });
+  const texture = { view: {}, width: 16, height: 16 };
+  const font = { metrics: { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', { advance: 0.5, left: 0, width: 0.5, height: 1, descent: 0 }], [' ', { advance: 0.5, left: 0, width: 0, height: 0, descent: 0 }]]) }, ensure() {}, texture: {} };
+  const ball = scene.addShape({ shape: 'ellipse', size: [20, 20], position: [60, 20] });
+  const coin = scene.addSprite({ texture, position: [60, 20], layer: 1 });   // 16 x 16, over the ball's middle
+  const bar = scene.addSprite({ texture, size: [20, 2], position: [20, 60] });
+  bar.setAngle(Math.PI / 4);
+  const label = scene.addText({ font, text: 'a a', size: 10, anchor: [0, 0], position: [100, 100] });
+  const floor = scene.addSprite({ texture, size: [400, 400], pivot: [0, 0], layer: -5 });
+  const map = scene.addTilemap({ tileset: texture, tileSize: [8, 8], columns: 4, rows: 2, tiles: [1, 0, 0, 0, 0, 0, 0, 1], position: [200, 200] });
+
+  // A 400 x 300 CSS canvas at twice the pixels, never moved.
+  const camera = new Camera2D().update(1, 800, 600, 2);
+  const at = (x, y) => scene.pick(camera, x, y, 400, 300);
+  const hit = (x, y) => at(x, y)?.node.entity;
+
+  assert.equal(hit(60, 20), coin.entity, 'the higher layer wins');
+  assert.equal(hit(60, 29), ball.entity, 'below the coin, inside the ball');
+  assert.equal(hit(68.5, 28.5), floor.entity, "inside the ball's box but outside the ball");
+  assert.equal(hit(25, 65), bar.entity, 'along the turned bar');
+  assert.equal(hit(29, 60), floor.entity, 'where the bar would be unturned');
+  // anchor [0, 0] is the text's bottom-left: text lays out y up.
+  assert.equal(hit(107, 96), label.entity, 'between two letters: text is hit by its block');
+  assert.deepEqual(at(200 + 28, 200 + 12).tile, [3, 1], 'a tilemap says which tile');
+  assert.equal(hit(200 + 12, 200 + 4), floor.entity, 'an empty tile shows what is under it');
+  vecClose(at(123, 45).point, [123, 45], 1e-4, 'the world point');
+  scene.remove(floor);
+  assert.equal(at(399, 299), null, 'nothing there');
+});
+
+test('the 2D view uploads all of a new tilemap, then only the tiles changed', () => {
+  globalThis.GPUTextureUsage ??= { TEXTURE_BINDING: 4, COPY_DST: 2 };
+  const writes = [];
+  const destroyed = [];
+  const view = Object.create(View2D.prototype);
+  view._tilemaps = new Map();
+  view.rhi = {
+    device: {
+      limits: { maxTextureDimension2D: 8192 },
+      createTexture: () => { const t = { destroy: () => destroyed.push(t) }; return t; },
+    },
+    queue: { writeTexture: (dst, data, layout, size) => writes.push([dst.origin.x, dst.origin.y, size.width, size.height, layout.offset]) },
+  };
+  const tileset = { view: {}, width: 64, height: 32 };
+  const scene = new Scene({ capacity: 8 });
+  const map = scene.addTilemap({ tileset, tileSize: [16, 16], columns: 50, rows: 20 });
+
+  view._uploadTiles(scene, true);
+  assert.equal(view.tilesWritten, 1000, 'all of it');
+  view._uploadTiles(scene, false);
+  assert.equal(view.tilesWritten, 0, 'nothing changed');
+  scene.setTile(map, 7, 3, 2);
+  view._uploadTiles(scene, false);
+  assert.equal(view.tilesWritten, 1, 'one tile');
+  assert.deepEqual(writes.at(-1), [7, 3, 1, 1, (3 * 50 + 7) * 4], 'read from its place in the map');
+  scene.remove(map);
+  view._uploadTiles(scene, true);
+  assert.equal(destroyed.length, 1, 'a removed map gives its texture back');
+  assert.equal(view._tilemaps.size, 0);
 });
 
 console.log(`\n${passed} checks passed\n`);

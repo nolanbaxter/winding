@@ -42,13 +42,30 @@ export class GLTFTextures {
     return result;
   }
 
+  /**
+   * Make an image's textures now, as its decode lands, in every colour space
+   * `spaces` says it is read in -- so they upload while other images are
+   * still arriving, not all at once after the last.
+   */
+  upload(imageIndex, bitmap, spaces) {
+    if (spaces?.srgb) this._make(imageIndex, bitmap, true);
+    if (spaces?.linear) this._make(imageIndex, bitmap, false);
+  }
+
   _texture(textureIndex, srgb) {
     const imageIndex = textureImageIndex(this.json, textureIndex);
     if (imageIndex < 0) return null;
 
+    const key = `${imageIndex}:${srgb ? 1 : 0}`;
+    const made = this._textures.get(key);
+    if (made) return made;
+
     const bitmap = this.bitmaps[imageIndex];
     if (!bitmap) return null;            // decode failed; the factor stands in
+    return this._make(imageIndex, bitmap, srgb);
+  }
 
+  _make(imageIndex, bitmap, srgb) {
     const key = `${imageIndex}:${srgb ? 1 : 0}`;
     let texture = this._textures.get(key);
     if (texture) return texture;

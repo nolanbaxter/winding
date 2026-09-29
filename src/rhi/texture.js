@@ -44,6 +44,48 @@ fn vs(@builtin(vertex_index) index : u32) -> VertexOut {
 fn fs(v : VertexOut) -> @location(0) vec4<f32> {
   return textureSample(source, samp, v.uv);
 }
+
+// The weighted sum of a block of texels, each counted by how much it covers:
+// premultiplied colour and coverage together.
+fn covering(corner : vec2<i32>, span : i32) -> vec4<f32> {
+  let size = vec2<i32>(textureDimensions(source));
+  var sum = vec4<f32>(0.0);
+  for (var y = 0; y < span; y++) {
+    for (var x = 0; x < span; x++) {
+      let c = textureLoad(source, clamp(corner + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0);
+      sum += vec4<f32>(c.rgb * c.a, c.a);
+    }
+  }
+  return sum;
+}
+
+// A mip: half the level above, each texel weighted by its alpha. A clear
+// texel's colour is whatever it decoded as -- black, usually -- and averaged
+// in plainly it darkens every edge it meets. Where all four are clear, the
+// colour comes from the ring around them, so a clear border takes its edge's
+// colour a texel further at every level, and the next level down finds it.
+@fragment
+fn fsHalve(v : VertexOut) -> @location(0) vec4<f32> {
+  let base = vec2<i32>(floor(v.position.xy)) * 2;
+  let near = covering(base, 2);
+  if (near.a > 0.0) { return vec4<f32>(near.rgb / near.a, near.a / 4.0); }
+  let ring = covering(base - 1, 4);
+  if (ring.a > 0.0) { return vec4<f32>(ring.rgb / ring.a, 0.0); }
+  return vec4<f32>(0.0);
+}
+
+// The full-size level, once: a clear texel takes its covered neighbours'
+// colour, keeping its alpha, so a filter enlarging the image blends an edge
+// toward its own colour and not toward black.
+@fragment
+fn fsBleed(v : VertexOut) -> @location(0) vec4<f32> {
+  let at = vec2<i32>(floor(v.position.xy));
+  let c = textureLoad(source, at, 0);
+  if (c.a > 0.0) { return c; }
+  let ring = covering(at - 1, 3);
+  if (ring.a > 0.0) { return vec4<f32>(ring.rgb / ring.a, 0.0); }
+  return c;
+}
 `;
 
 export function mipLevelCountFor(width, height) {
@@ -114,20 +156,51 @@ export function uploadImage(rhi, texture, source) {
 }
 
 /**
- * Fill mips 1..n by successively halving. Each level is a render pass sampling
- * the level above with a linear filter, which is a box filter -- good enough
- * for everything except normal maps, where it slowly flattens the surface.
+ * Fill mips 1..n by successively halving. Each level is a render pass reading
+ * the level above: a box filter, each texel weighted by its alpha (fsHalve) --
+ * good enough for everything except normal maps, where it slowly flattens the
+ * surface. For a texture with no clear texels it is the plain box filter.
+ *
+ * `bleed` first gives the full-size level's clear texels their neighbours'
+ * colour (fsBleed), for an image that is enlarged with a smooth filter: a
+ * sprite's. It needs the texture to allow COPY_DST, as every one made by
+ * createTexture2D does.
  *
  * ponytail: box filter. A Kaiser or tent filter is better for detail
  * preservation, and normal maps really want renormalization per level. Both are
  * a different fragment shader in this same loop.
  */
-export function generateMipmaps(rhi, texture) {
-  if (texture.mipLevelCount <= 1) return;
+export function generateMipmaps(rhi, texture, { bleed = false } = {}) {
+  if (texture.mipLevelCount <= 1 && !bleed) return;
 
-  const { pipeline, layout } = mipPipelineFor(rhi, texture.format);
+  const { pipeline, layout } = mipPipelineFor(rhi, texture.format, 'fsHalve');
   const sampler = linearSampler(rhi);
   const encoder = rhi.device.createCommandEncoder({ label: 'mipmaps' });
+
+  let scratch = null;
+  if (bleed) {
+    // Rendered beside the texture, then copied over its first level: a pass
+    // cannot read the level it writes.
+    scratch = rhi.device.createTexture({
+      label: 'bleed', size: [texture.width, texture.height], format: texture.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    const bleeding = mipPipelineFor(rhi, texture.format, 'fsBleed');
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: scratch.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+    });
+    pass.setPipeline(bleeding.pipeline);
+    pass.setBindGroup(0, rhi.device.createBindGroup({
+      layout: bleeding.layout,
+      entries: [
+        { binding: 0, resource: texture.createView({ baseMipLevel: 0, mipLevelCount: 1, dimension: '2d' }) },
+        { binding: 1, resource: sampler },
+      ],
+    }));
+    pass.draw(3);
+    pass.end();
+    encoder.copyTextureToTexture({ texture: scratch }, { texture, mipLevel: 0 }, [texture.width, texture.height]);
+  }
 
   // Every array layer, which is what makes this work for a cubemap: its six
   // faces are six layers, and reducing only layer 0 would leave five of them
@@ -167,15 +240,19 @@ export function generateMipmaps(rhi, texture) {
   }
 
   rhi.queue.submit([encoder.finish()]);
+  // Freed once the work above is done with it, not before.
+  scratch?.destroy();
 }
 
 /**
  * The mip pipeline for a format, and the layout its bind groups use. One per
- * (device, format), from the shared cache: building it per texture would be
- * the pipeline-creation stall this engine spends a whole cache avoiding. An
- * explicit layout, not 'auto', so it is a plain descriptor like the rest.
+ * (device, format, entry), from the shared cache: building it per texture
+ * would be the pipeline-creation stall this engine spends a whole cache
+ * avoiding. An explicit layout, not 'auto', so it is a plain descriptor like
+ * the rest. `entry` 'fs', the default, resamples at any size (decals use it);
+ * 'fsHalve' makes a mip and 'fsBleed' a bled first level.
  */
-export function mipPipelineFor(rhi, format) {
+export function mipPipelineFor(rhi, format, entry = 'fs') {
   const device = rhi.device;
   const { shader, layout, pipelineLayout } = cached(rhi, 'mip', () => {
     const layout = device.createBindGroupLayout({
@@ -192,9 +269,10 @@ export function mipPipelineFor(rhi, format) {
     };
   });
   const pipeline = sharedPipelines(device).get({
-    label: `mipmap:${format}`,
+    label: `mipmap:${format}:${entry}`,
     layout: pipelineLayout,
     shader,
+    fragmentEntry: entry,
     targets: [{ format }],
     // The full-screen triangle winds clockwise, and the cache culls back faces
     // unless told otherwise.
@@ -232,6 +310,20 @@ export function linearSampler(rhi) {
     // the driver silently clamps -- which is the one case where asking for more
     // than you can have is safe.
     maxAnisotropy: 16,
+  }));
+}
+
+/**
+ * For a texture loaded `pixelated`: magnified, each texel stays a hard-edged
+ * square, as CSS's image-rendering: pixelated draws one; shrunk, it filters
+ * through the mips like any other, since nearest there only shimmers. Clamped:
+ * a sprite's edge must not pick up the texel across the image.
+ */
+export function pixelatedSampler(rhi) {
+  return cached(rhi, 'pixelated', () => rhi.device.createSampler({
+    label: 'pixelated',
+    magFilter: 'nearest', minFilter: 'linear', mipmapFilter: 'linear',
+    addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
   }));
 }
 

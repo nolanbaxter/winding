@@ -13,7 +13,7 @@
 // full frame records and submits without the device complaining.
 
 import { EXTENSION_TEXTURES } from '../src/scene/gltf/images.js';
-import { Winding, Camera } from '../src/winding.js';
+import { Winding, Camera, Camera2D } from '../src/winding.js';
 import { Benchmark } from '../src/bench.js';
 import { Environment } from '../src/render/ibl.js';
 import { CLUSTER_Z, MAX_LIGHTS_PER_CLUSTER } from '../src/render/clustered.js';
@@ -1121,6 +1121,47 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report.join(', ');
   });
 
+  await step('a point light keeps its shadow maps while nothing near it moves, and redraws when a caster does', async () => {
+    // The cached frame must be the frame a fresh draw gives, pixel for pixel;
+    // a caster that moves must take its shadow with it; and something moving
+    // far outside the light's reach must not cost it a draw.
+    const ground = await engine.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], roughnessFactor: 0.9 }));
+    const block = await engine.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.2, 0.2, 1] }));
+    const cam = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    cam.position.set([0, 6, 0.01]);
+    cam.target.set([0, 0, 0]);
+    const scene = engine.createScene();
+    scene.add(ground).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
+    const blocker = scene.add(block).setRotationAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
+    const far = scene.add(block).setPosition(40, 0, 0);
+    scene.addLight({ type: 'point', position: [0, 3, 0], intensity: 40, radius: 8, castShadow: true });
+    const frame = async () => {
+      engine.renderFrame(scene, cam);
+      const pixels = await engine.rhi.readPixels();
+      return { pixels, drawn: engine.renderer.stats.shadowViewsDrawn };
+    };
+    const { width, height } = engine.rhi;
+    const lum = (pixels, fx) => {
+      const i = (Math.floor(height / 2) * width + Math.floor(fx * width)) * 4;
+      return 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
+    };
+    const same = (a, b) => a.every((v, i) => v === b[i]);
+
+    const first = await frame();
+    const kept = await frame();
+    far.setPosition(41, 0, 0);
+    const farMoved = await frame();
+    blocker.setPosition(1.2, 1, 0);
+    const moved = await frame();
+    const keptAgain = await frame();
+    const report = `drawn ${first.drawn}, ${kept.drawn}, ${farMoved.drawn} (far caster moved), ${moved.drawn} (blocker moved), ${keptAgain.drawn}; `
+      + `centre ${lum(first.pixels, 0.5).toFixed(0)} -> ${lum(moved.pixels, 0.5).toFixed(0)}`;
+    if (first.drawn !== 6 || kept.drawn !== 0 || farMoved.drawn !== 0 || moved.drawn !== 6 || keptAgain.drawn !== 0) throw new Error(report);
+    if (!same(first.pixels, kept.pixels) || !same(moved.pixels, keptAgain.pixels)) throw new Error(`${report}; a kept map drew a different frame`);
+    if (!(lum(moved.pixels, 0.5) > lum(first.pixels, 0.5) + 20)) throw new Error(`${report}; the shadow did not leave the centre`);
+    return report;
+  });
+
 
   await step('an equirectangular map becomes the sky, the right way round', async () => {
     // Above the horizon: green on the half of the panorama centred on +X (the
@@ -1651,6 +1692,449 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       && additive.middle[0] > additive.middle[1] + 60 && additive.middle[1] > 40
       && upright.lit * 4 < facing.lit
       && cutout.at(0.45)[0] < 20 && cutout.at(0.55)[0] > 200;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('2D lands colours exactly, blends in sRGB, stacks by layer, keeps pixel art sharp, and moves one slot', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.rhi.device.pushErrorScope('validation');
+    const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
+    const sharp = await probe.loadTexture(twoToneImageURI('#ff0000', '#0000ff'), { pixelated: true });
+    const smooth = await probe.loadTexture(twoToneImageURI('#ff0000', '#0000ff'));
+    const { width: W, height: H, pixelRatio: r } = probe.rhi;
+    const scene = probe.createScene();
+    // A unit is a CSS pixel: places and sizes are fractions of the view, in them.
+    const box = (texture, x, y, w, h, options = {}) => scene.addSprite({
+      texture, position: [x * W / r, y * H / r], size: [w * W / r, h * H / r], pivot: [0, 0], ...options,
+    });
+    const camera = new Camera2D({ background: [1, 1, 1, 1] });
+    // rgb(128, 128, 128), as CSS writes it.
+    const grey = box(white, 0.05, 0.1, 0.1, 0.2, { color: [128 / 255, 128 / 255, 128 / 255, 1] });
+    box(white, 0.25, 0.1, 0.1, 0.2, { color: [0, 0, 0, 0.5] });
+    // Red is added first but on a higher layer: it must still be on top.
+    box(white, 0.45, 0.1, 0.2, 0.2, { color: [1, 0, 0, 1], layer: 1 });
+    box(white, 0.55, 0.1, 0.2, 0.2, { color: [0, 1, 0, 1] });
+    box(sharp, 0.05, 0.5, 0.4, 0.2);
+    box(smooth, 0.55, 0.5, 0.4, 0.2);
+
+    const shoot = async () => {
+      probe.renderFrame(scene, camera);
+      const pixels = await probe.rhi.readPixels();
+      return (x, y) => {
+        const i = (Math.floor(y * H) * W + Math.floor(x * W)) * 4;
+        return [pixels[i], pixels[i + 1], pixels[i + 2]];
+      };
+    };
+    const first = await shoot();
+    const written = probe.stats.sprites2DWritten;
+    grey.setPosition(0.05 * W / r, 0.75 * H / r);
+    const second = await shoot();
+    const movedWritten = probe.stats.sprites2DWritten;
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const show = (p) => `rgb(${p.join(',')})`;
+    const at = {
+      grey: first(0.1, 0.2), half: first(0.3, 0.2), overlap: first(0.6, 0.2), green: first(0.7, 0.2),
+      background: first(0.5, 0.95), sharp: first(0.05 + 0.4 * 0.45, 0.6), smooth: first(0.55 + 0.4 * 0.45, 0.6),
+      left: second(0.1, 0.2), arrived: second(0.1, 0.85),
+    };
+    const report = `grey ${show(at.grey)}, half black over white ${show(at.half)}, overlap ${show(at.overlap)}, `
+      + `green ${show(at.green)}, background ${show(at.background)}; just left of the middle of a 2-texel sprite: `
+      + `pixelated ${show(at.sharp)}, smooth ${show(at.smooth)}; moved: ${show(at.left)} where it was, `
+      + `${show(at.arrived)} where it went, ${written} then ${movedWritten} slots written`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const is = (p, rgb, tolerance = 0) => p.every((c, k) => Math.abs(c - rgb[k]) <= tolerance);
+    // Blended in linear light, half black over white would be 188.
+    const ok = is(at.grey, [128, 128, 128]) && is(at.half, [127, 127, 127], 1)
+      && is(at.overlap, [255, 0, 0]) && is(at.green, [0, 255, 0]) && is(at.background, [255, 255, 255])
+      && is(at.sharp, [255, 0, 0]) && at.smooth[2] > 40
+      && is(at.left, [255, 255, 255]) && is(at.arrived, [128, 128, 128])
+      && written === 6 && movedWritten === 1;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('a tilemap draws its tiles, flipped as Tiled flips them, shows through where empty, and uploads one changed tile', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.rhi.device.pushErrorScope('validation');
+    // One tile, two texels: red on its left, blue on its right.
+    const tileset = await probe.loadTexture(twoToneImageURI('#ff0000', '#0000ff'), { pixelated: true });
+    const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
+    const scene = probe.createScene();
+    const camera = new Camera2D({ background: [1, 1, 1, 1] });
+    const FLIP_X = 0x80000000;
+    // Three tiles, each 40 x 20 pixels from (20, 20): plain, mirrored, empty.
+    const map = scene.addTilemap({ tileset, tileSize: [2, 1], columns: 3, rows: 1, tiles: [1, (FLIP_X | 1) >>> 0, 0], position: [20, 20] });
+    map.setScale(20, 20, 1);
+    // Green on a lower layer, under the whole map.
+    scene.addSprite({ texture: white, color: [0, 1, 0, 1], position: [20, 20], size: [120, 20], pivot: [0, 0], layer: -1 });
+
+    const shoot = async () => {
+      probe.renderFrame(scene, camera);
+      const pixels = await probe.rhi.readPixels();
+      // x in CSS pixels, read at the canvas pixel it lands on.
+      const { width: W, pixelRatio: r } = probe.rhi;
+      return (x) => [0, 1, 2].map((c) => pixels[(Math.floor(30 * r) * W + Math.floor(x * r)) * 4 + c]);
+    };
+    const first = await shoot();
+    const uploaded = probe.stats.tiles2DWritten;
+    scene.setTile(map, 2, 0, 1);
+    const second = await shoot();
+    const changed = probe.stats.tiles2DWritten;
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const show = (p) => `rgb(${p.join(',')})`;
+    const at = { plain: [first(30), first(50)], flipped: [first(70), first(90)], empty: first(120), set: second(110) };
+    const report = `plain ${show(at.plain[0])} | ${show(at.plain[1])}, mirrored ${show(at.flipped[0])} | ${show(at.flipped[1])}, `
+      + `empty ${show(at.empty)}; set later ${show(at.set)}; ${uploaded} then ${changed} tiles uploaded`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const is = (p, rgb) => p.every((c, k) => c === rgb[k]);
+    const red = [255, 0, 0], blue = [0, 0, 255];
+    const ok = is(at.plain[0], red) && is(at.plain[1], blue) && is(at.flipped[0], blue) && is(at.flipped[1], red)
+      && is(at.empty, [0, 255, 0]) && is(at.set, red) && uploaded === 3 && changed === 1;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('a HUD overlay draws over the finished 3D frame: exact colours, round shapes, a one-pixel edge', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, { environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } } });
+    probe.rhi.device.pushErrorScope('validation');
+    const wall = await probe.load(buildFeatureGLB({ baseColorFactor: [0.5, 0.5, 0.5, 1], materialExtensions: { KHR_materials_unlit: {} } }));
+    const scene = probe.createScene();
+    scene.add(wall).setPosition(0, 0, -1).setScale(4, 4, 1);
+    const camera = new Camera({ fovY: 1, near: 0.1 });
+    camera.position.set([0, 0, 0]);
+    camera.target.set([0, 0, -1]);
+    const { width: W, height: H, pixelRatio: r } = probe.rhi;
+    const cx = W >> 1, cy = H >> 1;
+    // Laid out in canvas pixels, to read single ones back: a unit is a CSS pixel.
+    const px = (v) => v / r;
+
+    const hud = probe.createScene();
+    const grey = 128 / 255;
+    // Top-left, a bar with round ends, off the wall's middle.
+    hud.addShape({ size: [px(100), px(40)], radius: px(20), color: [grey, grey, grey, 1], pivot: [0, 0], position: [px(20), px(20)] });
+    // Centred on a pixel's centre, so its outer edge crosses one pixel's centre.
+    hud.addShape({
+      shape: 'ellipse', size: [px(60), px(60)], color: [0, 0, 1, 1], stroke: [1, 0, 0, 1], strokeWidth: px(6),
+      position: [px(cx + 0.5), px(cy + 0.5)],
+    });
+
+    probe.renderFrame(scene, camera, { overlay: { scene: hud } });
+    const pixels = await probe.rhi.readPixels();
+    const at = (x, y) => [0, 1, 2].map((c) => pixels[(y * W + x) * 4 + c]);
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const show = (p) => `rgb(${p.join(',')})`;
+    const wallColour = at(cx + 50, cy);
+    const edge = [];
+    for (let x = cx + 26; x <= cx + 36; x++) edge.push(at(x, cy));
+    const is = (p, rgb) => p.every((c, k) => c === rgb[k]);
+    const partial = edge.filter((p) => !is(p, [255, 0, 0]) && !is(p, wallColour)).length;
+    const read = {
+      // A capsule: straight along its top, round at its ends.
+      bar: at(70, 40), corner: at(20, 20), barEdge: at(70, 20), centre: at(cx, cy), ring: at(cx + 27, cy),
+    };
+    const report = `3D wall ${show(wallColour)}; HUD bar ${show(read.bar)}, its rounded corner ${show(read.corner)}, `
+      + `its top edge ${show(read.barEdge)}; circle ${show(read.centre)}, outline ${show(read.ring)}, `
+      + `${partial} partial pixel across its outer edge`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const ok = wallColour[0] > 40 && is(read.bar, [128, 128, 128]) && is(read.corner, wallColour)
+      && is(read.barEdge, [128, 128, 128]) && is(read.centre, [0, 0, 255]) && is(read.ring, [255, 0, 0]) && partial === 1;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('picking a 2D view names what each pixel shows, and text wraps to its width', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.rhi.device.pushErrorScope('validation');
+    const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
+    const font = await probe.loadFont('32px sans-serif');
+    const scene = probe.createScene();
+    const camera = new Camera2D({ background: [1, 1, 1, 1] });
+    const ball = scene.addShape({ shape: 'ellipse', size: [100, 60], color: [1, 0, 0, 1], position: [80, 70] });
+    ball.setAngle(0.5);
+    const bar = scene.addSprite({ texture: white, color: [0, 1, 0, 1], size: [90, 30], position: [230, 70], layer: 1 });
+    bar.setAngle(-0.6);
+    // Three words, each about 40 pixels wide at 20, in a 70-pixel box: three lines.
+    scene.addText({ font, text: 'wide wide wide', size: 20, width: 70, anchor: [0, 1], color: [0, 0, 1, 1], position: [20, 140] });
+
+    probe.renderFrame(scene, camera);
+    const pixels = await probe.rhi.readPixels();
+    const { width: W, pixelRatio: r } = probe.rhi;
+    const colour = (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    // Every pure pixel on a grid, against what a pick there names. Edges
+    // (blended colours) and text ink are skipped.
+    const is = (p, rgb) => p.every((c, k) => c === rgb[k]);
+    let checked = 0;
+    const wrong = [];
+    for (let y = 1; y < 240; y += 6) {
+      for (let x = 1; x < 320; x += 6) {
+        const p = colour(x, y);
+        const expected = is(p, [255, 0, 0]) ? ball.entity : is(p, [0, 255, 0]) ? bar.entity : is(p, [255, 255, 255]) ? null : undefined;
+        if (expected === undefined) continue;
+        // At the pixel's centre, where the GPU decided its colour.
+        const hit = scene.pick(camera, (Math.floor(x * r) + 0.5) / r, (Math.floor(y * r) + 0.5) / r, 320, 240);
+        // White inside the text's block is the text's, by design.
+        if (expected === null && hit !== null && scene.texts.has(hit.node.entity)) continue;
+        checked++;
+        if ((hit?.node.entity ?? null) !== expected) wrong.push(`(${x}, ${y}) shows rgb(${p}) and picks ${hit === null ? 'nothing' : hit.node.entity}`);
+      }
+    }
+    // The text's ink: its height says how many lines it wrapped to.
+    let top = Infinity, bottom = -Infinity, left = Infinity, right = -Infinity;
+    for (let y = 130; y < 240; y++) {
+      for (let x = 0; x < 200; x++) {
+        const [red, , blue] = colour(x, y);
+        if (blue - red > 100) { top = Math.min(top, y); bottom = Math.max(bottom, y); left = Math.min(left, x); right = Math.max(right, x); }
+      }
+    }
+    const report = `${checked} pixels checked against a pick, ${wrong.length} wrong${wrong.length ? `: ${wrong.slice(0, 3).join('; ')}` : ''}; `
+      + `wrapped text inked ${right - left + 1} x ${bottom - top + 1} px in a 70 px box`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    // Three lines at 20 px a line are more than 40 px tall; one would be under 25.
+    if (!(wrong.length === 0 && checked > 1000 && bottom - top > 40 && right - left < 72)) throw new Error(report);
+    return report;
+  });
+
+  await step('particles draw in a 2D view, in its colours, between the layers around them', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.rhi.device.pushErrorScope('validation');
+    const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
+    const scene = probe.createScene();
+    const camera = new Camera2D();
+    // A still cloud of 40-pixel dots at (100, 100), on layer 1: under a green
+    // card on layer 2 over its right half, over a blue one on layer 0.
+    const cloud = scene.addEmitter({ lifetime: 60, size: 40, speed: 0, color: [1, 0, 0, 1], blend: 'alpha', layer: 1, position: [100, 100] });
+    scene.addSprite({ texture: white, color: [0, 1, 0, 1], size: [60, 60], pivot: [0, 0.5], position: [100, 100], layer: 2 });
+    scene.addSprite({ texture: white, color: [0, 0, 1, 1], size: [100, 100], position: [100, 100] });
+    scene.burst(cloud, 40);
+    scene.advanceParticles(0.016);
+    probe.renderFrame(scene, camera);
+    const pixels = await probe.rhi.readPixels();
+    const { width: W, pixelRatio: r } = probe.rhi;
+    const at = (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+    const show = (p) => `rgb(${p.join(',')})`;
+    const read = { centre: at(97, 100), under: at(103, 100), rim: at(100 - 30, 100) };
+    const report = `the cloud's middle ${show(read.centre)}, under the card ${show(read.under)}, past its rim ${show(read.rim)}`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const is = (p, rgb) => p.every((c, k) => c === rgb[k]);
+    // Forty dots, each opaque at its middle: red. The card is on top; past the dots, the blue card below.
+    if (!(is(read.centre, [255, 0, 0]) && is(read.under, [0, 255, 0]) && is(read.rim, [0, 0, 255]))) throw new Error(report);
+    return report;
+  });
+
+  await step('debug lines draw over a 2D view, in its sRGB colours, and last one frame', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.rhi.device.pushErrorScope('validation');
+    const scene = probe.createScene();
+    const camera = new Camera2D();
+    const shoot = async () => {
+      probe.renderFrame(scene, camera);
+      const pixels = await probe.rhi.readPixels();
+      const { width: W, pixelRatio: r } = probe.rhi;
+      return (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
+    };
+    // On pixel centres, so each lands on one row or column.
+    probe.debug.box([40.5, 150.5], [120.5, 190.5], [1, 0, 1]);
+    probe.debug.circle([200.5, 170.5], 20, [0.5, 0.5, 0.5]);
+    const first = await shoot();
+    const second = await shoot();
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+    const show = (p) => `rgb(${p.join(',')})`;
+    const read = { edge: first(80, 150), side: first(40, 170), inside: first(80, 170), circle: first(220, 170), gone: second(80, 150) };
+    const report = `box edge ${show(read.edge)}, side ${show(read.side)}, inside ${show(read.inside)}; grey circle ${show(read.circle)}; `
+      + `the next frame ${show(read.gone)}`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const is = (p, rgb) => p.every((c, k) => c === rgb[k]);
+    // Grey 0.5 is 128 as sRGB; as linear light it would be 188.
+    if (!(is(read.edge, [255, 0, 255]) && is(read.side, [255, 0, 255]) && is(read.inside, [0, 0, 0])
+      && is(read.circle, [128, 128, 128]) && is(read.gone, [0, 0, 0]))) throw new Error(report);
+    return report;
+  });
+
+  await step('a smooth sprite with clear pixels leaves no dark fringe, enlarged or shrunk', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.rhi.device.pushErrorScope('validation');
+    // White on the left, clear on the right. Clear pixels decode with black in
+    // them, which filtering must not let through.
+    const small = await probe.loadTexture(twoToneImageURI('#ffffff', 'rgba(255,255,255,0)'));
+    const sheet = document.createElement('canvas');
+    sheet.width = sheet.height = 64;
+    const g = sheet.getContext('2d');
+    g.fillStyle = '#ffffff';
+    // 28, not 32: the edge off every mip's texel boundary, so levels average across it.
+    g.fillRect(0, 0, 28, 64);
+    const large = await probe.loadTexture(sheet.toDataURL('image/png'));
+    const scene = probe.createScene();
+    const camera = new Camera2D({ background: [1, 1, 1, 1] });
+    scene.addSprite({ texture: small, size: [200, 40], pivot: [0, 0], position: [20, 20] });   // enlarged 100 times
+    scene.addSprite({ texture: large, size: [8, 8], pivot: [0, 0], position: [20, 100] });     // shrunk 8 times: mip 3
+    probe.renderFrame(scene, camera);
+    const pixels = await probe.rhi.readPixels();
+    const { width: W, pixelRatio: r } = probe.rhi;
+    const darkest = (y, x0, x1) => {
+      let low = 255;
+      for (let x = Math.floor(x0 * r); x < Math.ceil(x1 * r); x++) low = Math.min(low, pixels[(Math.floor(y * r) * W + x) * 4]);
+      return low;
+    };
+    const enlarged = darkest(40, 20, 220), shrunk = darkest(104, 20, 28);
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+    const report = `darkest pixel over white: ${enlarged} enlarged, ${shrunk} shrunk (255 is none)`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    if (!(enlarged >= 253 && shrunk >= 253)) throw new Error(report);
+    return report;
+  });
+
+  await step("a tileset's margin and gaps are stepped over, and a diagonal flip swaps a tile's axes as Tiled's does", async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.rhi.device.pushErrorScope('validation');
+    // Two 2x2 tiles in a 1-texel margin with a 1-texel gap, all of which is
+    // magenta: tile 1 is red, green / blue, white; tile 2 yellow.
+    const sheet = document.createElement('canvas');
+    sheet.width = 7;
+    sheet.height = 4;
+    const g = sheet.getContext('2d');
+    g.fillStyle = '#ff00ff';
+    g.fillRect(0, 0, 7, 4);
+    for (const [x, y, c] of [[1, 1, '#ff0000'], [2, 1, '#00ff00'], [1, 2, '#0000ff'], [2, 2, '#ffffff'], [4, 1, '#ffff00'], [5, 1, '#ffff00'], [4, 2, '#ffff00'], [5, 2, '#ffff00']]) {
+      g.fillStyle = c;
+      g.fillRect(x, y, 1, 1);
+    }
+    const tileset = await probe.loadTexture(sheet.toDataURL('image/png'), { pixelated: true });
+    const scene = probe.createScene();
+    const camera = new Camera2D();
+    const DIAGONAL = 0x20000000;
+    const map = scene.addTilemap({ tileset, tileSize: [2, 2], margin: 1, spacing: 1, columns: 3, rows: 1, tiles: [1, DIAGONAL | 1, 2], position: [20, 100] });
+    map.setScale(20, 20, 1);
+    probe.renderFrame(scene, camera);
+    const pixels = await probe.rhi.readPixels();
+    const { width: W, pixelRatio: r } = probe.rhi;
+    const at = (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
+    let magenta = 0;
+    for (let y = 100; y < 140; y++) for (let x = 20; x < 140; x++) { const [red, green, blue] = at(x, y); if (red > 200 && blue > 200 && green < 50) magenta++; }
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    // Each tile is 40 pixels; its quarters' centres are 10 in from its corners.
+    const quarters = (x) => [at(x + 10, 110), at(x + 30, 110), at(x + 10, 130), at(x + 30, 130)];
+    const plain = quarters(20), flipped = quarters(60), second = at(120, 120);
+    const show = (ps) => ps.map((p) => `rgb(${p.join(',')})`).join(' ');
+    const report = `plain ${show(plain)}; diagonal ${show(flipped)}; second tile ${show([second])}; ${magenta} magenta pixels`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const R = [255, 0, 0], G = [0, 255, 0], B = [0, 0, 255], Wh = [255, 255, 255];
+    const same = (ps, expected) => ps.every((p, i) => p.every((c, k) => c === expected[i][k]));
+    if (!(same(plain, [R, G, B, Wh]) && same(flipped, [R, B, G, Wh]) && same([second], [[255, 255, 0]]) && magenta === 0)) throw new Error(report);
+    return report;
+  });
+
+  await step('2D paths fill concave outlines and stroke lines exactly; 2D lights light only what is lit', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.rhi.device.pushErrorScope('validation');
+    const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
+    const scene = probe.createScene();
+    const camera = new Camera2D();
+    // The left half: a lit white floor under one light; a strip of it unlit.
+    scene.addSprite({ texture: white, size: [160, 200], pivot: [0, 0], lit: true });
+    scene.addSprite({ texture: white, size: [160, 20], pivot: [0, 0], position: [0, 210] });
+    // On a pixel's centre, so the pixels read below are exact distances from it.
+    scene.addLight({ position: [80.5, 100.5], radius: 60 });
+    // Bottom right: a lit strip under a spot aimed right, in a cone 0.3 wide.
+    scene.addSprite({ texture: white, size: [140, 56], pivot: [0, 0], position: [170, 180], lit: true });
+    scene.addLight({ position: [175.5, 207.5], direction: [1, 0], radius: 200, innerAngle: 0.2, outerAngle: 0.3 });
+    // The right half: an L filled red, its notch empty; a blue line 6 wide.
+    scene.addPath({ points: [[0, 0], [10, 0], [10, 30], [30, 30], [30, 40], [0, 40]], color: [1, 0, 0, 1], position: [200, 20] });
+    scene.addPath({ points: [[0, 0], [100, 0]], closed: false, color: [0, 0, 0, 0], stroke: [0, 0, 1, 1], strokeWidth: 6, position: [200, 150] });
+
+    const shoot = async () => {
+      probe.renderFrame(scene, camera);
+      const pixels = await probe.rhi.readPixels();
+      const { width: W, pixelRatio: r } = probe.rhi;
+      return (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
+    };
+    const dark = await shoot();
+    camera.ambient.set([0.2, 0.2, 0.2]);
+    const dim = await shoot();
+    const error = await probe.rhi.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const show = (p) => `rgb(${p.join(',')})`;
+    const read = {
+      centre: dark(80.5, 100.5), half: dark(110.5, 100.5), beyond: dark(150.5, 100.5), unlit: dark(80.5, 220.5),
+      ambient: dim(150.5, 100.5), ell: dark(205.5, 25.5), foot: dark(225.5, 55.5), notch: dark(225.5, 35.5),
+      line: dark(250.5, 152.5), past: dark(250.5, 153.5),
+      aimed: dark(240.5, 207.5), aside: dark(240.5, 234.5), behind: dark(171.5, 207.5),
+    };
+    const report = `light: ${show(read.centre)} at the light, ${show(read.half)} half its radius out, ${show(read.beyond)} past it, `
+      + `${show(read.ambient)} past it under a 0.2 ambient, ${show(read.unlit)} unlit; path: ${show(read.ell)} and ${show(read.foot)} `
+      + `inside the L, ${show(read.notch)} in its notch; line ${show(read.line)} inside, ${show(read.past)} past its edge; `
+      + `spot ${show(read.aimed)} along its aim, ${show(read.aside)} outside its cone, ${show(read.behind)} behind it`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const is = (p, rgb, tolerance = 0) => p.every((c, k) => Math.abs(c - rgb[k]) <= tolerance);
+    // Half the radius out: (1 - 0.5^2)^2 = 0.5625 in linear light, 198 in sRGB. Ambient 0.2 is 124.
+    const ok = is(read.centre, [255, 255, 255]) && is(read.half, [198, 198, 198], 1) && is(read.beyond, [0, 0, 0])
+      && is(read.ambient, [124, 124, 124], 1) && is(read.unlit, [255, 255, 255])
+      && is(read.ell, [255, 0, 0]) && is(read.foot, [255, 0, 0]) && is(read.notch, [0, 0, 0])
+      && is(read.line, [0, 0, 255]) && is(read.past, [0, 0, 0])
+      // 65 of its 200 out along its aim: (1 - 65^2 / 200^2)^2 = 0.80 linear, 231 sRGB.
+      && is(read.aimed, [231, 231, 231], 1) && is(read.aside, [0, 0, 0]) && is(read.behind, [0, 0, 0]);
     if (!ok) throw new Error(report);
     return report;
   });

@@ -24,6 +24,7 @@ import { NULL_HANDLE } from '../core/handle.js';
 // Shared scratch. Node methods are called from user code, never concurrently,
 // and a fresh quaternion per setRotation call would allocate in someone's loop.
 const scratchQuat = quatCreate();
+const Z_AXIS = [0, 0, 1];
 
 export class Node {
   constructor(scene, entity) {
@@ -35,9 +36,18 @@ export class Node {
     return this.scene.entities.alive(this.entity);
   }
 
-  setPosition(x, y, z) {
+  /** z is 0 unless given, so setPosition(x, y) places a 2D node. */
+  setPosition(x, y, z = 0) {
     this.scene.transforms.setPosition(this.entity, x, y, z);
     return this;
+  }
+
+  /**
+   * Turn in the screen's plane, about Z: for 2D. With a Camera2D's y pointing
+   * down, a positive angle turns clockwise, as CSS rotate() does.
+   */
+  setAngle(radians) {
+    return this.setRotationAxisAngle(Z_AXIS, radians);
   }
 
   setScale(x, y = x, z = x) {
@@ -58,7 +68,8 @@ export class Node {
    *
    *   key.setDirection(-0.4, -0.7, -0.3);
    */
-  setDirection(x, y, z) {
+  /** z is 0 unless given, so setDirection(x, y) aims across a 2D view. */
+  setDirection(x, y, z = 0) {
     quatLookAlong(scratchQuat, [x, y, z]);
     this.scene.transforms.setRotation(this.entity, scratchQuat);
     return this;

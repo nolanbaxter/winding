@@ -16,7 +16,7 @@ import {
 } from '../src/render/shadows.js';
 import { Scene, LIGHT_FLOATS, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
 import { frustumCreate } from '../src/core/math/frustum.js';
-import { farthestDistance } from '../src/scene/bounds.js';
+import { farthestDistance, BoxList } from '../src/scene/bounds.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -327,6 +327,42 @@ test('a caster above the floor lands inside every cascade it is in', () => {
   }
 });
 
+test('a cascade keeps its map while the camera holds still and nothing moves inside it', () => {
+  const maps = nodeShadowMaps();
+  maps.shadowDistance = 32;
+  const camera = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+  camera.position.set([0, 3, 8]);
+  camera.target.set([0, 0.5, 0]);
+  camera.update(16 / 9);
+  const scene = lit([-0.4, -1, -0.3]);
+  const boxes = new BoxList();
+  const quiet = { all: false, boxes };
+  const box = (min, max) => { boxes.clear(); boxes.push(Float32Array.from(min), Float32Array.from(max), 0); };
+  const layers = maps.cascadeCount;
+
+  maps.update(camera, scene, quiet);
+  assert.equal(maps.cascadesDrawn, layers, 'never drawn');
+  maps.update(camera, scene, quiet);
+  assert.equal(maps.cascadesDrawn, 0, 'nothing changed');
+
+  box([500, 0, 500], [501, 1, 501]);
+  maps.update(camera, scene, quiet);
+  assert.equal(maps.cascadesDrawn, 0, 'a box far outside every cascade');
+  // At the camera's feet: inside the nearest cascade, and inside every wider
+  // one that covers the same ground.
+  box([-0.2, 0, 5.8], [0.2, 0.4, 6.2]);
+  maps.update(camera, scene, quiet);
+  assert.ok(maps.cascadesDrawn >= 1 && maps.cascadeRedraw[0] === 1, 'a box in the first cascade redraws it');
+  boxes.clear();
+
+  camera.position.set([0, 3, 9]);
+  camera.update(16 / 9);
+  maps.update(camera, scene, quiet);
+  assert.equal(maps.cascadesDrawn, layers, 'the camera moved: every cascade was refitted');
+  maps.update(camera, scene, { all: true, boxes });
+  assert.equal(maps.cascadesDrawn, layers, 'a change no box describes');
+});
+
 test('where the scene sits does not decide whether it has shadows', () => {
   // The same camera and geometry, 100 units lower, always worked -- it was
   // entirely on the far side of the origin. Both must fit now.
@@ -499,6 +535,70 @@ test('only casting lights on screen get views, and their records say which', () 
   scene.refreshLights();
   maps.updateLocal(scene, forwardCamera());
   assert.deepEqual(shadowFields(scene, spot), [0, 0]);
+});
+
+test('a light keeps its maps until it, its layers, or something in its reach changes', () => {
+  const scene = new Scene({ capacity: 32 });
+  const point = scene.addLight({ position: [0, 0, -5], radius: 3, castShadow: true });
+  scene.update();
+  scene.refreshLights();
+  const maps = localShadowMaps();
+  const camera = forwardCamera();
+  const boxes = new BoxList();
+  const quiet = { all: false, boxes };
+  const box = (min, max) => { boxes.clear(); boxes.push(Float32Array.from(min), Float32Array.from(max), 0); };
+
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 6, 'never drawn: all six faces');
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 0, 'nothing changed: kept');
+  assert.deepEqual([...maps.localRedraw.subarray(0, 6)], [0, 0, 0, 0, 0, 0]);
+
+  box([10, 10, 10], [11, 11, 11]);
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 0, 'a box that moved far outside its reach');
+  box([2.5, 0, -5], [4, 1, -4]);
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 6, 'a box inside its sphere');
+  boxes.clear();
+
+  maps.updateLocal(scene, camera, { all: true, boxes });
+  assert.equal(maps.localDrawn, 6, 'a change no box describes');
+  maps.updateLocal(scene, camera, null);
+  assert.equal(maps.localDrawn, 6, 'no change record at all');
+
+  point.setPosition(0, 0.5, -5);
+  scene.update();
+  scene.refreshLights();
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 6, 'the light moved: its views differ');
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 0);
+});
+
+test("a light is drawn again when its layers held another light's maps", () => {
+  // A cube at 0-5 and a spot at 6. The cube goes dark, so the spot draws at
+  // 0; when the cube comes back it takes 0-5 again, and the spot, back at 6,
+  // must not trust a record from before -- its layer was never redrawn, but
+  // the cube's run now starts over layer 0 where the spot's record points.
+  const scene = new Scene({ capacity: 32 });
+  const point = scene.addLight({ position: [0, 0, -5], radius: 3, castShadow: true });
+  scene.addLight({ position: [1, 0, -5], direction: [0, 0, -1], outerAngle: 0.6, radius: 3, castShadow: true });
+  scene.update();
+  scene.refreshLights();
+  const maps = localShadowMaps();
+  const camera = forwardCamera();
+  const quiet = { all: false, boxes: new BoxList() };
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 7);
+  point.setLight({ castShadow: false });
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 1, 'the spot moved to layer 0');
+  point.setLight({ castShadow: true });
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 7, 'both redrawn: the cube overwrote layer 0, and the spot is on 6 again');
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 0);
 });
 
 test('point views written before the array grows come across', () => {

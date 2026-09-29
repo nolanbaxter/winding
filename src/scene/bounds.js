@@ -8,6 +8,63 @@
 import { aabbTransform } from '../core/math/aabb.js';
 import { handleIndex } from '../core/handle.js';
 
+/** Boxes, six floats each (min then max), in a buffer that grows. */
+export class BoxList {
+  constructor() {
+    this.data = new Float32Array(6 * 64);
+    this.count = 0;
+  }
+
+  clear() { this.count = 0; }
+
+  /** The box at offset `o` of a pair of 3-float bounds columns. */
+  push(min, max, o) {
+    if ((this.count + 1) * 6 > this.data.length) {
+      const grown = new Float32Array(this.data.length * 2);
+      grown.set(this.data);
+      this.data = grown;
+    }
+    const d = this.data, k = this.count++ * 6;
+    d[k] = min[o]; d[k + 1] = min[o + 1]; d[k + 2] = min[o + 2];
+    d[k + 3] = max[o]; d[k + 4] = max[o + 1]; d[k + 5] = max[o + 2];
+  }
+
+  /**
+   * Does any box reach into the volume an orthographic view-projection
+   * `matrix` (column-major, at `offset`) draws: x and y in [-1, 1], depth in
+   * [0, 1]? Its eight corners' extent in clip space, against that.
+   */
+  touchesOrtho(matrix, offset = 0) {
+    const d = this.data, m = matrix, o = offset;
+    for (let k = 0; k < this.count * 6; k += 6) {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+      for (let corner = 0; corner < 8; corner++) {
+        const x = d[k + (corner & 1 ? 3 : 0)], y = d[k + 1 + (corner & 2 ? 3 : 0)], z = d[k + 2 + (corner & 4 ? 3 : 0)];
+        const cx = m[o] * x + m[o + 4] * y + m[o + 8] * z + m[o + 12];
+        const cy = m[o + 1] * x + m[o + 5] * y + m[o + 9] * z + m[o + 13];
+        const cz = m[o + 2] * x + m[o + 6] * y + m[o + 10] * z + m[o + 14];
+        if (cx < x0) x0 = cx; if (cx > x1) x1 = cx;
+        if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
+        if (cz < z0) z0 = cz; if (cz > z1) z1 = cz;
+      }
+      if (x1 >= -1 && x0 <= 1 && y1 >= -1 && y0 <= 1 && z1 >= 0 && z0 <= 1) return true;
+    }
+    return false;
+  }
+
+  /** Does any box come within `radius` of (x, y, z)? */
+  touchesSphere(x, y, z, radius) {
+    const d = this.data, r2 = radius * radius;
+    for (let k = 0; k < this.count * 6; k += 6) {
+      const dx = Math.max(d[k] - x, 0, x - d[k + 3]);
+      const dy = Math.max(d[k + 1] - y, 0, y - d[k + 4]);
+      const dz = Math.max(d[k + 2] - z, 0, z - d[k + 5]);
+      if (dx * dx + dy * dy + dz * dz <= r2) return true;
+    }
+    return false;
+  }
+}
+
 /**
  * Recompute world-space bounds for every renderable whose transform moved.
  *
@@ -17,10 +74,11 @@ import { handleIndex } from '../core/handle.js';
  * culls anything.
  *
  * Bounds columns are 3 floats per renderable; `dirty` is indexed by matrix
- * slot, and null updates everything.
+ * slot, and null updates everything. `record`, a BoxList, gets each updated
+ * box as it was and as it is -- what a cached shadow map needs to know.
  */
 export function updateWorldBounds(
-  count, localMin, localMax, worldMin, worldMax, matrices, matrixSlot, dirty = null,
+  count, localMin, localMax, worldMin, worldMax, matrices, matrixSlot, dirty = null, record = null,
 ) {
   let updated = 0;
   for (let i = 0; i < count; i++) {
@@ -28,9 +86,11 @@ export function updateWorldBounds(
     if (dirty !== null && dirty[slot] === 0) continue;
 
     const o = i * 3;
+    record?.push(worldMin, worldMax, o);
     // Offsets rather than subarray views: four views per renderable per frame
     // would be four allocations per renderable per frame.
     aabbTransform(worldMin, worldMax, localMin, localMax, matrices, slot * 16, o, o);
+    record?.push(worldMin, worldMax, o);
     updated++;
   }
   return updated;

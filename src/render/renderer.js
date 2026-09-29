@@ -19,6 +19,7 @@ import { mat4NormalMatrix } from '../core/math/mat4.js';
 import { vec3Create, vec3Sub, vec3Normalize } from '../core/math/vec3.js';
 import { frustumCreate, frustumFromViewProjection, frustumTestAABB } from '../core/math/frustum.js';
 import { grownCapacity } from '../core/grow.js';
+import { handleIndex } from '../core/handle.js';
 import { DIRECTIONAL_FLOATS } from '../scene/scene.js';
 
 import {
@@ -49,9 +50,10 @@ import { PostStack, HDR_FORMAT } from './post.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW } from './gpudriven.js';
 import {
   updateWorldBounds, unionWorldBounds, farthestViewDepth, farthestDistance,
-  updateSkinBounds, applySkinBounds,
+  updateSkinBounds, applySkinBounds, BoxList,
 } from '../scene/bounds.js';
 import { HierarchicalDepth } from './hzb.js';
+import { View2D } from './view2d.js';
 import { AmbientOcclusion, AMBIENT_FORMAT } from './ao.js';
 import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 import { createBuffer } from '../rhi/buffer.js';
@@ -260,6 +262,16 @@ export class Renderer {
     this._hasSceneBounds = false;
     this._boundsRevision = -1;
     /**
+     * What changed this frame for the point and spot shadow cache: every box
+     * that moved or deformed, as it was and as it is, and whether the scene
+     * changed in a way no box describes. See ShadowMaps.updateLocal.
+     */
+    this._shadowChanges = { all: true, boxes: new BoxList() };
+    this._shadowCacheScene = null;
+    this._shadowCacheRevision = -1;
+    /** Each deforming renderable's box last frame, by index, for the same cache. */
+    this._deformBoxes = { min: new Float32Array(0), max: new Float32Array(0), revision: -1 };
+    /**
      * Batches in draw order, sorted by pipeline then material.
      *
      * Sorting BATCHES rather than objects is what the sort key does, because
@@ -391,6 +403,10 @@ export class Renderer {
     this.sprites = await SpritePass.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
     this.particles = await ParticleSystem.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
     this.dofPass = await DepthOfField.create(this.rhi, this.pipelines, HDR_FORMAT);
+    this.view2d = await View2D.create(this.rhi, this.pipelines, this.particles);
+    // ponytail: a HUD's emitters aren't drawn -- the particle system follows one
+    // scene's at a time. A second system for the overlay, if a HUD needs sparks.
+    this.overlay2d = await View2D.create(this.rhi, this.pipelines);
     /**
      * Depth of field, or null for none: { focusDistance, fStop, sensorHeight }
      * -- see render/dof.js. A plain field, like fog.
@@ -638,6 +654,8 @@ export class Renderer {
       cube.destroy();
       probe.captured = true;
     }
+    // What the scene reflects has changed, which no transform says.
+    scene.changes++;
     scene.probeRevision++;
   }
 
@@ -678,6 +696,47 @@ export class Renderer {
     return bindGroup;
   }
 
+  /**
+   * Skinned and morphed renderables deform with no transform of their own
+   * moving, so each one that did this frame -- its skin posed, or its weights
+   * changed -- has its box go to `record` as it was last frame and as it is
+   * now. One standing still records nothing.
+   */
+  _recordDeformed(scene, record) {
+    const count = scene.renderableCount;
+    const last = this._deformBoxes;
+    if (last.min.length < count * 3) {
+      last.min = new Float32Array(count * 3 * 2);
+      last.max = new Float32Array(count * 3 * 2);
+      last.revision = -1;
+    }
+    // Indices shift when renderables go, and that bumps the revision, which
+    // redraws every light anyway; only the current boxes are worth keeping.
+    const known = last.revision === scene.revision;
+    if (!known) last.weights = [];
+    for (let i = 0; i < count; i++) {
+      const s = scene.renderableSkin[i], m = scene.renderableMorph[i];
+      if (s < 0 && m < 0) continue;
+      let deformed = !known || (s >= 0 && scene.skins[s]?.posed === true);
+      if (m >= 0) {
+        const weights = scene.morphs[m].weights;
+        const before = last.weights[m];
+        if (before === undefined || before.length !== weights.length || before.some((w, k) => w !== weights[k])) {
+          deformed = true;
+          last.weights[m] = Float32Array.from(weights);
+        }
+      }
+      const o = i * 3;
+      if (deformed) {
+        if (known) record.push(last.min, last.max, o);
+        record.push(scene.worldMin, scene.worldMax, o);
+      }
+      last.min.set(scene.worldMin.subarray(o, o + 3), o);
+      last.max.set(scene.worldMax.subarray(o, o + 3), o);
+    }
+    last.revision = scene.revision;
+  }
+
   _createDirectionalBuffer(count) {
     return createBuffer(this.rhi, {
       label: 'directionals',
@@ -691,7 +750,8 @@ export class Renderer {
    * the canvas -- linear HDR, before post, and with no reflection probes read,
    * since a probe capture is what renders into one. See captureReflectionProbes.
    */
-  render(scene, camera, jobs = null, target = null) {
+  render(scene, camera, jobs = null, target = null, overlay = null) {
+    if (camera.is2D === true) return this._render2D(scene, camera, jobs, overlay);
     const rhi = this.rhi;
     const environment = scene.environment;
     if (!environment) throw new Error('Renderer: the scene has no environment');
@@ -735,9 +795,16 @@ export class Renderer {
     this.stats.renderables = count;
 
     // Only a compose that moved something can have changed a world box.
+    // Each one is recorded, before and after, when a light may cache its
+    // shadow maps.
+    // Whether anything moved, for consumers that run after the flags are spent.
+    const anyMoved = scene.transforms.movedPending;
+    const changes = this._shadowChanges;
+    changes.boxes.clear();
+    const record = scene.shadowCasters.size > 0 ? changes.boxes : null;
     const moved = scene.transforms.movedPending ? updateWorldBounds(
       count, scene.localMin, scene.localMax, scene.worldMin, scene.worldMax,
-      scene.transforms.world, scene.renderableMatrixSlot, scene.transforms.moved,
+      scene.transforms.world, scene.renderableMatrixSlot, scene.transforms.moved, record,
     ) : 0;
 
     // Skinned renderables get their bounds replaced: the pass above gave them
@@ -754,6 +821,21 @@ export class Renderer {
     // vertex. Counted into `moved`, because a weight changes without any
     // transform changing and the union below is derived from both.
     const morphed = scene.morphs.length > 0 ? scene.applyMorphBounds() : 0;
+    // Which skins this frame's pose moved: any of their joints did. Read
+    // here, while the `moved` flags still hold, for the palettes and the
+    // shadow cache, so a character standing still costs neither.
+    let posed = false;
+    if (scene.skins.length > 0) {
+      const moved = scene.transforms.movedPending ? scene.transforms.moved : null;
+      for (const skin of scene.skins) {
+        skin.posed = false;
+        if (moved !== null) {
+          for (let j = 0; j < skin.joints.length && !skin.posed; j++) skin.posed = moved[handleIndex(skin.joints[j])] === 1;
+        }
+        posed ||= skin.posed;
+      }
+    }
+    if (record !== null && (skinned > 0 || morphed > 0)) this._recordDeformed(scene, record);
 
     // The scene's own extent, which is what the shadow and cluster ranges are
     // derived from. Recomputed only when something moved or the contents
@@ -786,7 +868,7 @@ export class Renderer {
     // Palettes are rebuilt from this frame's pose, before anything reads them.
     // A grow replaces the buffer the frame group names, so that invalidates
     // the cache the same way a gpu grow does.
-    this.skinPalette.update(scene);
+    this.skinPalette.update(scene, posed);
     // A grown morph buffer invalidates the frame group for the same reason a
     // grown palette does: the group names a buffer that no longer exists.
     if (this._morphRevision !== this.morph.revision) {
@@ -873,7 +955,9 @@ export class Renderer {
     this.skybox.update(camera, 1.0, this.fog === null ? null : this._fogData);
     // Materials a clip changed since the last frame. Uploaded here rather than
     // by the player, because the scene does not own the GPU.
-    if (scene.changedMaterials.size > 0) {
+    // A changed factor can change an alpha-shaped shadow, which no box says.
+    const materialsChanged = scene.changedMaterials.size > 0;
+    if (materialsChanged) {
       for (const [id, record] of scene.changedMaterials) this.materials.update(id, record);
       scene.changedMaterials.clear();
     }
@@ -882,8 +966,19 @@ export class Renderer {
     // then point and spot views. Each writes its slot into the light's record,
     // so both run before the records are uploaded. Growing either array
     // replaces what the frame group names.
-    this.shadows.update(camera, scene);
-    this.shadows.updateLocal(scene, camera);
+    // Every shadow map is drawn again for a new scene, a structural change, a
+    // changed material, or LOD -- whose casters are the levels the CAMERA
+    // shows, so they change as it moves. And for a probe capture, which draws
+    // from other eyes into the same layers, and then once more after it.
+    changes.all = target !== null || materialsChanged || this.gpu.hasLod
+      || this._shadowCacheScene !== scene || this._shadowCacheRevision !== scene.revision;
+    this.shadows.update(camera, scene, changes);
+    this.shadows.updateLocal(scene, camera, changes);
+    this._shadowCacheScene = scene;
+    this._shadowCacheRevision = target !== null ? -1 : scene.revision;
+    this.stats.shadowViews = this.shadows.localCount;
+    this.stats.shadowViewsDrawn = this.shadows.localDrawn;
+    this.stats.cascadesDrawn = this.shadows.cascadesDrawn;
     if (this._shadowRevision !== this.shadows.revision) {
       this._frameBindGroups = new WeakMap();
       this._shadowRevision = this.shadows.revision;
@@ -1077,7 +1172,7 @@ export class Renderer {
     const transmissive = this._transmissiveCount > 0;
     // Sprites draw after the opaque scene and before anything blended, so
     // they push blended geometry out of the late pass too.
-    const sprites = this.sprites.prepare(scene, camera, environment, width, height);
+    const sprites = this.sprites.prepare(scene, camera, environment, width, height, anyMoved);
     // Particles likewise; and during a probe capture they are seen, not moved.
     const emitters = this.particles.prepare(scene, camera, environment, target !== null);
     this._blendInLate = !this.oit && ambient === null && !transmissive && sprites === 0 && emitters === 0;
@@ -1181,6 +1276,7 @@ export class Renderer {
 
     const encoder = rhi.device.createCommandEncoder({ label: 'frame' });
     graph.execute(encoder);
+    if (overlay !== null && target === null) this._drawOverlay(encoder, overlay, jobs);
 
     // After the last pass is recorded and before the encoder is closed: this
     // only copies queries the GPU will have written by the time it runs.
@@ -1200,6 +1296,73 @@ export class Renderer {
     this.gpuTiming.readback();
     p?.mark('submit');
     p?.frameEnd();
+  }
+
+  /**
+   * A frame through a Camera2D: the scene's sprites and text, in painter's
+   * order, onto the canvas and nothing else -- none of the 3D passes run.
+   * See render/view2d.js.
+   */
+  _render2D(scene, camera, jobs, overlay) {
+    const rhi = this.rhi;
+    const p = this.profiler;
+    p?.frameStart();
+    this.stats.recomposed = this._prepare2D(this.view2d, scene, camera, jobs);
+    this.stats.sprites2D = this.view2d.count;
+    this.stats.sprites2DWritten = this.view2d.written;
+    this.stats.tiles2DWritten = this.view2d.tilesWritten;
+    this.stats.emitters = this.particles.prepare(scene, camera, null);
+    p?.mark('2d');
+    const graph = this.graph;
+    graph.begin();
+    const surface = graph.importTexture('surface', rhi.currentColorView({ linear: false }));
+    const particles = this.particles.addSimulation(graph);
+    this.view2d.addPass(graph, { surface, background: camera.background, particles });
+    this.debug.addPass(graph, { surface, depth: null, viewProjection: camera.viewProjection });
+    graph.compile();
+    p?.mark('graph build');
+    const encoder = rhi.device.createCommandEncoder({ label: 'frame-2d' });
+    graph.execute(encoder);
+    if (overlay !== null) this._drawOverlay(encoder, overlay, jobs);
+    this.gpuTiming.resolve(encoder);
+    p?.mark('encode');
+    rhi.queue.submit([encoder.finish()]);
+    this.debug.clear();
+    this.gpuTiming.readback();
+    p?.mark('submit');
+    p?.frameEnd();
+  }
+
+  /** A 2D scene's transforms and camera brought up to date, and its slots. Returns what scene.update does. */
+  _prepare2D(view, scene, camera, jobs) {
+    const { width, height } = this.rhi;
+    const recomposed = scene.update(jobs);
+    camera.update(width / height, width, height, this.rhi.pixelRatio);
+    const transforms = scene.transforms;
+    const moved = transforms.movedPending ? transforms.moved : null;
+    view.prepare(scene, camera, width, height, moved);
+    if (moved !== null) {
+      transforms.moved.fill(0, 0, transforms.capacity);
+      transforms.movedPending = false;
+    }
+    return recomposed;
+  }
+
+  /**
+   * An overlay -- a HUD: a 2D scene drawn over the finished frame, after the
+   * tonemap, bloom and antialiasing, so its colours land exactly and its text
+   * stays crisp. Its own View2D, so a 2D game and its HUD each keep their slots.
+   */
+  _drawOverlay(encoder, { scene, camera }, jobs) {
+    this._prepare2D(this.overlay2d, scene, camera, jobs);
+    this.stats.overlay2D = this.overlay2d.count;
+    this.stats.overlay2DWritten = this.overlay2d.written;
+    const pass = encoder.beginRenderPass({
+      label: 'overlay',
+      colorAttachments: [{ view: this.rhi.currentColorView({ linear: false }), loadOp: 'load', storeOp: 'store' }],
+    });
+    this.overlay2d._encode(pass);
+    pass.end();
   }
 
   /**
@@ -1233,6 +1396,8 @@ export class Renderer {
     this.particles.destroy();
     this.decals.destroy();
     this.dofPass.destroy();
+    this.view2d.destroy();
+    this.overlay2d.destroy();
     this._captureColor?.destroy();
     this._captureDepth?.destroy();
     this.aoPass?.destroy();

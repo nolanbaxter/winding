@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-29
+
+**2D, and frames that cost nothing.** Winding draws 2D now -- sprites, tilemaps, shapes, paths,
+text, lights and particles through a `Camera2D`, and a HUD over 3D -- and a still scene, a still
+light or a still character no longer costs a frame's work.
+
+### Added
+
+- **2D.** View a scene through a `Camera2D` and its sprites and text draw flat, with none of the 3D
+  passes. A unit is a CSS pixel, so 2D is the same size on any screen, y points down, and the
+  origin is the top-left, as on a canvas;
+  `anchor`, `zoom`, `rotation`, `background` and `pixelSnap` set the view, and `screenToWorld`
+  and `worldToScreen` convert. It composites in sRGB, as the browser does, so a colour lands on
+  screen exactly as authored.
+- **Sprite layers and animation.** `layer` on `addSprite` and `addText`: higher draws over lower,
+  and one layer draws in the order it was added. `animation: { frames, fps, loop }` plays frames
+  cut by the new `spriteSheet({ columns, rows })`. Through a `Camera2D`, a sprite with no `size`
+  is its frame's size in texels, and a negative x scale mirrors it.
+- **Tilemaps.** `scene.addTilemap({ tileset, tileSize, columns, rows, tiles })` draws a grid of
+  tiles as one quad, whatever its size: each pixel looks up its own tile, so a map costs the
+  pixels it covers. `setTile`, `setTiles` and `tileAt` edit and read it, and an edit uploads only
+  the tiles it changed. Ids follow Tiled, flip bits included, so a Tiled layer's data works as is.
+- **A HUD over 3D.** `engine.run({ scene, camera, overlay: { scene: hud } })` draws a 2D scene
+  over every frame, after the tonemap, bloom and antialiasing, so its colours land exactly and its
+  text stays crisp. `renderFrame` takes `{ overlay }` too. A still HUD over a still scene still
+  skips the frame.
+- **Shapes.** `scene.addShape({ shape, size, radius, color, stroke, strokeWidth })`: rectangles,
+  rounded or not, and ellipses, worked out per pixel from the distance to their edge, so they're
+  round at any size with a one-pixel smoothed edge. Outlines are drawn inside the edge, as a CSS
+  border is. All the shapes in a layer draw in one call.
+- **Paths.** `scene.addPath({ points, closed, color, stroke, strokeWidth })` fills any outline and
+  strokes any line, smooth-edged at any size. Concave and self-crossing outlines fill as a
+  canvas's do, and lines have round joins and ends. Paths draw with shapes, in one call, and
+  picking finds them by the same rule they fill by.
+- **2D lights.** `lit: true` on a sprite, tilemap, shape, path or text lights it with the scene's
+  point lights (`scene.addLight`, as in 3D), each fading to nothing at its radius, plus the
+  `Camera2D`'s new `ambient`. In linear light, so a full white light shows colours as authored.
+  `addLight` takes `[x, y]`.
+- **Particles and debug lines in 2D.** Emitters draw in a 2D view at their new `layer`, from the
+  same GPU simulation, and take `[x, y]` for `direction` and `acceleration`. Debug lines draw over
+  it in its sRGB colours; `line` and `box` take `[x, y]`, and `circle` is new.
+- **Spot lights in 2D**, aimed with `direction: [x, y]` or `node.setDirection(x, y)`.
+- **Tileset `margin` and `spacing`**, as Tiled's tilesets have them.
+- **Picking in 2D.** `scene.pick` takes a `Camera2D` as it takes a 3D camera, and returns what's
+  drawn on top at the pointer: the shape by its real outline, text by its block, a tilemap's tile
+  (`tile: [column, row]`) unless it's empty, a sprite by its quad.
+- **Text wrapping.** `width` on `addText` wraps lines between words to fit, as CSS wraps text in
+  a box; `align` and `anchor` then work within that box.
+- `rhi.pixelRatio`: the canvas's pixels to a CSS pixel.
+- **Pixel art.** `loadTexture(src, { pixelated: true })` keeps texels square when magnified, in 2D
+  and 3D alike.
+- `node.setPosition(x, y)` takes two numbers, and `node.setAngle(radians)` turns a node in the
+  screen's plane.
+
+### Fixed
+
+- **Smooth sprites had a dark fringe.** A clear pixel decodes with black in it, and filtering
+  blended that into the sprite's edge: a white sprite over white darkened to 220 enlarged. A
+  texture from `loadTexture` now gives its clear pixels their neighbours' colour, and every mip
+  chain is averaged by coverage, so an edge stays its own colour enlarged or shrunk. A texture
+  with no clear pixels comes out as before.
+
+### Changed
+
+- **Point and spot light shadows are cached.** A light's maps are drawn again only when they
+  would come out different: the light moved or changed, it landed on other layers, the scene
+  changed, or something inside its reach moved or deformed. Something moving outside a light's
+  sphere cannot touch anything it lights, so it costs that light nothing. On Sponza at 720p, a
+  still point light's six faces took 3.6 ms of GPU time and 600-odd draws a frame, and now take
+  none. `renderer.stats.shadowViewsDrawn` counts the views drawn. Scenes with levels of detail
+  still draw every frame, because the camera chooses which level casts.
+- **A still scene isn't drawn.** `engine.run` skips a frame that would draw exactly what the last
+  one did: nothing moved, animated, emitted or changed, and neither the camera, the canvas nor a
+  setting did. `engine.invalidate()` forces the next frame, `{ onDemand: false }` turns it off, and
+  `engine.skippedFrames` counts them.
+- **The sun's shadows are cached too.** A cascade is fitted to a texel grid fixed in the world, so
+  while the camera holds still its matrix comes out the same, and its map is kept unless
+  something moved inside what it draws. `renderer.stats.cascadesDrawn` counts the ones drawn.
+- **A character standing still costs nothing.** A skin is re-posed only when one of its joints
+  moved, and a morph only when its weights changed. Otherwise its palette isn't rebuilt or
+  uploaded, and the lights near it keep their shadow maps.
+- **Sprites and text are packed again only when something they're drawn from changed:** a node
+  moved, or the camera, the viewport or a sprite or text did.
+- **Models load faster.** A glTF's images start fetching as soon as its document is read,
+  alongside its buffers rather than after them, and each texture uploads the moment its image
+  decodes, while the rest are still arriving. Sponza, loaded to its first frame, went from 2.37 s
+  to 1.41 s in the same page.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added
@@ -1776,7 +1864,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/nolanbaxter/winding/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/nolanbaxter/winding/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/nolanbaxter/winding/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/nolanbaxter/winding/compare/v0.10.1...v0.11.0

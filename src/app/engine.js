@@ -31,8 +31,9 @@ import { parseCube, uploadLUT } from '../render/grading.js';
 import { packSkinVertices } from '../render/vertex.js';
 import { packMorphCountStride } from '../render/morph.js';
 import { Scene } from '../scene/scene.js';
+import { Camera2D } from '../scene/camera2d.js';
 import { loadGLTF, DEFAULT_MATERIAL } from '../scene/gltf/parse.js';
-import { decodeImages } from '../scene/gltf/images.js';
+import { decodeImages, imageColorSpaces } from '../scene/gltf/images.js';
 import { Clock } from '../core/time.js';
 import { JobSystem, JOB_COMPOSE_TRANSFORMS } from '../core/jobs.js';
 import { composeRange } from '../scene/transformJob.js';
@@ -150,7 +151,9 @@ export class Winding {
           : null,
       });
 
-      return new Winding(rhi, renderer, environment, jobs);
+      const engine = new Winding(rhi, renderer, environment, jobs);
+      engine.onDemand = options.onDemand !== false;
+      return engine;
     } catch (error) {
       rhi.destroy();
       throw error;
@@ -182,6 +185,17 @@ export class Winding {
     this._fpsAccum = 0;
     this._fpsFrames = 0;
     this._defaultMaterialId = -1;
+    /**
+     * Whether run() skips a frame that would draw exactly what the last one
+     * did: nothing moved, animated, emitted or changed, and neither the camera
+     * nor a setting did. A still scene then costs the GPU nothing. On unless
+     * `onDemand: false`; engine.invalidate() forces the next frame.
+     */
+    this.onDemand = true;
+    /** Frames run() skipped because nothing had changed. */
+    this.skippedFrames = 0;
+    /** What the last frame run() drew was drawn from; see _idle. */
+    this._drawn = null;
 
     // The device was lost, or the canvas left the document. Either way nothing
     // this engine draws can be seen again, so it lets go of everything --
@@ -228,9 +242,11 @@ export class Winding {
    *
    * `source` is a URL, a Blob, an ImageBitmap, or anything createImageBitmap
    * takes. `srgb` for colour, which is almost every image; false for data.
-   * Returns { texture, view, width, height }; destroy the texture when done.
+   * `pixelated` for pixel art: enlarged, each texel stays a hard square, as
+   * CSS's image-rendering: pixelated draws it.
+   * Returns { texture, view, width, height, pixelated }; destroy the texture when done.
    */
-  async loadTexture(source, { srgb = true, label = 'texture' } = {}) {
+  async loadTexture(source, { srgb = true, pixelated = false, label = 'texture' } = {}) {
     this._assertAlive('loadTexture');
     let image = source;
     if (typeof source === 'string') {
@@ -249,9 +265,10 @@ export class Winding {
       label, width: bitmap.width, height: bitmap.height, srgb, mipmapped: true,
     });
     uploadImage(this.rhi, texture, bitmap);
-    generateMipmaps(this.rhi, texture);
+    // Bled: a sprite is often enlarged, and its clear pixels must not fringe it.
+    generateMipmaps(this.rhi, texture, { bleed: true });
     if (bitmap !== source) bitmap.close();
-    return { texture, view: texture.createView(), width: texture.width, height: texture.height };
+    return { texture, view: texture.createView(), width: texture.width, height: texture.height, pixelated: pixelated === true };
   }
 
   /**
@@ -361,21 +378,47 @@ export class Winding {
     // requests URLs the stranger chose.
     const { limits } = this.rhi;
     const fetchImpl = options.fetch ?? globalThis.fetch;
-    const model = await loadGLTF(bytes, { baseURL, fetchImpl, maxBytes: limits.maxBufferSize });
-    this._assertAlive('load');
-    const bitmaps = await decodeImages(model.source.json, model.source.buffers, {
-      baseURL, fetchImpl, maxDimension: limits.maxTextureDimension2D,
-    });
+    // Images start as soon as the document is read: fetched and decoded
+    // while its buffers download and its geometry builds, and each uploaded
+    // as it lands, while the rest are still arriving. Measured on Sponza,
+    // that overlap took its load from 2.2 s to 1.3 s.
+    let decoding = null;
+    let textures = null;
+    let model;
+    try {
+      model = await loadGLTF(bytes, {
+        baseURL, fetchImpl, maxBytes: limits.maxBufferSize,
+        onDocument: (json, ready) => {
+          textures = new GLTFTextures(this.rhi, json, []);
+          const spaces = imageColorSpaces(json);
+          decoding = decodeImages(json, ready, {
+            baseURL, fetchImpl, maxDimension: limits.maxTextureDimension2D,
+            onImage: (index, bitmap) => { if (!this._destroyed) textures.upload(index, bitmap, spaces.get(index)); },
+          });
+        },
+      });
+    } catch (error) {
+      // A geometry that would not build leaves images decoding and uploading:
+      // free both when they land.
+      decoding?.then((bitmaps) => {
+        for (const bitmap of bitmaps) bitmap?.close?.();
+        textures.destroy();
+      });
+      throw error;
+    }
+    const bitmaps = await decoding;
     if (this._destroyed) {
       for (const bitmap of bitmaps) bitmap?.close?.();
+      textures.destroy();
       this._assertAlive('load');
     }
+    // Built as the images landed; given them too, for anything not made yet.
+    textures.bitmaps = bitmaps;
 
     // Filled in as it is built, so a throw part way through -- a texture past
     // the device limit, a mesh with too many targets, a pipeline that will
     // not compile -- frees exactly what exists. It used to leak all of it,
     // material ids included, which then counted against the 4096 for good.
-    const textures = new GLTFTextures(this.rhi, model.source.json, bitmaps);
     const asset = {
       nodes: model.nodes, meshes: [], roots: model.roots, materials: model.materials, materialIds: [],
       animations: model.animations, skins: model.skins, source: model.source,
@@ -561,11 +604,15 @@ export class Winding {
    * If the canvas is removed from the document, the next frame destroys the
    * engine: nothing drawn into a detached canvas can be seen. (An engine that
    * is not running learns the same thing from its resize observer.)
+   *
+   * `overlay: { scene, camera }` draws a second, 2D scene over every frame --
+   * a HUD -- through its Camera2D, or a plain one if none is given.
    */
-  run({ scene, camera, update, frame }) {
+  run({ scene, camera, update, frame, overlay = null }) {
     this._assertAlive('run');
     if (this._running) throw new Error('run: already running; call stop() first');
     this._running = true;
+    const hud = this._overlay(overlay);
 
     const loop = (nowMs) => {
       // The device going away ends the loop for good, so tear the running
@@ -587,11 +634,17 @@ export class Winding {
       // this frame's pose rather than last frame's.
       scene.advanceAnimations(this.clock.realDelta);
       scene.advanceParticles(this.clock.realDelta);
+      hud?.scene.advanceAnimations(this.clock.realDelta);
       if (update) while (this.clock.step()) update(this.clock.fixedDt, this.clock.elapsed);
       else this.clock.accumulator = 0;   // nothing to simulate; do not let it grow
 
       if (frame) frame(this.clock.alpha, this.clock);
-      this.renderFrame(scene, camera);
+      if (this.onDemand && this._idle(scene, camera, hud)) {
+        this.skippedFrames++;
+      } else {
+        this.renderFrame(scene, camera, { overlay: hud });
+        this._remember(scene, camera, hud);
+      }
 
       this._fpsAccum += this.clock.realDelta;
       this._fpsFrames++;
@@ -610,10 +663,102 @@ export class Winding {
     this._raf = 0;
   }
 
-  /** One frame, synchronously. Use this when you own the loop. */
-  renderFrame(scene, camera) {
+  /** Draw the next frame run() reaches, even if nothing seems to have changed. */
+  invalidate() {
+    this._drawn = null;
+  }
+
+  /**
+   * Would this frame draw exactly what the last one run() drew? Everything a
+   * frame is drawn from, checked: the scene's structure, its transforms,
+   * materials, properties, animations, particles and morph weights; the
+   * camera; the canvas size; every live setting; pipelines still building,
+   * which a frame draws without; and debug lines, which are drawn per frame.
+   * No shader here depends on time, so the same inputs give the same image.
+   */
+  _idle(scene, camera, overlay = null) {
+    const last = this._drawn;
+    if (last === null || last.scene !== scene || last.camera !== camera) return false;
+    if (last.overlay !== overlay || (overlay !== null && !this._overlayIdle(overlay, last))) return false;
+    if (scene.revision !== last.revision || scene.changes !== last.changes) return false;
+    if (scene.transforms._anyDirty || scene.transforms.movedPending) return false;
+    if (scene.changedMaterials.size > 0 || scene.animating || scene.particlesActive) return false;
+    if (this.rhi.width !== last.width || this.rhi.height !== last.height) return false;
+    const renderer = this.renderer;
+    if (renderer.debug.count > 0) return false;
+    for (const set of renderer._variantSets.values()) if (!set.ready) return false;
+    camera.update(this.rhi.width / this.rhi.height);
+    if (!sameFloats(camera.view, last.view) || !sameFloats(camera.projection, last.projection)) return false;
+    if (!sameMorphs(scene.morphs, last.morphs)) return false;
+    // A 2D view's background, ambient and snapping are not in its matrices.
+    if (camera.is2D && (!sameFloats(camera.background, last.background) || !sameFloats(camera.ambient, last.ambient)
+      || camera.pixelSnap !== last.pixelSnap)) return false;
+    return this._settings() === last.settings;
+  }
+
+  /** Would the overlay draw what it last did? Its scene and camera, as _idle checks the main one's. */
+  _overlayIdle({ scene, camera }, last) {
+    if (scene.revision !== last.overlayRevision || scene.changes !== last.overlayChanges) return false;
+    if (scene.transforms._anyDirty || scene.transforms.movedPending || scene.animating) return false;
+    camera.update(this.rhi.width / this.rhi.height, this.rhi.width, this.rhi.height, this.rhi.pixelRatio);
+    return sameFloats(camera.view, last.overlayView) && camera.pixelSnap === last.overlaySnap
+      && sameFloats(camera.ambient, last.overlayAmbient);
+  }
+
+  _remember(scene, camera, overlay = null) {
+    const last = this._drawn ?? { view: new Float32Array(16), projection: new Float32Array(16), morphs: [], overlayView: new Float32Array(16) };
+    last.scene = scene;
+    last.camera = camera;
+    last.overlay = overlay;
+    if (overlay !== null) {
+      last.overlayRevision = overlay.scene.revision;
+      last.overlayChanges = overlay.scene.changes;
+      last.overlayView.set(overlay.camera.view);
+      last.overlaySnap = overlay.camera.pixelSnap;
+      last.overlayAmbient = Float32Array.from(overlay.camera.ambient);
+    }
+    last.revision = scene.revision;
+    last.changes = scene.changes;
+    last.width = this.rhi.width;
+    last.height = this.rhi.height;
+    last.view.set(camera.view);
+    last.projection.set(camera.projection);
+    last.morphs = scene.morphs.map((m) => Float32Array.from(m.weights));
+    last.background = camera.is2D ? Float32Array.from(camera.background) : null;
+    last.ambient = camera.is2D ? Float32Array.from(camera.ambient) : null;
+    last.pixelSnap = camera.pixelSnap;
+    last.settings = this._settings();
+    this._drawn = last;
+  }
+
+  /** Every live setting a frame reads, as one comparable string. */
+  _settings() {
+    const r = this.renderer, p = r.post;
+    return settingsSignature([
+      r.exposure, r.fog, r.dof, r.drawSkybox, r.shadowDistance, r.lightDistance, r.ao, r.debug.depthTest,
+      p.threshold, p.knee, p.filterRadius, p.strength, p.requestedLevels, p.antialias, p.grading,
+    ]);
+  }
+
+  /**
+   * One frame, synchronously. Use this when you own the loop. `overlay` is
+   * as run() takes it.
+   */
+  renderFrame(scene, camera, { overlay = null } = {}) {
     this._assertAlive('renderFrame');
-    this.renderer.render(scene, camera, this.jobs);
+    this.renderer.render(scene, camera, this.jobs, null, this._overlay(overlay));
+  }
+
+  /** An overlay with its camera filled in: the one given, or a plain Camera2D, kept. */
+  _overlay(overlay) {
+    if (overlay === null) return null;
+    if (!(overlay.scene instanceof Scene)) throw new Error('overlay: { scene, camera } needs a scene from createScene()');
+    if (overlay.camera !== undefined && overlay.camera.is2D !== true) throw new Error('overlay: its camera must be a Camera2D');
+    if (overlay.camera !== undefined) return overlay;
+    this._overlayCamera ??= new Camera2D();
+    // The same object each time for the same scene, so run's idle check can compare it.
+    if (this._overlayFilled?.scene !== overlay.scene) this._overlayFilled = { scene: overlay.scene, camera: this._overlayCamera };
+    return this._overlayFilled;
   }
 
   get stats() {
@@ -652,4 +797,31 @@ export class Winding {
     if (this._ownsEnvironment) this.environment.destroy();
     this.rhi.destroy();
   }
+}
+
+function sameFloats(a, b) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function sameMorphs(morphs, last) {
+  if (morphs.length !== last.length) return false;
+  for (let m = 0; m < morphs.length; m++) {
+    if (morphs[m].weights.length !== last[m].length || !sameFloats(morphs[m].weights, last[m])) return false;
+  }
+  return true;
+}
+
+// A setting that is a GPU object -- a LUT's texture -- has no fields worth
+// comparing but an identity that is, so it stands in as a number.
+const settingIds = new WeakMap();
+let nextSettingId = 1;
+function settingsSignature(values) {
+  return JSON.stringify(values, (key, value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || ArrayBuffer.isView(value)) return value;
+    if (Object.getPrototypeOf(value) === Object.prototype) return value;
+    let id = settingIds.get(value);
+    if (id === undefined) { id = nextSettingId++; settingIds.set(value, id); }
+    return `#${id}`;
+  });
 }

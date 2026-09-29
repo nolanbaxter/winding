@@ -168,6 +168,8 @@ export class Device {
     // platform detail dressed up as RGBA.
     this._swapBlueAndRed = storageFormat.startsWith('bgra');
     this.viewFormat = storageFormat.endsWith('-srgb') ? storageFormat : `${storageFormat}-srgb`;
+    /** The canvas's own format: written through, values land as they are, already encoded. */
+    this.surfaceFormat = storageFormat;
 
     this.context.configure({
       device,
@@ -248,6 +250,16 @@ export class Device {
     applyFromClient();
   }
 
+  /**
+   * Canvas pixels to a CSS pixel: 2 on most phones, 1.5 at 150% Windows
+   * scaling. Measured from the canvas itself, so it is exact however the size
+   * was rounded or clamped.
+   */
+  get pixelRatio() {
+    const css = this.canvas.clientWidth;
+    return css > 0 ? this.width / css : (globalThis.devicePixelRatio || 1);
+  }
+
   resize(width, height) {
     const max = this.limits.maxTextureDimension2D;
     const w = Math.max(1, Math.min(width, max));
@@ -284,9 +296,14 @@ export class Device {
    * out a different texture each time, and caching the view renders into an
    * image nobody is going to show.
    */
-  currentColorView() {
+  /**
+   * `linear: false` gives the canvas's plain view instead of its sRGB one:
+   * what a shader writes lands unconverted, so it writes sRGB itself -- the
+   * 2D view, which composites the way the browser does.
+   */
+  currentColorView({ linear = true } = {}) {
     if (DEBUG) assert(!this.destroyed, 'currentColorView() on a destroyed device');
-    return this.context.getCurrentTexture().createView({ format: this.viewFormat });
+    return this.context.getCurrentTexture().createView({ format: linear ? this.viewFormat : this.surfaceFormat });
   }
 
   /** The device-owned depth buffer, resized with the surface. */

@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/winding-engine?color=%23cb3837&label=winding-engine)](https://www.npmjs.com/package/winding-engine)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A WebGPU rendering engine for the browser. No dependencies, no build step — ES modules, served as-is.
+A WebGPU rendering engine for the browser, in 3D and 2D. No dependencies, no build step — ES modules, served as-is.
 
 Written to find out what actually goes into a modern renderer, so it is built the way a production
 one is rather than the way a tutorial one is: GPU-driven culling, a render graph that derives its own
@@ -14,7 +14,15 @@ pass ordering, clustered forward lighting, cascaded shadows, and a reverse-Z dep
 plane. It is a real renderer. It is not a finished product — see [Limitations](#limitations), which is
 an honest list rather than a short one.
 
-![Sponza rendered in Winding](docs/images/sponza.jpg)
+![Six scenes rendered in Winding, in turn: Sponza; a pixel-art platformer; 576 coloured point lights; a town at night under lamp light; 121 helmets; a sea chart](docs/images/slideshow.webp)
+
+<sub>In turn: <b>Sponza</b>, sunlit, with cascaded shadows. <b>A platformer</b>: a pixel-art tilemap,
+hills as paths, clouds and coins as shapes. <b>Clustered lighting</b>: 576 point lights; the view
+frustum is diced into froxels, so a fragment only evaluates the few whose radius reaches its cell.
+<b>A town at night</b>: 2D spot lights over lit buildings and cobbles, fireflies and glowing windows.
+<b>GPU-driven batching</b>: 121 helmets in two draw calls; a compute pass culls them and writes the
+instance counts, and the CPU never learns which survived. <b>A sea chart</b>: concave islands and a
+star compass, each one path, and a legend in text.</sub>
 
 <table>
 <tr>
@@ -24,14 +32,6 @@ an honest list rather than a short one.
 <tr>
 <td><b>PBR + IBL.</b> Cook-Torrance GGX lit entirely by the prebaked environment. Metal, normal-mapped damage and the emissive ring are all the material, not a light rig.</td>
 <td><b>Transparency.</b> Three blended panes. Watch the draw order reverse as the camera crosses behind them: blended geometry is sorted back-to-front on the CPU every frame.</td>
-</tr>
-<tr>
-<td><img src="docs/images/clustered.jpg" alt="576 coloured point lights"></td>
-<td><img src="docs/images/instancing.jpg" alt="121 helmets drawn in two draw calls"></td>
-</tr>
-<tr>
-<td><b>Clustered lighting.</b> 576 point lights. The view frustum is diced into froxels, so a fragment only ever evaluates the handful whose radius reaches its cell.</td>
-<td><b>GPU-driven batching.</b> 121 helmets in <b>two</b> draw calls. A compute pass culls them and writes the instance counts; the CPU never learns which survived.</td>
 </tr>
 <tr>
 <td><img src="docs/images/fox.png" alt="A skinned fox cross-fading from a walk to a run and back"></td>
@@ -48,6 +48,14 @@ an honest list rather than a short one.
 <tr>
 <td><b>Material extensions.</b> Clear coat on the paint, sheen on the cloth, glass that shows and bends the scene behind it. Plain materials compile all of it out, so they cost what they did before.</td>
 <td><b>Effects.</b> GPU particles, a projected decal, distance-field text, fog that takes its colour from the sky, and depth of field from a real lens model, all in one scene.</td>
+</tr>
+<tr>
+<td><img src="docs/images/2d.png" alt="A pixel-art room from a tilemap, lit by two flickering torches, with embers rising and a hooded figure idling"></td>
+<td><img src="docs/images/hud.png" alt="A HUD of panels, a health bar, a minimap and a crosshair over the orbiting helmet"></td>
+</tr>
+<tr>
+<td><b>2D.</b> A tilemap room lit by two flickering torches and a staff's cold glow, embers from the same GPU particles as 3D, and an animated sprite, in painter's order through a <code>Camera2D</code>. Every texel is drawn in code.</td>
+<td><b>A HUD over 3D.</b> Shapes, paths and text drawn over the finished frame, after the tonemap: exact colours, edges one pixel soft at any size, and a still HUD over a still scene is still a skipped frame.</td>
 </tr>
 </table>
 
@@ -90,6 +98,12 @@ engine.run({
 That is the whole setup. There is no `init()` to forget, no render-order to get right, no pass list to
 maintain, and no far plane to tune.
 
+A frame that would draw exactly what the last one did isn't drawn. When nothing has moved,
+animated, emitted or changed, and neither the camera nor a setting has, `engine.run` skips it, so
+a still scene costs the GPU nothing and a laptop stays cool. Every scene and engine method that
+changes a frame is noticed. If you change something the engine can't see, call
+`engine.invalidate()`; `{ onDemand: false }` draws every frame.
+
 Nothing it allocates outlives its use unless you keep it. `engine.unload(asset)` frees a model once
 every scene has removed it, since each `load()` uploads a fresh copy. `engine.destroy()` frees
 the rest. And an engine whose canvas leaves the page destroys itself, which is what a live editor
@@ -109,7 +123,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.13.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@0.14.0/src/winding.js';
 </script>
 ```
 
@@ -129,8 +143,8 @@ import { Winding, Camera } from 'winding-engine';
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.13.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.13.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@0.14.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@0.14.0/src/"
   }
 }
 </script>
@@ -187,8 +201,8 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 702 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 42 checks on a real device
+npm test          # 727 checks, Node, no browser
+npm run test:gpu  # serves the page; open test/gpu.html for 52 checks on a real device
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
@@ -398,8 +412,121 @@ scene.addText({ font, text: 'Platform 9', size: 0.3, facing: 'plane' });   // pa
   full.
 - Text is a node, drawn as sprites are: camera-facing, upright, or in its plane, in world units or
   pixels, fogged and sorted with alpha sprites. `setText(node, { text })` changes the string.
-- `align` and `anchor` place multi-line blocks. There's no kerning or text shaping: each character
-  advances by its own width, so ligatures and right-to-left scripts aren't handled.
+- `align` and `anchor` place multi-line blocks, and `width` wraps lines between words to fit, as
+  CSS wraps text in a box; a word wider than the box overflows it. There's no kerning or text
+  shaping: each character advances by its own width, so ligatures and right-to-left scripts
+  aren't handled.
+
+**2D**: view a scene through a `Camera2D` and it draws its sprites, text, tilemaps, shapes and
+paths flat, in painter's order, with none of the 3D passes.
+
+```js
+import { Camera2D, spriteSheet } from 'winding-engine';
+
+const hero = await engine.loadTexture('hero.png', { pixelated: true });
+const camera = new Camera2D({ anchor: [0.5, 0.5], zoom: 3, pixelSnap: true, background: [0.1, 0.1, 0.15, 1] });
+const player = scene.addSprite({
+  texture: hero, position: [120, 80], layer: 2,
+  animation: { frames: spriteSheet({ columns: 8 }), fps: 10 },
+});
+player.setScale(-1, 1, 1);   // face left
+let x = 120;
+engine.run({ scene, camera, update: (dt) => {
+  x -= 60 * dt;
+  player.setPosition(x, 80);
+  camera.position.set([x, 80]);   // the camera follows
+} });
+```
+- A unit is a CSS pixel, y points down, and the origin is the top-left: a canvas's coordinates.
+  A 16-pixel sprite is as big as a 16-pixel `<img>` on any screen, while snapping and edge
+  smoothing work in the screen's own pixels. `position` is the world point at `anchor` in the
+  view, so `[0.5, 0.5]` centres it; `zoom` and `rotation` scale and turn the view.
+  `screenToWorld` and `worldToScreen` convert, in the canvas's own pixels.
+- `scene.pick(camera, x, y, width, height)` takes a `Camera2D` as it takes a 3D one, with CSS
+  pixels from a pointer event, and returns what's drawn on top there: `{ node, point }`, plus
+  `tile: [column, row]` on a tilemap. A shape is hit inside its edge, text anywhere in its block,
+  a tilemap where the tile isn't empty, and a sprite anywhere in its quad, clear pixels included.
+- Composited in sRGB, as the browser composites a page: `rgb(128, 128, 128)` lands on screen as
+  128, and half-transparent black over white is 127, not the 188 blending in linear light gives.
+- Higher `layer`s draw over lower; one layer draws in the order it was added.
+- A sprite with no `size` is its frame's size in texels. `animation` plays a list of frames, as
+  `spriteSheet` cuts them, on `scene.advanceAnimations`, which `engine.run` already calls.
+  `node.setAngle(radians)` turns it clockwise, as CSS `rotate()` does, and a negative x scale
+  mirrors it.
+- `pixelated: true` on `loadTexture` keeps texels square when magnified, like CSS
+  `image-rendering: pixelated`, and `pixelSnap` puts every sprite on a whole pixel so they don't
+  shimmer as they move.
+- Sprite data stays on the GPU. A frame rewrites only the sprites that moved or changed, and a
+  camera move rewrites none. The GPU suite moves one of six and reads one slot written.
+- **Tilemaps**: a grid of tiles from one tileset image, drawn as a single quad whatever its size.
+  Each pixel looks up its own tile, so a map costs the pixels it covers, and `setTile` uploads just
+  that tile.
+
+  ```js
+  const tiles = await engine.loadTexture('tiles.png', { pixelated: true });
+  const level = scene.addTilemap({ tileset: tiles, tileSize: [16, 16], columns: 200, rows: 40, tiles: ids });
+  scene.setTile(level, 12, 3, 0);   // break a block
+  scene.tileAt(level, 12, 3);       // 0: empty
+  ```
+  Ids go row by row from the top-left: 0 is empty and 1 the tileset's first tile. The top three
+  bits flip a tile the way Tiled's do, so a Tiled layer's data works as is, and a tileset's
+  `margin` and `spacing` are Tiled's too. `setTiles` sets a block, and `setTilemap` changes the
+  rest.
+- **Shapes**: rectangles, rounded or not, and ellipses, with an outline if you want one. Each is
+  worked out from its distance to the edge, so it's truly round at any size, with one pixel of
+  smoothing at its edge. All the shapes in a layer draw in one call.
+
+  ```js
+  scene.addShape({ size: [120, 12], radius: 6, color: [0.9, 0.2, 0.2, 1] });   // a capsule
+  scene.addShape({ shape: 'ellipse', size: [30, 30], color: [0, 0, 0, 0], stroke: [1, 1, 1, 1], strokeWidth: 2 });
+  ```
+  The outline is drawn inside the edge, as a CSS border is. `setShape` changes one.
+- **Paths**: any outline to fill, any line to stroke, or both, just as smooth. Concave and
+  self-crossing outlines fill as a canvas fills them (nonzero), and lines have round joins and
+  ends. Paths and shapes draw together, in one call.
+
+  ```js
+  scene.addPath({ points: [[0, 0], [60, 20], [0, 40]], color: [1, 0.8, 0, 1] });
+  scene.addPath({ points: route, closed: false, color: [0, 0, 0, 0], stroke: [1, 1, 1, 1], strokeWidth: 3 });
+  ```
+- **Lights**: `lit: true` on a sprite, tilemap, shape, path or text lights it with the scene's
+  lights, the same `scene.addLight` 3D uses, each fading smoothly to nothing at its `radius`. A
+  spot aims across the view: `direction: [1, 0]`, or `node.setDirection(x, y)`. Where no light
+  reaches, the camera's `ambient` lights it, black by default. Lighting is in linear light, so a
+  full white light shows a colour exactly as authored. Anything not lit is unchanged, so a HUD or
+  a sky stays as drawn.
+
+  ```js
+  const camera = new Camera2D({ ambient: [0.05, 0.05, 0.1] });
+  scene.addTilemap({ tileset, tileSize: [16, 16], columns, rows, tiles, lit: true });
+  const torch = scene.addLight({ position: [120, 80], radius: 90, color: [1, 0.7, 0.4], intensity: 1.5 });
+  const lantern = scene.addLight({ position: [40, 60], direction: [1, 0], radius: 200, outerAngle: 0.4 });
+  ```
+- **Particles**: the same GPU emitters as 3D, drawn in the view's plane and its sRGB colours, at
+  their `layer` in the painter's order. `direction` and `acceleration` take `[x, y]`; y is down,
+  so embers rise with `acceleration: [0, -40]`.
+- **Debug lines** draw over a 2D view too, in its sRGB colours: `line` and `box` take `[x, y]`
+  points, and `circle` draws in the view's plane.
+- **Smooth sprites have no dark fringe.** A clear pixel decodes with black in it, which filtering
+  used to blend into a sprite's edge, enlarged or shrunk. Now a clear pixel takes its neighbours'
+  colour at load, and mipmaps are averaged by coverage, so an edge blends toward its own colour.
+
+**A HUD over 3D**: any 2D scene can be drawn as an overlay, over the finished frame.
+
+```js
+const hud = engine.createScene();
+const health = hud.addShape({ size: [200, 16], radius: 8, color: [0.8, 0.1, 0.1, 1], pivot: [0, 0], position: [24, 24] });
+hud.addText({ font, text: 'HP', size: 16, position: [24, 48] });
+engine.run({ scene: world, camera, overlay: { scene: hud } });
+
+hud.setShape(health, { size: [200 * hp, 16] });
+```
+- Drawn after the tonemap, bloom and antialiasing, so exposure and grading don't touch it:
+  its colours land exactly and its text stays crisp.
+- Through a plain `Camera2D`, one unit a CSS pixel from the top-left, unless the overlay names its
+  own `camera`. Name one to pick the HUD: `hud.pick(hudCamera, ...)`. It works over a 2D game
+  too, and each keeps its own sprite list.
+- A still HUD over a still scene is still a skipped frame: `run` compares the overlay too.
 
 **Decals**: an image projected onto whatever lies in a box, like a scorch mark, a poster or a puddle.
 
@@ -655,6 +782,17 @@ These are real and currently unaddressed.
   (`KHR_texture_basisu`, KTX2) aren't read yet, so a texture takes 4 bytes a texel, plus its mips,
   however it was shipped, and a file that requires KTX2 is refused. Draco geometry is refused too:
   meshopt does the same job and is read, and `gltf-transform meshopt` converts one to the other.
+- **A 3D camera doesn't draw tilemaps, shapes or paths, and a HUD overlay doesn't draw
+  particles.** The particle system follows one scene's emitters at a time.
+- **2D lights cast no shadows and read no normal maps.** Every light is checked at every lit pixel,
+  which is fine for dozens; hundreds would want them binned into screen tiles, as the 3D view's
+  clusters do.
+- **A path is measured against every one of its segments at every pixel it covers.** Fine for
+  hundreds of points; an outline of thousands, like a coastline, would want triangulating instead.
+- **A 2D sprite is picked by its quad**, clear pixels included: knowing which pixels are clear
+  would mean keeping a CPU copy of every texture.
+- **Tilemaps read the full-size tileset only.** Mipmaps would blend neighbouring tiles together,
+  so a map zoomed far out shimmers.
 - **Device loss ends the session.** `onDeviceLost` fires with enough to act on and the engine
   destroys itself, but nothing is rebuilt -- recovering would mean holding a CPU copy of every GPU
   resource, textures' contents included, for the whole process lifetime. Create a new engine, or

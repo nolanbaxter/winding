@@ -17,11 +17,12 @@ import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { DEPTH_FORMAT, DEPTH_COMPARE } from '../rhi/device.js';
-import { clampSampler } from '../rhi/texture.js';
+import { clampSampler, pixelatedSampler } from '../rhi/texture.js';
 import { grownCapacity } from '../core/grow.js';
 import { FRAME_WGSL } from './shaders/pbr.js';
 import { FOG_WGSL } from './fog.js';
 import { handleIndex } from '../core/handle.js';
+import { spriteRect } from '../scene/scene.js';
 
 /** position, rotation, size, pivot, rect, colour, flags, cutoff, and the plane's two axes. */
 export const SPRITE_FLOATS = 24;
@@ -214,7 +215,7 @@ export function packSprites(scene, camera, out = null) {
     const glyph = box !== null;
     const texture = glyph ? source.font.texture : source.texture;
     const blend = glyph ? 'alpha' : source.blend;
-    const rect = glyph ? source.font.metrics.glyphs.get(box.char).rect : source.rect;
+    const rect = glyph ? source.font.metrics.glyphs.get(box.char).rect : spriteRect(source);
     const color = source.color;
     out[o] = world[m + 12];
     out[o + 1] = world[m + 13];
@@ -339,11 +340,30 @@ export class SpritePass {
   }
 
   /** Gather and upload this frame's sprites. Returns how many there are. */
-  prepare(scene, camera, environment, width, height) {
+  /**
+   * `moved`: whether any transform moved this frame. Without that, and with
+   * the same scene, contents, camera and size as the last pack, the packed
+   * list and its upload stand as they are -- packing is per sprite and per
+   * glyph, every frame, and 10,000 of them cost milliseconds.
+   */
+  prepare(scene, camera, environment, width, height, moved = true) {
     if (scene.sprites.size === 0 && scene.texts.size === 0) {
       this.count = 0;
+      this._packed = null;
       return 0;
     }
+    const last = this._packed;
+    if (!moved && last !== null && last !== undefined && last.scene === scene && last.revision === scene.revision
+      && last.changes === scene.changes && last.width === width && last.height === height
+      && camera.view.every((v, i) => v === last.view[i])
+      && camera.position.every((v, i) => v === last.eye[i])) {
+      this._environment = environment;
+      return this.count;
+    }
+    this._packed = {
+      scene, revision: scene.revision, changes: scene.changes, width, height,
+      view: Float32Array.from(camera.view), eye: Float32Array.from(camera.position),
+    };
     const { count, runs, out } = packSprites(scene, camera, this._data);
     this._data = out;
     this.count = count;
@@ -408,7 +428,7 @@ export class SpritePass {
           layout: this._imageLayout,
           entries: [
             { binding: 0, resource: texture.view },
-            { binding: 1, resource: clampSampler(this.rhi) },
+            { binding: 1, resource: texture.pixelated ? pixelatedSampler(this.rhi) : clampSampler(this.rhi) },
           ],
         });
         this._imageGroups.set(texture, imageGroup);

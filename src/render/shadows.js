@@ -409,6 +409,30 @@ export class ShadowMaps {
       throw new RangeError(`Shadows: a local map of ${localSize} is outside 5 to this device's ${maxSize}`);
     }
     this.localSize = localSize;
+    /**
+     * What each run of local layers last drew, by its first layer: the light
+     * and its views exactly. A light whose views match, and that nothing
+     * changed near, keeps its maps from that draw; see updateLocal.
+     */
+    this._cache = [];
+    /** Per local view this frame: 1 to draw it, 0 to keep what the layer holds. */
+    this.localRedraw = new Uint8Array(0);
+    /** How many local views were drawn this frame, of localCount. */
+    this.localDrawn = 0;
+    /** Bumped when the local array is replaced, which loses every map in it. */
+    this._localGeneration = 0;
+    /** Counts updateLocal calls, so a record knows whether it was checked in the last one. */
+    this._frame = 0;
+    // The same, for the cascades: what each layer last drew, by layer, and
+    // which to draw this frame. A cascade's matrix is fitted to a texel grid
+    // fixed in the world, so it comes out the same while the camera holds
+    // still -- and so does its map, unless something moved inside it.
+    this._cascadeCache = [];
+    this.cascadeRedraw = new Uint8Array(0);
+    /** How many cascade layers were drawn this frame. */
+    this.cascadesDrawn = 0;
+    this._cascadeGeneration = 0;
+    this._cascadeFrame = 0;
 
     this.rhi = rhi;
     this.size = size;
@@ -628,6 +652,8 @@ export class ShadowMaps {
     this.texture?.destroy();
     this.cascadeBuffer?.destroy();
     this.cascadeList?.destroy();
+    this._cascadeCache = [];
+    this._cascadeGeneration++;
     this.texture = createTexture(rhi, {
       label: 'shadow-cascades',
       size: [this.size, this.size, capacity],
@@ -681,6 +707,8 @@ export class ShadowMaps {
     this.localTexture?.destroy();
     this.localUniform?.destroy();
     this.localBuffer?.destroy();
+    this._cache = [];
+    this._localGeneration++;
     const size = this.localSize;
     this.localTexture = createTexture(rhi, {
       label: 'shadow-local',
@@ -731,13 +759,25 @@ export class ShadowMaps {
    *
    * A light whose sphere is off screen gets no views: nothing it lights is
    * drawn, so nothing would read them.
+   *
+   * CACHED. A light's maps are drawn again only when they would come out
+   * different: its views changed, it landed on other layers, or something in
+   * its reach changed -- `changes.boxes` holds every box that moved or
+   * deformed this frame, before and after, and `changes.all` says the scene
+   * changed in a way no box describes. Only a caster inside the light's
+   * sphere can shadow anything it lights, since it has to sit between the
+   * light and a receiver the light reaches, so a box outside the sphere
+   * cannot change what the maps say about anything that matters. Without
+   * `changes`, everything is drawn.
    */
-  updateLocal(scene, camera) {
+  updateLocal(scene, camera, changes = null) {
     frustumFromViewProjection(this._frustum, camera.viewProjection);
     const lights = scene.lights;
     const casters = scene.shadowCasters;
     const margin = localMargin(this.localSize);
+    const generation = this._localGeneration;
     let count = 0;
+    let drawn = 0;
     for (let i = 0; i < scene.lightCount; i++) {
       const o = i * LIGHT_FLOATS;
       lights[o + 11] = 0;
@@ -764,13 +804,56 @@ export class ShadowMaps {
       }
       lights[o + 11] = views;
       lights[o + 15] = count + 1;
+      if (this._redrawLight(count, views, scene.lightEntity[i], radius, changes)) drawn += views;
       count += views;
     }
     this.localCount = count;
+    // A record not checked this frame missed this frame's changes, so it can
+    // never be trusted again: a light off screen for a while, or moved to
+    // other layers, draws afresh when it comes back.
+    for (let l = 0; l < this._cache.length; l++) {
+      if (this._cache[l] !== undefined && this._cache[l].frame !== this._frame) this._cache[l] = undefined;
+    }
+    this._frame++;
+    // Growing the array this frame lost every map in it, those decided above included.
+    if (this._localGeneration !== generation) {
+      this.localRedraw.fill(1, 0, count);
+      drawn = count;
+    }
+    this.localDrawn = drawn;
     if (count > 0) {
       this.rhi.queue.writeBuffer(this.localUniform, 0, this.localStaging, 0, this.alignment * count);
       this.rhi.queue.writeBuffer(this.localBuffer, 0, this.localData, 0, count * LOCAL_VIEW_FLOATS);
     }
+  }
+
+  /**
+   * Whether the light whose views fill layers first..first+views-1 must be
+   * drawn this frame, marking them in localRedraw and remembering the draw.
+   */
+  _redrawLight(first, views, entity, radius, changes) {
+    if (this.localRedraw.length < this.localCapacity) {
+      const grown = new Uint8Array(this.localCapacity);
+      grown.set(this.localRedraw);
+      this.localRedraw = grown;
+    }
+    const floats = views * LOCAL_VIEW_FLOATS;
+    const at = first * LOCAL_VIEW_FLOATS;
+    const cached = this._cache[first];
+    let redraw = changes === null || changes.all || cached === undefined
+      || cached.entity !== entity || cached.views !== views
+      || changes.boxes.touchesSphere(this._eye[0], this._eye[1], this._eye[2], radius);
+    for (let k = 0; !redraw && k < floats; k++) redraw = cached.data[k] !== this.localData[at + k];
+    this.localRedraw.fill(redraw ? 1 : 0, first, first + views);
+    if (!redraw) cached.frame = this._frame;
+    if (redraw) {
+      const data = cached?.data.length === floats ? cached.data : new Float32Array(floats);
+      data.set(this.localData.subarray(at, at + floats));
+      this._cache[first] = { entity, views, data, frame: this._frame };
+      // Layers inside this run held other runs' maps, which are gone now.
+      for (let l = first + 1; l < first + views; l++) this._cache[l] = undefined;
+    }
+    return redraw;
   }
 
   /** One perspective view from `eye` along (x, y, z), square, at `tanHalf`. */
@@ -798,8 +881,10 @@ export class ShadowMaps {
    * The slices, their spheres and their texel sizes depend on the camera
    * alone, so every light shares them; only the matrices are per light.
    */
-  update(camera, scene) {
+  update(camera, scene, changes = null) {
     const count = this.cascadeCount;
+    const generation = this._cascadeGeneration;
+    let drawn = 0;
     const splits = cascadeSplits(camera.near, this.shadowDistance, count, this.lambda);
     let sliceNear = camera.near;
     for (let i = 0; i < count; i++) {
@@ -827,17 +912,58 @@ export class ShadowMaps {
       this._growCascades((lights + 1) * count);
       this._lightDirection[0] = x; this._lightDirection[1] = y; this._lightDirection[2] = z;
       vec3Normalize(this._lightDirection, this._lightDirection);
-      for (let c = 0; c < count; c++) this._fitCascade(lights * count + c, c);
+      for (let c = 0; c < count; c++) {
+        this._fitCascade(lights * count + c, c);
+        if (this._redrawCascade(lights * count + c, scene.directionalEntity[d], changes)) drawn++;
+      }
       directionals[o + 3] = lights + 1;
       lights++;
     }
     this.shadowedCount = lights;
     // Zero keeps every shadow pass off the graph and every lookup lit.
     this.activeCascades = lights > 0 ? count : 0;
-    if (lights === 0) return;
     const layers = lights * count;
+    // As for local views: a record not checked this frame is never trusted
+    // again, and growing the array lost every map, those decided above too.
+    for (let l = 0; l < this._cascadeCache.length; l++) {
+      if (this._cascadeCache[l] !== undefined && this._cascadeCache[l].frame !== this._cascadeFrame) this._cascadeCache[l] = undefined;
+    }
+    this._cascadeFrame++;
+    if (this._cascadeGeneration !== generation) {
+      this.cascadeRedraw.fill(1, 0, layers);
+      drawn = layers;
+    }
+    this.cascadesDrawn = drawn;
+    if (lights === 0) return;
     this.rhi.queue.writeBuffer(this.cascadeBuffer, 0, this.cascadeStaging, 0, this.alignment * layers);
     this.rhi.queue.writeBuffer(this.cascadeList, 0, this.matrices, 0, layers * 16);
+  }
+
+  /**
+   * Whether cascade layer `layer`, just fitted for the light `entity`, must
+   * be drawn: it has no record, another light's, a different matrix, or
+   * something changed inside what it draws.
+   */
+  _redrawCascade(layer, entity, changes) {
+    if (this.cascadeRedraw.length < this.cascadeCapacity) {
+      const grown = new Uint8Array(this.cascadeCapacity);
+      grown.set(this.cascadeRedraw);
+      this.cascadeRedraw = grown;
+    }
+    const at = layer * 16;
+    const cached = this._cascadeCache[layer];
+    let redraw = changes === null || changes.all || cached === undefined || cached.entity !== entity
+      || changes.boxes.touchesOrtho(this.matrices, at);
+    for (let k = 0; !redraw && k < 16; k++) redraw = cached.data[k] !== this.matrices[at + k];
+    this.cascadeRedraw[layer] = redraw ? 1 : 0;
+    if (redraw) {
+      const data = cached?.data ?? new Float32Array(16);
+      data.set(this.matrices.subarray(at, at + 16));
+      this._cascadeCache[layer] = { entity, data, frame: this._cascadeFrame };
+    } else {
+      cached.frame = this._cascadeFrame;
+    }
+    return redraw;
   }
 
   /** One cascade of the light along _lightDirection, into array layer `layer`. */
@@ -934,6 +1060,8 @@ export class ShadowMaps {
     }
 
     for (let layer = 0; layer < this.shadowedCount * this.cascadeCount; layer++) {
+      // A kept cascade is neither drawn nor cleared; the array is imported.
+      if (this.cascadeRedraw[layer] === 0) continue;
       graph.addPass({
         name: `shadow:${Math.floor(layer / this.cascadeCount)}:${layer % this.cascadeCount}`,
         reads,
@@ -950,6 +1078,9 @@ export class ShadowMaps {
     if (localResource === null || this.localCount === 0) return;
     this.localBindGroup ??= this._makeCascadeBindGroup(gpu, palette, morph, this.localUniform);
     for (let v = 0; v < this.localCount; v++) {
+      // A kept map is not drawn, and the layer is not cleared: the array is
+      // imported, so what it held last frame is still there.
+      if (this.localRedraw[v] === 0) continue;
       graph.addPass({
         name: `shadow:local:${v}`,
         reads,

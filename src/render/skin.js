@@ -39,18 +39,20 @@ export class SkinPalette {
   /**
    * Rebuild every palette from the scene's current pose.
    *
-   * Unconditional: a joint is a node like any other, so it moves when an
-   * animation or the user moves it, and the transform store's `moved` flags
-   * are cleared by the frame that consumed them. Tracking which skins changed
-   * would mean reading those flags before the renderer does, which is a
-   * coupling worth more than the multiply it saves.
+   * `posed` is whether any skin's joints moved this frame, which the renderer
+   * works out from the transform store's `moved` flags before it clears
+   * them. When none did, in the scene these palettes were built for, they
+   * already hold this pose, and nothing is computed or uploaded.
    */
-  update(scene) {
+  update(scene, posed = true) {
     const skins = scene.skins;
     if (skins.length === 0) {
       this.jointCount = 0;
       return;
     }
+    if (!posed && this._builtFor === scene && this._builtRevision === scene.revision) return;
+    this._builtFor = scene;
+    this._builtRevision = scene.revision;
 
     let total = 0;
     for (const skin of skins) total += skin.joints.length;

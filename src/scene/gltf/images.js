@@ -33,7 +33,7 @@ const BITMAP_OPTIONS = { colorSpaceConversion: 'none', premultiplyAlpha: 'none' 
  * factor, which is a far better outcome than refusing to show the model.
  */
 export async function decodeImages(
-  json, buffers, { baseURL, fetchImpl = globalThis.fetch, maxDimension = Infinity } = {},
+  json, buffers, { baseURL, fetchImpl = globalThis.fetch, maxDimension = Infinity, onImage = null } = {},
 ) {
   const images = json.images ?? [];
   const used = usedImages(json);
@@ -43,6 +43,8 @@ export async function decodeImages(
     // declare as many images as it likes.
     if (!used.has(index)) return null;
     try {
+      // An embedded image needs its buffer; one with a uri does not, so it
+      // is fetched at once, even while `buffers` is still a promise.
       const blob = await imageBlob(image, json, buffers, { baseURL, fetchImpl, index });
       // Sized from the header, before decoding. createImageBitmap decodes the
       // whole image first, so a 30000-pixel PNG of a few kilobytes cost gigabytes
@@ -52,7 +54,10 @@ export async function decodeImages(
       if (size.width > maxDimension || size.height > maxDimension) {
         throw new Error(`is ${size.width}x${size.height}, past this device's ${maxDimension}`);
       }
-      return await createImageBitmap(blob, BITMAP_OPTIONS);
+      const bitmap = await createImageBitmap(blob, BITMAP_OPTIONS);
+      // As each lands, so an uploader can start on it while the rest decode.
+      onImage?.(index, bitmap);
+      return bitmap;
     } catch (error) {
       console.warn(`glTF: image ${index} (${image.name ?? image.uri ?? 'embedded'}) failed: ${error.message}`);
       return null;
@@ -62,7 +67,9 @@ export async function decodeImages(
 
 async function imageBlob(image, json, buffers, { baseURL, fetchImpl, index }) {
   if (image.bufferView !== undefined) {
-    // Embedded in the BIN chunk, which is how .glb ships textures.
+    // Embedded in the BIN chunk, which is how .glb ships textures. `buffers`
+    // may be a promise of the resolved document, whose views are the ones to read.
+    if (typeof buffers?.then === 'function') ({ json, buffers } = await buffers);
     const view = json.bufferViews?.[image.bufferView];
     if (!view) throw new Error(`bufferView ${image.bufferView} does not exist`);
 
@@ -140,14 +147,26 @@ export function textureReference(material, path) {
 
 /** Every image some material samples, by index. */
 export function usedImages(json) {
-  const used = new Set();
+  return new Set(imageColorSpaces(json).keys());
+}
+
+/**
+ * How each sampled image is read, by index: { srgb, linear }, either or both
+ * -- a colour map is sRGB, a data map linear, and one image can be both. What
+ * an uploader needs to make an image's textures before any material asks.
+ */
+export function imageColorSpaces(json) {
+  const spaces = new Map();
   for (const material of json.materials ?? []) {
-    for (const { path } of MATERIAL_TEXTURES) {
+    for (const { path, srgb } of MATERIAL_TEXTURES) {
       const image = textureImageIndex(json, textureReference(material, path)?.index);
-      if (image >= 0) used.add(image);
+      if (image < 0) continue;
+      const entry = spaces.get(image) ?? { srgb: false, linear: false };
+      if (srgb) entry.srgb = true; else entry.linear = true;
+      spaces.set(image, entry);
     }
   }
-  return used;
+  return spaces;
 }
 
 /**

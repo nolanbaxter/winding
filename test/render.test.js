@@ -931,6 +931,19 @@ test('in bind pose every joint matrix is identity', () => {
   }
 });
 
+test('palettes are rebuilt only when a skin was posed, or the scene changed', () => {
+  const scene = skinnedScene();
+  const palette = paletteFor(scene);
+  let writes = 0;
+  palette.rhi = { queue: { writeBuffer() { writes++; } } };
+  palette.update(scene, false);
+  assert.equal(writes, 0, 'nothing posed: the palettes already hold this pose');
+  palette.update(scene, true);
+  assert.equal(writes, 1, 'a skin was posed');
+  palette.update(skinnedScene(), false);
+  assert.equal(writes, 2, 'another scene, whatever it says');
+});
+
 test('moving a joint moves only its own matrix', () => {
   const palette = paletteFor(skinnedScene({ jointPositions: [[0, 0, 0], [5, 0, 0]] }));
   // Column-major: the translation is elements 12..14.
@@ -1125,16 +1138,33 @@ test('a glyph distance field is the exact distance to its edge, 0.5 on it', () =
 test('text lays out by advance, aligns each line, and puts its anchor at the origin', () => {
   const glyph = (advance) => ({ advance, left: 0, width: advance, height: 1, descent: 0 });
   const metrics = { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', glyph(0.5)], ['b', glyph(1)], [' ', { advance: 0.25, left: 0, width: 0, height: 0, descent: 0 }]]) };
-  const one = layoutText('ab a', metrics, { anchor: [0, 0] });
+  const one = layoutText('ab a', metrics, { anchor: [0, 0] }).boxes;
   assert.deepEqual(one.map((g) => g.char), ['a', 'b', 'a'], 'a space advances and draws nothing');
   assert.deepEqual(one.map((g) => g.x), [0, 0.5, 1.75]);
   assert.deepEqual(one.map((g) => +g.y.toFixed(6)), [0.2, 0.2, 0.2], 'on the baseline, above the descent, from the bottom left');
-  const two = layoutText('ab\na', metrics, { align: 'right', anchor: [1, 1] });
+  const two = layoutText('ab\na', metrics, { align: 'right', anchor: [1, 1] }).boxes;
   assert.equal(two[2].x, -0.5, 'the short line pushed right, and the block anchored at its top right');
   assert.ok(two[2].y < two[0].y, 'the second line below the first');
   const centred = layoutText('b', metrics);
-  assert.deepEqual([centred[0].x, +centred[0].y.toFixed(6)], [-0.5, -0.3], 'centred by default');
+  assert.deepEqual([centred.boxes[0].x, +centred.boxes[0].y.toFixed(6)], [-0.5, -0.3], 'centred by default');
+  assert.deepEqual(centred.block.map((v) => +v.toFixed(6)), [-0.5, -0.5, 0.5, 0.5], 'the block, around its anchor');
   assert.throws(() => layoutText('a', metrics, { align: 'justify' }), /align/);
+});
+
+test('text wraps between words to a width, as CSS wraps it in a box', () => {
+  const glyph = (advance) => ({ advance, left: 0, width: advance, height: 1, descent: 0 });
+  const metrics = { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', glyph(0.5)], ['b', glyph(1)], [' ', { advance: 0.25, left: 0, width: 0, height: 0, descent: 0 }]]) };
+  const lineOf = (layout) => layout.boxes.map((g) => Math.round(-g.y));
+  // 'ab' is 1.5 wide and 'ab ab' 3.25: two lines in a width of 2.
+  const wrapped = layoutText('ab ab a', metrics, { anchor: [0, 1], width: 2 });
+  assert.deepEqual(lineOf(wrapped), [1, 1, 2, 2, 3], 'one word a line');
+  assert.deepEqual(wrapped.boxes.map((g) => g.x), [0, 0.5, 0, 0.5, 0], 'each line starts at the left');
+  assert.deepEqual(lineOf(layoutText('ab ab a', metrics, { anchor: [0, 1], width: 3.25 })), [1, 1, 1, 1, 2], 'exactly fitting fits');
+  assert.equal(layoutText('bbbb', metrics, { width: 1 }).boxes.length, 4, 'a word wider than the box overflows it, whole');
+  const centred = layoutText('a', metrics, { align: 'center', anchor: [0, 0], width: 4 });
+  assert.equal(centred.boxes[0].x, 1.75, 'centred in the box, not in the line');
+  assert.equal(centred.block[2], 4, 'the block is the box');
+  assert.deepEqual(lineOf(layoutText('ab\nab', metrics, { anchor: [0, 1], width: 9 })), [1, 1, 2, 2], 'a newline still breaks');
 });
 
 test('a text takes a loadFont font, rasterises what it uses, and names a bad option', () => {

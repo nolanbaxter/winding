@@ -211,6 +211,65 @@ fn fs(v : Out) -> @location(0) vec4<f32> {
 }
 `;
 
+// The same particles through a Camera2D (render/view2d.js): flat in the view's
+// plane, with its colours -- sRGB, as every 2D colour is -- and no depth or fog.
+const DRAW_2D_SHADER = /* wgsl */ `
+${EMITTER_WGSL}
+
+@group(0) @binding(0) var<uniform> viewProjection : mat4x4<f32>;
+@group(1) @binding(0) var<uniform> emitter    : Emitter;
+@group(1) @binding(1) var<storage, read> pool : array<Particle>;
+@group(2) @binding(0) var          image      : texture_2d<f32>;
+@group(2) @binding(1) var          imageSampler : sampler;
+
+override ADDITIVE : bool = true;
+
+struct Out {
+  @builtin(position) clip : vec4<f32>,
+  @location(0) uv    : vec2<f32>,
+  @location(1) color : vec4<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) index : u32, @builtin(instance_index) slot : u32) -> Out {
+  var out : Out;
+  let p = pool[slot];
+  if (p.age >= p.lifetime) {
+    out.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+    return out;
+  }
+  var corners = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+  );
+  let corner = corners[index];
+  let t = clamp(p.age / p.lifetime, 0.0, 1.0);
+  // y points down, so the image's top is at the corner with the smaller y.
+  let at = p.position.xy + (corner - vec2<f32>(0.5)) * mix(emitter.size.x, emitter.size.y, t);
+  out.clip = viewProjection * vec4<f32>(at, 0.0, 1.0);
+  out.uv = corner;
+  out.color = mix(emitter.colorStart, emitter.colorEnd, t);
+  return out;
+}
+
+fn encode(c : vec3<f32>) -> vec3<f32> {
+  let v = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+  return select(v * 12.92, 1.055 * pow(v, vec3<f32>(1.0 / 2.4)) - 0.055, v > vec3<f32>(0.0031308));
+}
+
+@fragment
+fn fs(v : Out) -> @location(0) vec4<f32> {
+  let sampled = textureSample(image, imageSampler, v.uv);
+  let r = v.uv * 2.0 - 1.0;
+  let disc = vec4<f32>(1.0, 1.0, 1.0, clamp(1.0 - dot(r, r), 0.0, 1.0));
+  // An image is sampled as linear light: back to the sRGB the 2D view blends.
+  let colour = select(disc, vec4<f32>(encode(sampled.rgb), sampled.a), emitter.direction.w > 0.5) * v.color;
+  let rgb = clamp(colour.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+  if (ADDITIVE) { return vec4<f32>(rgb * colour.a, 0.0); }
+  return vec4<f32>(rgb, colour.a);
+}
+`;
+
 /**
  * How many slots an emitter's ring needs: everything it can have alive at
  * once -- its rate times its longest lifetime, rounded up -- plus what it is
@@ -248,9 +307,10 @@ export function packEmitter(out, o, record, world, m, ring, births, dt, seed) {
 export class ParticleSystem {
   static async create(rhi, pipelines, frameBuffer, colorFormat) {
     const device = rhi.device;
-    const [simulateShader, drawShader] = await Promise.all([
+    const [simulateShader, drawShader, draw2DShader] = await Promise.all([
       compileShader(device, SIMULATE_SHADER, 'particles-simulate.wgsl'),
       compileShader(device, DRAW_SHADER, 'particles-draw.wgsl'),
+      compileShader(device, DRAW_2D_SHADER, 'particles-draw-2d.wgsl'),
     ]);
     const simulateLayout = device.createBindGroupLayout({
       label: 'particles-simulate',
@@ -313,8 +373,20 @@ export class ParticleSystem {
         constants: { ADDITIVE: blend === 'additive' ? 1 : 0 },
       };
     }
+    // A 2D view's: onto the canvas's plain view, with no depth.
+    const flatLayout = device.createBindGroupLayout({
+      label: 'particles-2d',
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }],
+    });
+    const flatPipelineLayout = createPipelineLayout(device, { 0: flatLayout, 1: emitterLayout, 2: imageLayout }, 'particles-2d');
+    for (const blend of ['alpha', 'additive']) {
+      descriptors[`${blend}2D`] = {
+        ...descriptors[blend], label: `particles-2d:${blend}`, layout: flatPipelineLayout, shader: draw2DShader,
+        targets: [{ ...descriptors[blend].targets[0], format: rhi.surfaceFormat }], depth: null,
+      };
+    }
     await pipelines.warm(Object.values(descriptors));
-    return new ParticleSystem(rhi, pipelines, { simulate, descriptors, simulateLayout, frameLayout, emitterLayout, imageLayout }, frameBuffer);
+    return new ParticleSystem(rhi, pipelines, { simulate, descriptors, simulateLayout, frameLayout, emitterLayout, imageLayout, flatLayout }, frameBuffer);
   }
 
   constructor(rhi, pipelines, built, frameBuffer) {
@@ -333,6 +405,13 @@ export class ParticleSystem {
     this._staging = new Uint8Array(0);
     this._camera = new Float32Array(8);
     this._cameraBuffer = createBuffer(rhi, { label: 'particles-camera', size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    /** A 2D view's world-to-clip matrix, and its bind group. */
+    this._flatBuffer = createBuffer(rhi, { label: 'particles-2d', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this._flatGroup = rhi.device.createBindGroup({
+      label: 'particles-2d', layout: this.flatLayout, entries: [{ binding: 0, resource: { buffer: this._flatBuffer } }],
+    });
+    /** This frame's emitters by entity, for a 2D view drawing them one at a time. */
+    this._byEntity = new Map();
     this._frameGroups = new WeakMap();
     this._imageGroups = new WeakMap();
     this._list = [];
@@ -382,15 +461,20 @@ export class ParticleSystem {
     for (const entity of this.rings.keys()) if (!scene.emitters.has(entity)) { this.rings.delete(entity); relayout = true; }
     if (relayout) this._layout(list);
 
-    // Alpha emitters draw far to near after one another; additive after them all.
-    const eye = camera.position;
-    const f = [-camera.view[2], -camera.view[6], -camera.view[10]];
-    for (const item of list) {
-      const m = handleIndex(item.entity) * 16;
-      item.m = m;
-      item.depth = (world[m + 12] - eye[0]) * f[0] + (world[m + 13] - eye[1]) * f[1] + (world[m + 14] - eye[2]) * f[2];
+    for (const item of list) item.m = handleIndex(item.entity) * 16;
+    if (camera.is2D !== true) {
+      // Alpha emitters draw far to near after one another; additive after them
+      // all. A 2D view orders them by layer instead, with its sprites.
+      const eye = camera.position;
+      const f = [-camera.view[2], -camera.view[6], -camera.view[10]];
+      for (const item of list) {
+        const m = item.m;
+        item.depth = (world[m + 12] - eye[0]) * f[0] + (world[m + 13] - eye[1]) * f[1] + (world[m + 14] - eye[2]) * f[2];
+      }
+      list.sort((a, b) => (a.record.blend === 'additive') - (b.record.blend === 'additive') || b.depth - a.depth);
     }
-    list.sort((a, b) => (a.record.blend === 'additive') - (b.record.blend === 'additive') || b.depth - a.depth);
+    this._byEntity.clear();
+    for (const item of list) this._byEntity.set(item.entity, item);
 
     const bytes = list.length * this.stride;
     if (bytes > this._uniformCapacity) {
@@ -410,9 +494,13 @@ export class ParticleSystem {
       item.ring.head = (item.ring.head + item.births) % item.ring.capacity;
     });
     this.rhi.queue.writeBuffer(this._uniform, 0, this._staging, 0, bytes);
-    const v = camera.view;
-    this._camera.set([v[0], v[4], v[8], 0, v[1], v[5], v[9], 0]);
-    this.rhi.queue.writeBuffer(this._cameraBuffer, 0, this._camera);
+    if (camera.is2D === true) {
+      this.rhi.queue.writeBuffer(this._flatBuffer, 0, camera.viewProjection);
+    } else {
+      const v = camera.view;
+      this._camera.set([v[0], v[4], v[8], 0, v[1], v[5], v[9], 0]);
+      this.rhi.queue.writeBuffer(this._cameraBuffer, 0, this._camera);
+    }
     this._environment = environment;
     return this.count;
   }
@@ -454,12 +542,37 @@ export class ParticleSystem {
 
   /** The two passes: births and motion, then the draw that reads them. */
   addPasses(graph, { sceneColor, depth }) {
-    if (this.count === 0) return;
-    const pool = graph.importBuffer('particles', this.pool);
-    graph.addPass({ name: 'particles:simulate', type: 'compute', writes: [pool], execute: this._simulate });
+    const pool = this.addSimulation(graph);
+    if (pool === null) return;
     graph.addPass({
       name: 'particles', reads: [pool], color: [{ resource: sceneColor }], depth: { resource: depth }, execute: this._draw,
     });
+  }
+
+  /**
+   * Births and motion alone, for a 2D view that draws the particles itself
+   * (draw2D). Returns the pool, for its pass to read; null with no emitters.
+   */
+  addSimulation(graph) {
+    if (this.count === 0) return null;
+    const pool = graph.importBuffer('particles', this.pool);
+    graph.addPass({ name: 'particles:simulate', type: 'compute', writes: [pool], execute: this._simulate });
+    return pool;
+  }
+
+  /**
+   * One emitter's particles, inside a 2D view's pass (render/view2d.js), in
+   * its place in the painter's order. Sets its own pipeline and every bind
+   * group it uses, so the view binds its own again after.
+   */
+  draw2D(pass, entity) {
+    const item = this._byEntity.get(entity);
+    if (item === undefined) return;
+    pass.setPipeline(this.pipelines.get(this.descriptors[`${item.record.blend}2D`]));
+    pass.setBindGroup(0, this._flatGroup);
+    pass.setBindGroup(1, this._bindGroups().emitter, [item.slot * this.stride]);
+    pass.setBindGroup(2, this._imageGroup(item.record.texture));
+    pass.draw(6, item.ring.capacity, 0, item.ring.offset);
   }
 
   _bindGroups() {
@@ -548,5 +661,6 @@ export class ParticleSystem {
     this.pool?.destroy();
     this._uniform?.destroy();
     this._cameraBuffer.destroy();
+    this._flatBuffer.destroy();
   }
 }

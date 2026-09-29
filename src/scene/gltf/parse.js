@@ -112,7 +112,12 @@ export async function loadGLTF(source, options = {}) {
   checkAccessors(json, maxBytes);
 
   // Compressed bufferViews become plain ones here, before anything reads them.
-  const decoded = decompressViews(json, await resolveBuffers(json, binary, options), maxBytes);
+  const ready = resolveBuffers(json, binary, options).then((buffers) => decompressViews(json, buffers, maxBytes));
+  // The document is known before its buffers arrive. A loader starts fetching
+  // and decoding images here, so they come in alongside the buffers instead
+  // of after them; `ready` gives what an image embedded in a buffer needs.
+  options.onDocument?.(json, ready);
+  const decoded = await ready;
   return buildModel(decoded.json, decoded.buffers, maxBytes);
 }
 

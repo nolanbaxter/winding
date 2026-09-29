@@ -9,8 +9,12 @@
 //
 // Drawn last, onto the screen itself, after tone mapping: a colour asked for
 // is the colour shown, with no exposure, bloom or antialiasing in between.
-// Colours are linear, as everywhere else in the engine. The scene's depth
-// hides them where geometry is in front, unless `depthTest` is off.
+// Colours are linear, as everywhere else in 3D. The scene's depth hides them
+// where geometry is in front, unless `depthTest` is off.
+//
+// Through a Camera2D they are drawn over the 2D view, and their colours are
+// sRGB, as every 2D colour is. Points can be [x, y] there; circle() draws in
+// the view's plane.
 //
 // One pixel wide, which is the only width WebGPU draws lines at.
 
@@ -73,8 +77,13 @@ export class DebugLines {
       // Equal passes too, so an edge drawn along a surface shows on it.
       depth: { format: DEPTH_FORMAT, depthCompare: depthTest ? 'greater-equal' : 'always', depthWriteEnabled: false },
     });
-    const descriptors = { tested: descriptor(true), onTop: descriptor(false) };
-    await pipelines.warm([descriptors.tested, descriptors.onTop]);
+    const descriptors = {
+      tested: descriptor(true),
+      onTop: descriptor(false),
+      // A 2D view: onto the canvas's plain view, which its colours land in as they are, with no depth.
+      flat: { ...descriptor(false), label: 'debug-lines:2d', targets: [{ format: rhi.surfaceFormat }], depth: null },
+    };
+    await pipelines.warm(Object.values(descriptors));
     return new DebugLines(rhi, pipelines, descriptors, layout);
   }
 
@@ -96,23 +105,30 @@ export class DebugLines {
     this._bindGroup = rhi.device.createBindGroup({
       label: 'debug-lines', layout, entries: [{ binding: 0, resource: { buffer: this._uniform } }],
     });
+    this._flat = false;
     this._execute = (pass) => {
-      pass.setPipeline(this.pipelines.get(this.depthTest ? this._descriptors.tested : this._descriptors.onTop));
+      const d = this._descriptors;
+      pass.setPipeline(this.pipelines.get(this._flat ? d.flat : this.depthTest ? d.tested : d.onTop));
       pass.setBindGroup(0, this._bindGroup);
       pass.setVertexBuffer(0, this._vertexBuffer);
       pass.draw(this.count);
     };
   }
 
-  /** A segment. Returns this, so calls chain. */
+  /** A segment. Returns this, so calls chain. Points may be [x, y], at z 0. */
   line(from, to, color = WHITE) {
-    this._vertex(from[0], from[1], from[2], color);
-    this._vertex(to[0], to[1], to[2], color);
+    this._vertex(from[0], from[1], from[2] ?? 0, color);
+    this._vertex(to[0], to[1], to[2] ?? 0, color);
     return this;
   }
 
-  /** An axis-aligned box's twelve edges. */
+  /** An axis-aligned box's twelve edges; with [x, y] corners, a rectangle's four. */
   box(min, max, color = WHITE) {
+    if (min.length === 2 && max.length === 2) {
+      const [x0, y0] = min, [x1, y1] = max;
+      return this.line([x0, y0], [x1, y0], color).line([x1, y0], [x1, y1], color)
+        .line([x1, y1], [x0, y1], color).line([x0, y1], [x0, y0], color);
+    }
     const x = [min[0], max[0]];
     const y = [min[1], max[1]];
     const z = [min[2], max[2]];
@@ -139,6 +155,16 @@ export class DebugLines {
         this.line(at(pu, pv), at(u, v), color);
         [pu, pv] = [u, v];
       }
+    }
+    return this;
+  }
+
+  /** A circle in the x-y plane -- a 2D view's -- around `center`, [x, y] or [x, y, z]. */
+  circle(center, radius, color = WHITE) {
+    const [cx, cy, cz = 0] = center;
+    for (let i = 0; i < CIRCLE_SEGMENTS; i++) {
+      const a = (i / CIRCLE_SEGMENTS) * 2 * Math.PI, b = ((i + 1) / CIRCLE_SEGMENTS) * 2 * Math.PI;
+      this.line([cx + radius * Math.cos(a), cy + radius * Math.sin(a), cz], [cx + radius * Math.cos(b), cy + radius * Math.sin(b), cz], color);
     }
     return this;
   }
@@ -176,9 +202,11 @@ export class DebugLines {
 
   /**
    * Upload this frame's lines and add the pass that draws them onto the
-   * finished picture. Nothing, when there are none.
+   * finished picture. Nothing, when there are none. `depth` null is a 2D view:
+   * `surface` its plain view, and nothing hides them.
    */
   addPass(graph, { surface, depth, viewProjection }) {
+    this._flat = depth === null;
     if (this.count === 0) return;
     const bytes = this.count * VERTEX_BYTES;
     if (bytes > this._capacity) {
@@ -193,7 +221,7 @@ export class DebugLines {
     graph.addPass({
       name: 'debug-lines',
       color: [{ resource: surface }],
-      depth: { resource: depth },
+      ...(depth === null ? {} : { depth: { resource: depth } }),
       execute: this._execute,
     });
   }

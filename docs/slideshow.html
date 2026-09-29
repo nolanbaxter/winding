@@ -1,0 +1,251 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slideshow maker</title>
+<!--
+  Stills into one animated WebP, for the README: a README can't run a script,
+  so a slideshow there has to be an animated image.
+
+  WebP rather than APNG because these are photographs of renders: a lossy
+  frame is about the size of the JPEG it came from, where a PNG frame is about
+  five times that. Thirty slides as APNG would weigh tens of megabytes.
+
+  Open this file in Chrome, Edge or Firefox -- straight from disk, no server --
+  pick the images, and save what it makes into docs/images/. The browser
+  encodes each frame (canvas.convertToBlob); this page only wraps them into
+  one animated file, as the WebP container spec lays it out:
+  https://developers.google.com/speed/webp/docs/riff_container
+-->
+<style>
+  :root { --bg: #f6f7f9; --panel: #fff; --ink: #1b1d22; --muted: #5d6470; --line: #d9dde3; --accent: #c8553d; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111317; --panel: #1a1d22; --ink: #e8eaee; --muted: #9aa1ad; --line: #2c3038; --accent: #e07a5f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 920px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 16px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  #drop { border: 2px dashed var(--line); border-radius: 8px; padding: 20px; text-align: center; color: var(--muted); }
+  #drop.over { border-color: var(--accent); color: var(--ink); }
+  ol { list-style: none; padding: 0; margin: 12px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  li { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; font-size: 12px; }
+  li img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; background: var(--bg); }
+  li div { display: flex; align-items: center; gap: 4px; padding: 4px 6px; }
+  li span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 8px 16px; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  li button { padding: 0 6px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  input, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
+  #result img { max-width: 100%; border-radius: 6px; display: block; margin: 12px 0; }
+  #status { color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+<main>
+  <h1>Slideshow maker</h1>
+  <p>Stills in, one animated WebP out: each slide held in turn, looping. Save it into <code>docs/images/</code> and
+    put it in the README as any image. Thirty 900 × 560 slides come to about 2 MB.</p>
+
+  <section>
+    <div id="drop">Drop images here, or <button id="pick">choose files</button>
+      <input id="files" type="file" accept="image/*" multiple hidden>
+    </div>
+    <ol id="list"></ol>
+  </section>
+
+  <section class="grid">
+    <label>Width <input id="width" type="number" min="16" max="4000" placeholder="first image's"></label>
+    <label>Height <input id="height" type="number" min="16" max="4000" placeholder="first image's"></label>
+    <label>Seconds a slide <input id="hold" type="number" min="0.2" step="0.1" value="2.5"></label>
+    <label>Fade <select id="fade">
+      <!-- Each fade frame is a whole image: a short fade makes the file about five times larger. -->
+      <option value="0" selected>none: cut</option>
+      <option value="4">short: about 5x the size</option>
+      <option value="8">long: about 9x the size</option>
+    </select></label>
+    <label>Fit <select id="fit">
+      <option value="cover">fill, cropping</option>
+      <option value="contain">fit, with a border</option>
+    </select></label>
+    <label>Quality <input id="quality" type="number" min="0.1" max="1" step="0.05" value="0.85"></label>
+  </section>
+
+  <section>
+    <button id="build" class="primary" disabled>Make the slideshow</button>
+    <span id="status"></span>
+    <div id="result"></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+/** The slides, in order: { name, bitmap, url }. */
+const slides = [];
+
+// ---------------------------------------------------------------- choosing
+
+async function add(files) {
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue;
+    slides.push({ name: file.name, bitmap: await createImageBitmap(file), url: URL.createObjectURL(file) });
+  }
+  show();
+}
+
+function show() {
+  $('list').replaceChildren(...slides.map((slide, i) => {
+    const li = document.createElement('li');
+    const img = Object.assign(document.createElement('img'), { src: slide.url, alt: slide.name });
+    const row = document.createElement('div');
+    const name = Object.assign(document.createElement('span'), { textContent: `${i + 1}. ${slide.name}`, title: slide.name });
+    const button = (text, label, act) => Object.assign(document.createElement('button'), { textContent: text, title: label, ariaLabel: label, onclick: act });
+    row.append(name,
+      button('←', 'Earlier', () => { if (i > 0) { [slides[i - 1], slides[i]] = [slides[i], slides[i - 1]]; show(); } }),
+      button('→', 'Later', () => { if (i < slides.length - 1) { [slides[i + 1], slides[i]] = [slides[i], slides[i + 1]]; show(); } }),
+      button('×', 'Remove', () => { URL.revokeObjectURL(slide.url); slides.splice(i, 1); show(); }));
+    li.append(img, row);
+    return li;
+  }));
+  $('build').disabled = slides.length === 0;
+  if (slides.length > 0) {
+    $('width').placeholder = slides[0].bitmap.width;
+    $('height').placeholder = slides[0].bitmap.height;
+  }
+}
+
+$('pick').onclick = () => $('files').click();
+$('files').onchange = (e) => add(e.target.files);
+const drop = $('drop');
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); add(e.dataTransfer.files); };
+
+// ---------------------------------------------------------------- drawing
+
+/** A slide drawn to fill w x h: cropped to cover it, or fitted inside a border. */
+function place(g, bitmap, w, h, fit) {
+  const scale = (fit === 'cover' ? Math.max : Math.min)(w / bitmap.width, h / bitmap.height);
+  const dw = bitmap.width * scale, dh = bitmap.height * scale;
+  g.drawImage(bitmap, (w - dw) / 2, (h - dh) / 2, dw, dh);
+}
+
+// ------------------------------------------------------- the WebP container
+
+/** Every chunk of a WebP file: { fourcc, bytes } with bytes the whole chunk, header and all. */
+function chunks(file) {
+  const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+  const fourcc = (o) => String.fromCharCode(file[o], file[o + 1], file[o + 2], file[o + 3]);
+  if (fourcc(0) !== 'RIFF' || fourcc(8) !== 'WEBP') throw new Error('not a WebP file');
+  const found = [];
+  for (let o = 12; o + 8 <= file.length;) {
+    const size = view.getUint32(o + 4, true);
+    found.push({ fourcc: fourcc(o), bytes: file.subarray(o, o + 8 + size + (size & 1)) });
+    o += 8 + size + (size & 1);
+  }
+  return found;
+}
+
+/** A chunk: its four characters, its size, its payload, and a pad byte if the size is odd. */
+function chunk(fourcc, payload) {
+  const out = new Uint8Array(8 + payload.length + (payload.length & 1));
+  for (let i = 0; i < 4; i++) out[i] = fourcc.charCodeAt(i);
+  new DataView(out.buffer).setUint32(4, payload.length, true);
+  out.set(payload, 8);
+  return out;
+}
+
+const uint24 = (out, o, v) => { out[o] = v & 255; out[o + 1] = (v >> 8) & 255; out[o + 2] = (v >> 16) & 255; };
+
+/**
+ * One animated WebP from still WebPs of the same size: each frame's image
+ * chunks (ALPH, then VP8 or VP8L) moved whole into an ANMF chunk with its
+ * duration, after a VP8X header saying it animates and an ANIM chunk saying
+ * it loops forever.
+ */
+function animate(stills, w, h) {
+  let alpha = false;
+  const frames = stills.map(({ bytes, ms }) => {
+    const image = chunks(bytes).filter((c) => c.fourcc === 'ALPH' || c.fourcc === 'VP8 ' || c.fourcc === 'VP8L');
+    if (image.some((c) => c.fourcc === 'ALPH' || c.fourcc === 'VP8L')) alpha = true;
+    const head = new Uint8Array(16);
+    uint24(head, 6, w - 1);
+    uint24(head, 9, h - 1);
+    uint24(head, 12, ms);
+    head[15] = 0b10;   // don't blend: each frame replaces the canvas whole
+    const body = new Uint8Array(16 + image.reduce((n, c) => n + c.bytes.length, 0));
+    body.set(head);
+    let o = 16;
+    for (const c of image) { body.set(c.bytes, o); o += c.bytes.length; }
+    return chunk('ANMF', body);
+  });
+  const vp8x = new Uint8Array(10);
+  vp8x[0] = 0b10 | (alpha ? 0b10000 : 0);   // animation, and alpha if a frame has any
+  uint24(vp8x, 4, w - 1);
+  uint24(vp8x, 7, h - 1);
+  const parts = [chunk('VP8X', vp8x), chunk('ANIM', new Uint8Array(6)), ...frames];   // a clear background, looping forever
+  const size = 4 + parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(8 + size);
+  out.set([82, 73, 70, 70]);   // RIFF
+  new DataView(out.buffer).setUint32(4, size, true);
+  out.set([87, 69, 66, 80], 8);   // WEBP
+  let o = 12;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+// ---------------------------------------------------------------- building
+
+$('build').onclick = async () => {
+  const w = Number($('width').value) || slides[0].bitmap.width;
+  const h = Number($('height').value) || slides[0].bitmap.height;
+  const hold = Math.max(0.2, Number($('hold').value) || 2.5) * 1000;
+  const fade = Number($('fade').value);
+  const fit = $('fit').value;
+  const quality = Math.min(1, Math.max(0.1, Number($('quality').value) || 0.85));
+  // Each fade frame shows for this long; the hold keeps the slide's full time.
+  const FADE_MS = 60;
+  const canvas = new OffscreenCanvas(w, h);
+  const g = canvas.getContext('2d');
+  const stills = [];
+  $('build').disabled = true;
+  try {
+    const frame = async (draw, ms) => {
+      g.globalAlpha = 1;
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, w, h);
+      draw();
+      const blob = await canvas.convertToBlob({ type: 'image/webp', quality });
+      if (blob.type !== 'image/webp') throw new Error('this browser cannot encode WebP (Safari cannot); use Chrome, Edge or Firefox');
+      stills.push({ bytes: new Uint8Array(await blob.arrayBuffer()), ms });
+      $('status').textContent = `frame ${stills.length}`;
+    };
+    for (let i = 0; i < slides.length; i++) {
+      const slide = slides[i].bitmap, next = slides[(i + 1) % slides.length].bitmap;
+      await frame(() => place(g, slide, w, h, fit), hold);
+      if (slides.length === 1) break;
+      for (let k = 1; k <= fade; k++) {
+        await frame(() => {
+          place(g, slide, w, h, fit);
+          g.globalAlpha = k / (fade + 1);
+          place(g, next, w, h, fit);
+        }, FADE_MS);
+      }
+    }
+    const webp = new Blob([animate(stills, w, h)], { type: 'image/webp' });
+    const url = URL.createObjectURL(webp);
+    const mb = (webp.size / 1024 / 1024).toFixed(2);
+    $('result').replaceChildren(
+      Object.assign(document.createElement('img'), { src: url, alt: 'The slideshow' }),
+      Object.assign(document.createElement('a'), { href: url, download: 'slideshow.webp', textContent: 'Save slideshow.webp' }),
+    );
+    $('status').textContent = `${slides.length} slides, ${stills.length} frames, ${w} x ${h}, ${mb} MB`;
+  } catch (error) {
+    $('status').textContent = error.message;
+  } finally {
+    $('build').disabled = false;
+  }
+};
+</script>

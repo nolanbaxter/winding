@@ -9,7 +9,8 @@ export { OrbitController } from './app/controllers.js';
 export { StatsOverlay } from './app/overlay.js';
 
 export { Camera } from './scene/camera.js';
-export { Scene } from './scene/scene.js';
+export { Camera2D } from './scene/camera2d.js';
+export { Scene, spriteSheet } from './scene/scene.js';
 export { Node } from './scene/node.js';
 
 export { Environment } from './render/ibl.js';

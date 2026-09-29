@@ -15,7 +15,7 @@ import {
 import { HandleAllocator, handleIndex } from '../src/core/handle.js';
 import {
   textureImageIndex, textureSamplerIndex, samplerDescriptor, materialTextureSlots,
-  imageSize, usedImages,
+  imageSize, usedImages, imageColorSpaces,
 } from '../src/scene/gltf/images.js';
 import { TransformStore } from '../src/scene/transform.js';
 import { unweldAndComputeFlatNormals } from '../src/scene/gltf/tangents.js';
@@ -2425,6 +2425,23 @@ test('only images a material samples are decoded', () => {
     materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } }, normalTexture: { index: 1 } }],
   };
   assert.deepEqual([...usedImages(json)].sort(), [0, 2]);
+});
+
+test('each image is uploaded in the colour spaces its materials read it in', () => {
+  // Image 0 is a base colour in one material and an occlusion map in the
+  // other: both spaces. Image 1 only a normal map, image 2 only emissive.
+  const json = {
+    images: [{}, {}, {}],
+    textures: [{ source: 0 }, { source: 1 }, { source: 2 }],
+    materials: [
+      { pbrMetallicRoughness: { baseColorTexture: { index: 0 } }, normalTexture: { index: 1 } },
+      { occlusionTexture: { index: 0 }, emissiveTexture: { index: 2 } },
+    ],
+  };
+  const spaces = imageColorSpaces(json);
+  assert.deepEqual(spaces.get(0), { srgb: true, linear: true });
+  assert.deepEqual(spaces.get(1), { srgb: false, linear: true });
+  assert.deepEqual(spaces.get(2), { srgb: true, linear: false });
 });
 
 // ------------------------------------------------------------------ meshopt

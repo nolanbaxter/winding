@@ -55,8 +55,11 @@ let nextRevision = 1;
 export function emitterRecord(options = {}) {
   const {
     rate = 0, lifetime, size, speed = 0, direction = [0, 1, 0], spread = 0, radius = 0,
-    acceleration = [0, 0, 0], drag = 0, color = [1, 1, 1, 1], colorEnd, texture = null, blend = 'additive',
+    acceleration = [0, 0, 0], drag = 0, color = [1, 1, 1, 1], colorEnd, texture = null, blend = 'additive', layer = 0,
   } = options;
+  if (!Number.isFinite(layer)) throw new Error(`addEmitter: layer must be a finite number, got ${layer}`);
+  // [x, y] for a 2D view, as node.setPosition(x, y) takes.
+  const flat = (v) => (v?.length === 2 ? [v[0], v[1], 0] : v);
   const range = (v, what, positive = false) => {
     const r = typeof v === 'number' ? [v, v] : v;
     if (!(r?.length === 2 && r.every(Number.isFinite) && r[0] <= r[1] && r[0] >= 0 && (!positive || r[0] > 0))) {
@@ -75,7 +78,7 @@ export function emitterRecord(options = {}) {
   if (!(sizes?.length === 2 && sizes.every((x) => Number.isFinite(x) && x >= 0))) {
     throw new Error(`addEmitter: size must be a number or [birth, death], got ${size}`);
   }
-  const dir = numbers(direction, 3, 'direction');
+  const dir = numbers(flat(direction), 3, 'direction');
   if (Math.hypot(...dir) === 0) throw new Error('addEmitter: direction must not be zero');
   if (!(spread >= 0 && spread <= Math.PI)) throw new Error(`addEmitter: spread must be between 0 and pi, got ${spread}`);
   if (!(radius >= 0 && Number.isFinite(radius))) throw new Error(`addEmitter: radius must be 0 or more, got ${radius}`);
@@ -94,12 +97,14 @@ export function emitterRecord(options = {}) {
     direction: dir,
     spread,
     radius,
-    acceleration: numbers(acceleration, 3, 'acceleration'),
+    acceleration: numbers(flat(acceleration), 3, 'acceleration'),
     drag,
     color: start,
     colorEnd: colorEnd === undefined ? start : numbers(colorEnd, 4, 'colorEnd'),
     texture,
     blend,
+    /** For a 2D view: drawn in painter's order with sprites, as their layer is. */
+    layer,
     owed: 0,
     time: 0,
     seed: (nextEmitterSeed++ * 0x9e3779b9) >>> 0,
@@ -128,14 +133,18 @@ export function decalRecord({ texture, size, color = [1, 1, 1, 1] } = {}) {
 export function textRecord(options = {}) {
   const {
     font, text = '', size, color = [1, 1, 1, 1], align = 'left', anchor = [0.5, 0.5], lineHeight,
-    facing = 'camera', pixels = false,
+    facing = 'camera', pixels = false, layer = 0, width = Infinity, lit = false,
   } = options;
+  if (!(width > 0)) throw new Error(`addText: width must be positive, got ${width}`);
   if (!(font?.metrics && typeof font.ensure === 'function')) throw new Error('addText: font must be one engine.loadFont returned');
   if (!(size > 0 && Number.isFinite(size))) throw new Error(`addText: size must be positive, got ${size}`);
   if (!(color?.length === 4 && [...color].every(Number.isFinite))) throw new Error(`addText: color must be 4 finite numbers, got ${color}`);
   if (!['camera', 'upright', 'plane'].includes(facing)) throw new Error(`addText: facing is 'camera', 'upright' or 'plane', got ${facing}`);
   if (!(anchor?.length === 2 && anchor.every(Number.isFinite))) throw new Error(`addText: anchor must be [x, y], got ${anchor}`);
+  if (!Number.isFinite(layer)) throw new Error(`addText: layer must be a finite number, got ${layer}`);
   font.ensure(String(text));
+  // In ems, as the layout works; `width` is given in the text's own units, as `size` is.
+  const { boxes, block } = layoutText(text, font.metrics, { align, lineHeight, anchor, width: width / size });
   return {
     options: { ...options },
     font,
@@ -144,7 +153,11 @@ export function textRecord(options = {}) {
     color: Float32Array.from(color),
     facing,
     pixels: pixels === true,
-    boxes: layoutText(text, font.metrics, { align, lineHeight, anchor }),
+    layer,
+    lit: lit === true,
+    boxes,
+    /** The whole block, [left, bottom, right, top] in ems, y up: what picking hits. */
+    block,
   };
 }
 
@@ -159,6 +172,7 @@ const SPRITE_BLENDS = ['alpha', 'additive', 'cutout'];
 export function spriteRecord({
   texture, size, color = [1, 1, 1, 1], rect = [0, 0, 1, 1], pivot = [0.5, 0.5], rotation = 0,
   facing = 'camera', blend = 'alpha', cutoff = 0.5, pixels = false, sizeGiven = size !== undefined,
+  layer = 0, animation = null, frame = 0, time = 0, lit = false,
 } = {}) {
   if (!(texture?.view && texture.width > 0 && texture.height > 0)) {
     throw new Error('addSprite: texture must be one engine.loadTexture returned');
@@ -176,6 +190,14 @@ export function spriteRecord({
   if (!SPRITE_BLENDS.includes(blend)) throw new Error(`addSprite: blend is 'alpha', 'additive' or 'cutout', got ${blend}`);
   if (!(cutoff >= 0 && cutoff <= 1)) throw new Error(`addSprite: cutoff must be between 0 and 1, got ${cutoff}`);
   if (!Number.isFinite(rotation)) throw new Error(`addSprite: rotation must be a finite number, got ${rotation}`);
+  if (!Number.isFinite(layer)) throw new Error(`addSprite: layer must be a finite number, got ${layer}`);
+  let played = null;
+  if (animation !== null) {
+    const { frames, fps = 12, loop = true } = animation;
+    if (!(Array.isArray(frames) && frames.length > 0)) throw new Error('addSprite: animation.frames must be a list of rects');
+    if (!(fps > 0 && Number.isFinite(fps))) throw new Error(`addSprite: animation.fps must be positive, got ${fps}`);
+    played = { frames: frames.map((f) => numbers(f, 4, 'an animation frame')), fps, loop: loop !== false };
+  }
   return {
     texture,
     size: sized,
@@ -188,7 +210,162 @@ export function spriteRecord({
     blend,
     cutoff,
     pixels: pixels === true,
+    layer,
+    lit: lit === true,
+    animation: played,
+    /** The frame shown, and how long the animation has run: see Scene.advanceAnimations. */
+    frame: played === null ? 0 : Math.min(frame, played.frames.length - 1),
+    time,
   };
+}
+
+/** A path's options, checked and filled in; see Scene.addPath. */
+export function pathRecord({
+  points, closed = true, color = [1, 1, 1, 1], stroke = [0, 0, 0, 1], strokeWidth = 0,
+  layer = 0, blend = 'alpha', lit = false,
+} = {}) {
+  if (!(Array.isArray(points) || ArrayBuffer.isView(points))) throw new Error('addPath: points must be a list of [x, y]');
+  const flat = new Float32Array(points.length * 2);
+  points.forEach((p, i) => {
+    if (!(p?.length === 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))) throw new Error(`addPath: point ${i} must be [x, y], got ${p}`);
+    flat[i * 2] = p[0];
+    flat[i * 2 + 1] = p[1];
+  });
+  if (points.length < 2) throw new Error(`addPath: a path needs at least 2 points, got ${points.length}`);
+  const numbers = (v, n, what) => {
+    if (!(v?.length === n && [...v].every(Number.isFinite))) throw new Error(`addPath: ${what} must be ${n} finite numbers, got ${v}`);
+    return Float32Array.from(v);
+  };
+  if (!(strokeWidth >= 0 && Number.isFinite(strokeWidth))) throw new Error(`addPath: strokeWidth must be 0 or more, got ${strokeWidth}`);
+  if (!Number.isFinite(layer)) throw new Error(`addPath: layer must be a finite number, got ${layer}`);
+  if (blend !== 'alpha' && blend !== 'additive') throw new Error(`addPath: blend is 'alpha' or 'additive', got ${blend}`);
+  const bounds = [Infinity, Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < flat.length; i += 2) {
+    bounds[0] = Math.min(bounds[0], flat[i]);
+    bounds[1] = Math.min(bounds[1], flat[i + 1]);
+    bounds[2] = Math.max(bounds[2], flat[i]);
+    bounds[3] = Math.max(bounds[3], flat[i + 1]);
+  }
+  return {
+    kind: 'path',
+    points: flat,
+    closed: closed !== false,
+    color: numbers(color, 4, 'color'),
+    stroke: numbers(stroke, 4, 'stroke'),
+    strokeWidth,
+    layer,
+    blend,
+    lit: lit === true,
+    /** [minX, minY, maxX, maxY] of the points, in the node's units. */
+    bounds,
+  };
+}
+
+/** A shape's options, checked and filled in; see Scene.addShape. */
+export function shapeRecord({
+  shape = 'rect', size, radius = 0, color = [1, 1, 1, 1], stroke = [0, 0, 0, 1], strokeWidth = 0,
+  pivot = [0.5, 0.5], layer = 0, blend = 'alpha', lit = false,
+} = {}) {
+  const numbers = (v, n, what) => {
+    if (!(v?.length === n && [...v].every(Number.isFinite))) throw new Error(`addShape: ${what} must be ${n} finite numbers, got ${v}`);
+    return Float32Array.from(v);
+  };
+  if (shape !== 'rect' && shape !== 'ellipse') throw new Error(`addShape: shape is 'rect' or 'ellipse', got ${shape}`);
+  const sized = numbers(size, 2, 'size');
+  if (!(sized[0] > 0 && sized[1] > 0)) throw new Error('addShape: size must be positive');
+  if (!(radius >= 0 && Number.isFinite(radius))) throw new Error(`addShape: radius must be 0 or more, got ${radius}`);
+  if (!(strokeWidth >= 0 && Number.isFinite(strokeWidth))) throw new Error(`addShape: strokeWidth must be 0 or more, got ${strokeWidth}`);
+  if (!Number.isFinite(layer)) throw new Error(`addShape: layer must be a finite number, got ${layer}`);
+  if (blend !== 'alpha' && blend !== 'additive') throw new Error(`addShape: blend is 'alpha' or 'additive', got ${blend}`);
+  return {
+    kind: 'shape',
+    shape,
+    size: sized,
+    // Past half the shorter side a corner has nowhere to go.
+    radius: Math.min(radius, sized[0] / 2, sized[1] / 2),
+    color: numbers(color, 4, 'color'),
+    stroke: numbers(stroke, 4, 'stroke'),
+    strokeWidth,
+    pivot: numbers(pivot, 2, 'pivot'),
+    layer,
+    blend,
+    lit: lit === true,
+  };
+}
+
+/** A tilemap's options, checked and filled in; see Scene.addTilemap. */
+export function tilemapRecord({
+  tileset, tileSize, columns, rows, tiles = null, layer = 0, color = [1, 1, 1, 1], pivot = [0, 0], lit = false,
+  margin = 0, spacing = 0,
+} = {}) {
+  if (!(tileset?.view && tileset.width > 0 && tileset.height > 0)) {
+    throw new Error('addTilemap: tileset must be one engine.loadTexture returned');
+  }
+  if (!(Number.isInteger(margin) && Number.isInteger(spacing) && margin >= 0 && spacing >= 0)) {
+    throw new Error(`addTilemap: margin and spacing must be whole texels, 0 or more, got ${margin} and ${spacing}`);
+  }
+  const [tw, th] = tileSize ?? [];
+  if (!(Number.isInteger(tw) && Number.isInteger(th) && tw > 0 && th > 0
+    && tw + 2 * margin <= tileset.width && th + 2 * margin <= tileset.height)) {
+    throw new Error(`addTilemap: tileSize must be whole texels inside the ${tileset.width} x ${tileset.height} tileset, got ${tileSize}`);
+  }
+  if (!(Number.isInteger(columns) && Number.isInteger(rows) && columns > 0 && rows > 0)) {
+    throw new Error(`addTilemap: columns and rows must be whole numbers above zero, got ${columns} x ${rows}`);
+  }
+  if (tiles !== null && tiles.length !== columns * rows) {
+    throw new Error(`addTilemap: tiles holds ${tiles.length} ids; a ${columns} x ${rows} map needs ${columns * rows}`);
+  }
+  if (!Number.isFinite(layer)) throw new Error(`addTilemap: layer must be a finite number, got ${layer}`);
+  const numbers = (v, n, what) => {
+    if (!(v?.length === n && [...v].every(Number.isFinite))) throw new Error(`addTilemap: ${what} must be ${n} finite numbers, got ${v}`);
+    return Float32Array.from(v);
+  };
+  return {
+    kind: 'tilemap',
+    tileset,
+    tileSize: [tw, th],
+    margin,
+    spacing,
+    columns,
+    rows,
+    tiles: tiles === null ? new Uint32Array(columns * rows) : Uint32Array.from(tiles),
+    layer,
+    color: numbers(color, 4, 'color'),
+    pivot: numbers(pivot, 2, 'pivot'),
+    lit: lit === true,
+    /** [x0, y0, x1, y1] in tiles changed since a 2D view last uploaded them, or null. */
+    dirty: null,
+  };
+}
+
+/** The part of its texture a sprite shows now: its animation's frame, or its rect. */
+export function spriteRect(record) {
+  return record.animation === null ? record.rect : record.animation.frames[record.frame];
+}
+
+/**
+ * The frames of a sprite sheet laid out in a grid, in reading order: left to
+ * right, then top to bottom. For addSprite's `animation.frames`, or to pick
+ * one as its `rect`.
+ *
+ *   const walk = spriteSheet({ columns: 8, rows: 1 });
+ *   scene.addSprite({ texture: hero, animation: { frames: walk, fps: 10 } });
+ *
+ * `count` stops short of a last row that is not full; `first` skips frames.
+ */
+export function spriteSheet({ columns, rows = 1, count = columns * rows, first = 0 } = {}) {
+  if (!(Number.isInteger(columns) && columns > 0 && Number.isInteger(rows) && rows > 0)) {
+    throw new Error(`spriteSheet: columns and rows must be whole numbers above zero, got ${columns} x ${rows}`);
+  }
+  if (!(Number.isInteger(first) && first >= 0 && Number.isInteger(count) && count > 0 && first + count <= columns * rows)) {
+    throw new Error(`spriteSheet: frames ${first} to ${first + count - 1} are not all in a ${columns} x ${rows} sheet`);
+  }
+  const frames = [];
+  for (let k = first; k < first + count; k++) {
+    const x = k % columns, y = Math.floor(k / columns);
+    frames.push([x / columns, y / rows, (x + 1) / columns, (y + 1) / rows]);
+  }
+  return frames;
 }
 
 /**
@@ -373,6 +550,29 @@ export class Scene {
      */
     this.reflectionProbes = [];
     this.probeRevision = 0;
+    /**
+     * Counts changes no transform and no `revision` records: a sprite's,
+     * text's, decal's, emitter's, probe's or light's properties. With those,
+     * `animating` and `particlesActive`, it is how the engine knows a frame
+     * would draw exactly what the last one did, and skips it.
+     */
+    this.changes = 0;
+    /**
+     * Bumped when the order sprites and text draw in can change -- one added
+     * or removed, or a layer, texture or blend changed -- and a 2D view
+     * rebuilds its list. Every other change to one is in spritesChanged, and
+     * rewrites that sprite alone.
+     */
+    this.spriteOrder = 0;
+    // Counts sprites and texts as they are added: order within a layer.
+    this._added = 0;
+    /** Sprites and texts whose own data changed since a 2D view last drew, by entity. */
+    this.spritesChanged = new Set();
+    /** Whether the last advanceAnimations moved anything. */
+    this.animating = false;
+    // The particle clock, and until when on it a particle may still be alive.
+    this._particleClock = 0;
+    this._particlesUntil = 0;
     /** Sprites (see addSprite), by the entity each hangs off. */
     this.sprites = new Map();
     /** Particle emitters (see addEmitter), by the entity each hangs off. */
@@ -381,6 +581,12 @@ export class Scene {
     this.decals = new Map();
     /** Text (see addText), by the entity each hangs off. */
     this.texts = new Map();
+    /** Tilemaps (see addTilemap), by the entity each hangs off. */
+    this.tilemaps = new Map();
+    /** 2D shapes (see addShape), by the entity each hangs off. */
+    this.shapes = new Map();
+    /** 2D paths (see addPath), by the entity each hangs off. */
+    this.paths = new Map();
     /**
      * Material id -> the importer's record, for materials a clip changed since
      * the renderer last uploaded them. A material belongs to the asset, not to
@@ -409,6 +615,7 @@ export class Scene {
    * to a scene must never be the thing that stalls a frame.
    */
   add(asset, { parent = null } = {}) {
+    this.changes++;
     // Its buffers and textures are destroyed; drawing it would fail on the GPU.
     if (asset.unloaded) throw new Error('Scene.add: this asset was unloaded; load it again');
     const created = new Array(asset.nodes.length).fill(NULL_HANDLE);
@@ -718,6 +925,8 @@ export class Scene {
    * renderable index across a remove.
    */
   remove(node) {
+    this.changes++;
+    this.spriteOrder++;
     // A stale handle names a slot something else may own by now. Acting on it
     // erased that other node's transform before failing to free the handle.
     if (!node.alive) return;
@@ -778,6 +987,9 @@ export class Scene {
       this.emitters.delete(entity);
       this.decals.delete(entity);
       this.texts.delete(entity);
+      this.tilemaps.delete(entity);
+      this.shapes.delete(entity);
+      this.paths.delete(entity);
       const index = this._lightOf.get(entity);
       if (index !== undefined) this._removeLightAt(index);
       this._directional.delete(entity);
@@ -853,11 +1065,21 @@ export class Scene {
    *                not turning at all -- in the node's own x-y plane, a sign
    *   blend        'alpha' (sorted back to front), 'additive' (light: no order
    *                needed), or 'cutout' (drawn or not, by `cutoff`)
+   *   layer        for a 2D view (Camera2D): higher draws over lower, and one
+   *                layer draws in the order its sprites were added
+   *   animation    { frames, fps = 12, loop = true }: frames are rects, as
+   *                spriteSheet makes them, shown in turn by advanceAnimations
+   *
+   * Through a Camera2D a unit is a pixel, and a sprite with no size is its
+   * frame's own size in texels.
    *
    * Unlit: the colour is the colour, lit by nothing. Scaled by the node.
    */
   addSprite({ texture, position = [0, 0, 0], parent = null, ...options } = {}) {
+    this.changes++;
+    this.spriteOrder++;
     const record = spriteRecord({ texture, ...options });
+    record.added = this._added++;
     const node = this.createNode({ parent });
     node.setPosition(...position);
     this.sprites.set(node.entity, record);
@@ -866,15 +1088,110 @@ export class Scene {
 
   /** Change a sprite's options; the same names addSprite takes. */
   setSprite(node, changes) {
+    this.changes++;
     const current = this.sprites.get(node.entity);
     if (current === undefined) throw new Error('setSprite: this node has no sprite');
-    this.sprites.set(node.entity, spriteRecord({ ...current, ...changes, sizeGiven: changes.size !== undefined || current.sizeGiven }));
+    // A new animation starts from its first frame.
+    const restart = changes.animation !== undefined ? { frame: 0, time: 0 } : {};
+    const next = spriteRecord({ ...current, ...changes, ...restart, sizeGiven: changes.size !== undefined || current.sizeGiven });
+    next.added = current.added;
+    this.sprites.set(node.entity, next);
+    if (next.layer !== current.layer || next.texture !== current.texture || next.blend !== current.blend) this.spriteOrder++;
+    else this.spritesChanged.add(node.entity);
   }
 
   /** A sprite's options, or null. A copy: change it through setSprite. */
   spriteOf(node) {
     const record = this.sprites.get(node.entity);
     return record === undefined ? null : { ...record };
+  }
+
+  // ---------------------------------------------------------------- shapes
+
+  /**
+   * A shape, as a node, for a 2D view (Camera2D): a rectangle or an ellipse,
+   * worked out per pixel from its distance to the edge rather than read from
+   * an image, so it is round and smooth-edged at any size. Returns the Node.
+   *
+   *   scene.addShape({ shape: 'rect', size: [120, 12], radius: 6, color: [0.9, 0.2, 0.2, 1] });
+   *   scene.addShape({ shape: 'ellipse', size: [30, 30], color: [0, 0, 0, 0], stroke: [1, 1, 1, 1], strokeWidth: 2 });
+   *
+   *   shape        'rect' or 'ellipse' (a circle is an ellipse as wide as tall)
+   *   size         [width, height], in pixels through an unzoomed Camera2D
+   *   radius       a rect's corner radius; half its height makes a capsule
+   *   color        the fill, sRGB 0..1 as in CSS; alpha 0 for an outline alone
+   *   stroke       the outline's colour, drawn inside the edge, as a CSS border is
+   *   strokeWidth  the outline's width; 0, the default, for none
+   *   pivot        the point placed at the node: [0.5, 0.5], the default, is its centre
+   *   layer        as for sprites: higher draws over lower
+   *   blend        'alpha' or 'additive'
+   *
+   * Placed, turned (node.setAngle) and scaled by its node. A 3D camera doesn't draw it.
+   */
+  addShape({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    this.changes++;
+    this.spriteOrder++;
+    const record = shapeRecord(options);
+    record.added = this._added++;
+    const node = this.createNode({ parent });
+    node.setPosition(...position);
+    this.shapes.set(node.entity, record);
+    return node;
+  }
+
+  /** Change a shape's options; the same names addShape takes. */
+  setShape(node, changes) {
+    this.changes++;
+    const current = this.shapes.get(node.entity);
+    if (current === undefined) throw new Error('setShape: this node has no shape');
+    const next = shapeRecord({ ...current, ...changes });
+    next.added = current.added;
+    this.shapes.set(node.entity, next);
+    if (next.layer !== current.layer || next.blend !== current.blend) this.spriteOrder++;
+    else this.spritesChanged.add(node.entity);
+  }
+
+  /**
+   * A path, as a node, for a 2D view (Camera2D): a polygon to fill, a line to
+   * stroke, or both. Worked out per pixel from its distance to its segments,
+   * as a shape is, so it is smooth-edged at any size. Returns the Node.
+   *
+   *   scene.addPath({ points: [[0, 0], [60, 20], [0, 40]], color: [1, 0.8, 0, 1] });   // a triangle
+   *   scene.addPath({ points: route, closed: false, color: [0, 0, 0, 0], stroke: [1, 1, 1, 1], strokeWidth: 3 });
+   *
+   *   points       [x, y] in the node's units, in order
+   *   closed       whether the last point joins the first; only a closed path fills.
+   *                A crossing or concave outline fills as a canvas's does (nonzero)
+   *   color        the fill, sRGB 0..1; alpha 0 for a line alone
+   *   stroke       the line's colour, centred on the path, with round joins and ends
+   *   strokeWidth  the line's width; 0, the default, for none
+   *   layer, blend, lit   as for shapes
+   *
+   * Placed, turned and scaled by its node. A 3D camera doesn't draw it.
+   */
+  addPath({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    this.changes++;
+    this.spriteOrder++;
+    const record = pathRecord(options);
+    record.added = this._added++;
+    const node = this.createNode({ parent });
+    node.setPosition(...position);
+    this.paths.set(node.entity, record);
+    return node;
+  }
+
+  /** Change a path's options; the same names addPath takes. */
+  setPath(node, changes) {
+    this.changes++;
+    const current = this.paths.get(node.entity);
+    if (current === undefined) throw new Error('setPath: this node has no path');
+    const points = changes.points ?? Array.from({ length: current.points.length / 2 }, (_, i) => [current.points[i * 2], current.points[i * 2 + 1]]);
+    const next = pathRecord({ ...current, ...changes, points });
+    next.added = current.added;
+    this.paths.set(node.entity, next);
+    // New points are new GPU data, so the list is rebuilt; a colour is not.
+    if (changes.points !== undefined || next.layer !== current.layer || next.blend !== current.blend) this.spriteOrder++;
+    else this.spritesChanged.add(node.entity);
   }
 
   // ------------------------------------------------------------- particles
@@ -909,7 +1226,10 @@ export class Scene {
    * Advance them with scene.advanceParticles(dt) -- engine.run does.
    */
   addEmitter({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    this.changes++;
+    this.spriteOrder++;
     const record = emitterRecord(options);
+    record.added = this._added++;
     const node = this.createNode({ parent });
     node.setPosition(...position);
     this.emitters.set(node.entity, record);
@@ -918,17 +1238,21 @@ export class Scene {
 
   /** Change an emitter's options; the same names addEmitter takes. Its particles live on. */
   setEmitter(node, changes) {
+    this.changes++;
     const current = this.emitters.get(node.entity);
     if (current === undefined) throw new Error('setEmitter: this node has no emitter');
     const next = emitterRecord({ ...current.options, ...changes });
     next.owed = current.owed;
     next.time = current.time;
     next.seed = current.seed;
+    next.added = current.added;
     this.emitters.set(node.entity, next);
+    if (next.layer !== current.layer) this.spriteOrder++;
   }
 
   /** Emit `count` particles at once, on the next frame. */
   burst(node, count) {
+    this.changes++;
     const record = this.emitters.get(node.entity);
     if (record === undefined) throw new Error('burst: this node has no emitter');
     if (!(Number.isInteger(count) && count >= 0)) throw new Error(`burst: count must be a whole number, got ${count}`);
@@ -942,10 +1266,18 @@ export class Scene {
    */
   advanceParticles(dt) {
     if (!(dt >= 0)) return;
+    this._particleClock += dt;
     for (const record of this.emitters.values()) {
       record.owed += record.rate * dt;
       record.time += dt;
+      // Anything born now lives at most its longest lifetime.
+      if (record.owed > 0) this._particlesUntil = Math.max(this._particlesUntil, this._particleClock + record.lifetime[1]);
     }
+  }
+
+  /** Whether a particle may still be alive, or one is about to be born. */
+  get particlesActive() {
+    return this._particleClock < this._particlesUntil;
   }
 
   // ------------------------------------------------------------------ text
@@ -965,7 +1297,10 @@ export class Scene {
    *   facing      'camera' (by default), 'upright' or 'plane', as for sprites
    */
   addText({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    this.changes++;
+    this.spriteOrder++;
     const record = textRecord(options);
+    record.added = this._added++;
     const node = this.createNode({ parent });
     node.setPosition(...position);
     this.texts.set(node.entity, record);
@@ -974,9 +1309,14 @@ export class Scene {
 
   /** Change a text's options -- its string, say; the same names addText takes. */
   setText(node, changes) {
+    this.changes++;
     const current = this.texts.get(node.entity);
     if (current === undefined) throw new Error('setText: this node has no text');
-    this.texts.set(node.entity, textRecord({ ...current.options, ...changes }));
+    // Its glyphs, and so its share of the list, may change in number.
+    this.spriteOrder++;
+    const next = textRecord({ ...current.options, ...changes });
+    next.added = current.added;
+    this.texts.set(node.entity, next);
   }
 
   // ---------------------------------------------------------------- decals
@@ -999,6 +1339,7 @@ export class Scene {
    * not painted. Decals added later paint over earlier ones.
    */
   addDecal({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    this.changes++;
     const record = decalRecord(options);
     const node = this.createNode({ parent });
     node.setPosition(...position);
@@ -1008,9 +1349,99 @@ export class Scene {
 
   /** Change a decal's options; the same names addDecal takes. */
   setDecal(node, changes) {
+    this.changes++;
     const current = this.decals.get(node.entity);
     if (current === undefined) throw new Error('setDecal: this node has no decal');
     this.decals.set(node.entity, decalRecord({ ...current, ...changes }));
+  }
+
+  // -------------------------------------------------------------- tilemaps
+
+  /**
+   * A grid of tiles from one tileset image, as a node, for a 2D view
+   * (Camera2D). Drawn as one quad whatever its size: each pixel looks its tile
+   * up, so a map costs the pixels it covers, and changing a tile uploads that
+   * tile alone. Returns the Node, placed at the map's top-left.
+   *
+   *   const tiles = await engine.loadTexture('tiles.png', { pixelated: true });
+   *   const map = scene.addTilemap({ tileset: tiles, tileSize: [16, 16], columns: 100, rows: 40, tiles: level });
+   *   scene.setTile(map, 12, 3, 0);   // break a block
+   *
+   *   tileset   from engine.loadTexture: tiles in a grid, read left to right,
+   *             then top to bottom
+   *   margin, spacing   texels around the grid, and between its tiles, as
+   *             Tiled's tilesets name them; 0 by default
+   *   tileSize  [width, height] of a tile, in the tileset's texels -- and in
+   *             pixels on screen, before the node's scale
+   *   columns, rows   the map's size, in tiles
+   *   tiles     columns x rows ids, row by row from the top-left: 0 is empty,
+   *             1 the tileset's first tile. The top three bits flip a tile as
+   *             Tiled's do -- horizontally (2^31), vertically (2^30) and
+   *             diagonally (2^29) -- so Tiled's layer data can be used as is
+   *   layer     as for sprites: higher draws over lower
+   *   color     multiplies every tile, sRGB 0..1
+   *
+   * Not drawn by a 3D camera.
+   */
+  addTilemap({ position = [0, 0, 0], parent = null, ...options } = {}) {
+    this.changes++;
+    this.spriteOrder++;
+    const record = tilemapRecord(options);
+    record.added = this._added++;
+    const node = this.createNode({ parent });
+    node.setPosition(...position);
+    this.tilemaps.set(node.entity, record);
+    return node;
+  }
+
+  /**
+   * Change a tilemap's options; the same names addTilemap takes. Its tiles are
+   * kept unless given -- and must be, if the map changes size.
+   */
+  setTilemap(node, changes) {
+    this.changes++;
+    const current = this.tilemaps.get(node.entity);
+    if (current === undefined) throw new Error('setTilemap: this node has no tilemap');
+    const next = tilemapRecord({ ...current, ...changes });
+    next.added = current.added;
+    this.tilemaps.set(node.entity, next);
+    // A new record is new GPU data, so the list is rebuilt: rare, and simple.
+    this.spriteOrder++;
+  }
+
+  /** Set the tile at column x, row y: an id as addTilemap's `tiles` takes. */
+  setTile(node, x, y, id) {
+    this.setTiles(node, x, y, 1, [id]);
+  }
+
+  /**
+   * Set a block of tiles: `tiles` holds rows of `width` ids, the block's
+   * top-left at column x, row y.
+   */
+  setTiles(node, x, y, width, tiles) {
+    const map = this.tilemaps.get(node.entity);
+    if (map === undefined) throw new Error('setTiles: this node has no tilemap');
+    const height = tiles.length / width;
+    if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(width) && width > 0 && Number.isInteger(height)
+      && x >= 0 && y >= 0 && x + width <= map.columns && y + height <= map.rows)) {
+      throw new Error(`setTiles: a ${width}-wide block of ${tiles.length} at (${x}, ${y}) is not inside the ${map.columns} x ${map.rows} map`);
+    }
+    for (let row = 0; row < height; row++) {
+      map.tiles.set(tiles.slice(row * width, (row + 1) * width), (y + row) * map.columns + x);
+    }
+    // What the next frame uploads: everything changed since the last.
+    const d = map.dirty;
+    map.dirty = d === null ? [x, y, x + width, y + height]
+      : [Math.min(d[0], x), Math.min(d[1], y), Math.max(d[2], x + width), Math.max(d[3], y + height)];
+    this.changes++;
+  }
+
+  /** The id at column x, row y, flip bits and all; 0 for empty or off the map. */
+  tileAt(node, x, y) {
+    const map = this.tilemaps.get(node.entity);
+    if (map === undefined) throw new Error('tileAt: this node has no tilemap');
+    if (!(x >= 0 && y >= 0 && x < map.columns && y < map.rows)) return 0;
+    return map.tiles[Math.floor(y) * map.columns + Math.floor(x)];
   }
 
   // ----------------------------------------------------------- reflections
@@ -1027,6 +1458,7 @@ export class Scene {
    * default, is a hard edge; more hides the seam between neighbours.
    */
   addReflectionProbe(options) {
+    this.changes++;
     const probe = probeRecord(options);
     this.reflectionProbes.push(probe);
     this.probeRevision++;
@@ -1034,6 +1466,7 @@ export class Scene {
   }
 
   removeReflectionProbe(probe) {
+    this.changes++;
     const at = this.reflectionProbes.indexOf(probe);
     if (at < 0) return;
     this.reflectionProbes.splice(at, 1);
@@ -1080,15 +1513,18 @@ export class Scene {
     parent = null,
     castShadow,
   } = {}) {
+    this.changes++;
     if (type !== 'point' && type !== 'spot' && type !== 'directional') {
       throw new Error(`Scene.addLight: type must be point, spot or directional, got ${type}`);
     }
     // Aim by rotating the node: -Z along the requested direction, upright.
-    const rotation = direction ? quatLookAlong(quatCreate(), direction) : undefined;
+    // [x, y] aims one across a 2D view.
+    const rotation = direction ? quatLookAlong(quatCreate(), [direction[0], direction[1], direction[2] ?? 0]) : undefined;
 
     const entity = this.entities.alloc();
     this.transforms.add(entity, {
-      position,
+      // [x, y] places one in a 2D view, as node.setPosition(x, y) does.
+      position: [position[0], position[1], position[2] ?? 0],
       rotation,
       parent: parent ? parent.entity : NULL_HANDLE,
     });
@@ -1104,6 +1540,7 @@ export class Scene {
    * caller that is not sure can ask by trying.
    */
   setLight(entity, changes) {
+    this.changes++;
     const directional = this._directional.get(entity);
     if (changes.castShadow !== undefined && (directional || this._lightOf.has(entity))) {
       if (changes.castShadow) this.shadowCasters.add(entity); else this.shadowCasters.delete(entity);
@@ -1427,6 +1864,23 @@ export class Scene {
     for (const player of this._players.values()) {
       if (player.advance(dt, this.transforms)) playing++;
     }
+    // Sprite animations: a frame at a time, at their own rate.
+    for (const [entity, sprite] of this.sprites) {
+      const animation = sprite.animation;
+      if (animation === null || !(dt > 0)) continue;
+      const count = animation.frames.length;
+      if (!animation.loop && sprite.frame === count - 1) continue;
+      sprite.time += dt;
+      const step = Math.floor(sprite.time * animation.fps);
+      const frame = animation.loop ? step % count : Math.min(step, count - 1);
+      playing++;
+      if (frame !== sprite.frame) {
+        sprite.frame = frame;
+        this.spritesChanged.add(entity);
+        this.changes++;
+      }
+    }
+    this.animating = playing > 0;
     return playing;
   }
 
@@ -1680,11 +2134,95 @@ export class Scene {
    *
    * `x`/`y` are CSS pixels from the canvas's top-left, and `width`/`height` its
    * CSS size -- exactly what a pointer event plus getBoundingClientRect give you.
+   *
+   * Through a Camera2D it is what the view shows there instead, topmost first,
+   * as of the camera's last frame: `{ node, point }` -- the world point -- with
+   * `tile: [column, row]` for a tilemap, or null. A sprite is hit anywhere in
+   * its quad, clear pixels too; a shape inside its edge; text anywhere in its
+   * block; a tilemap where its tile isn't empty.
    */
   pick(camera, x, y, width, height, options) {
+    if (camera.is2D === true) return this._pick2D(camera.screenToWorld(x * camera.width / width, y * camera.height / height));
     camera.rayFromScreen(x, y, width, height, PICK_ORIGIN, PICK_DIRECTION);
     return this.raycast(PICK_ORIGIN, PICK_DIRECTION, options);
   }
+
+  _pick2D(at) {
+    this.update();
+    const items = [];
+    for (const kind of [this.sprites, this.texts, this.tilemaps, this.shapes, this.paths]) {
+      for (const [entity, record] of kind) items.push([entity, record]);
+    }
+    // The reverse of the order they draw in.
+    items.sort(([, p], [, q]) => q.layer - p.layer || q.added - p.added);
+    const world = this.transforms.world;
+    for (const [entity, record] of items) {
+      // Into the node's own frame: the inverse of its 2D transform.
+      const m = handleIndex(entity) * 16;
+      const a = world[m], b = world[m + 1], c = world[m + 4], d = world[m + 5];
+      const det = a * d - b * c;
+      if (det === 0) continue;
+      const dx = at[0] - world[m + 12], dy = at[1] - world[m + 13];
+      const hit = hit2D(record, (d * dx - c * dy) / det, (a * dy - b * dx) / det);
+      if (hit !== null) return { node: new Node(this, entity), point: [at[0], at[1]], ...hit };
+    }
+    return null;
+  }
+}
+
+/**
+ * Whether a 2D view's sprite, text, tilemap or shape covers (x, y) in its
+ * node's frame, as render/view2d.js draws it: {} or, for a tilemap,
+ * { tile }, if so; null if not.
+ */
+function hit2D(record, x, y) {
+  if (record.kind === 'path') {
+    // As render/view2d.js fills it: nonzero winding inside a closed path, or
+    // within half the line's width of it.
+    const p = record.points, count = p.length / 2;
+    const segments = record.closed ? count : count - 1;
+    let winding = 0, nearest = Infinity;
+    for (let i = 0; i < segments; i++) {
+      const j = (i + 1) % count;
+      const ax = p[i * 2], ay = p[i * 2 + 1], bx = p[j * 2], by = p[j * 2 + 1];
+      const ex = bx - ax, ey = by - ay, px = x - ax, py = y - ay;
+      const t = Math.min(Math.max((px * ex + py * ey) / (ex * ex + ey * ey || 1), 0), 1);
+      nearest = Math.min(nearest, Math.hypot(px - ex * t, py - ey * t));
+      const side = ex * py - ey * px;
+      if (ay <= y) { if (by > y && side > 0) winding++; } else if (by <= y && side < 0) winding--;
+    }
+    // Inside a closed path is a hit even with a clear fill, as inside a shape is.
+    return (record.closed && winding !== 0) || nearest <= record.strokeWidth / 2 ? {} : null;
+  }
+  if (record.kind === 'shape') {
+    const [w, h] = record.size;
+    const px = x + (record.pivot[0] - 0.5) * w, py = y + (record.pivot[1] - 0.5) * h;
+    if (record.shape === 'ellipse') return (px / (w / 2)) ** 2 + (py / (h / 2)) ** 2 <= 1 ? {} : null;
+    const r = record.radius;
+    const qx = Math.abs(px) - w / 2 + r, qy = Math.abs(py) - h / 2 + r;
+    return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r <= 0 ? {} : null;
+  }
+  if (record.kind === 'tilemap') {
+    const [tw, th] = record.tileSize;
+    const column = Math.floor(x / tw + record.pivot[0] * record.columns);
+    const row = Math.floor(y / th + record.pivot[1] * record.rows);
+    if (column < 0 || row < 0 || column >= record.columns || row >= record.rows) return null;
+    return record.tiles[row * record.columns + column] === 0 ? null : { tile: [column, row] };
+  }
+  if (record.boxes !== undefined) {
+    // Laid out y up, in ems; a 2D view draws it y down, `size` to an em.
+    const [left, bottom, right, top] = record.block;
+    const s = record.size;
+    return x >= left * s && x <= right * s && y >= -top * s && y <= -bottom * s ? {} : null;
+  }
+  // A sprite: its quad, turned by its own rotation, its pivot at the node.
+  const cos = Math.cos(record.rotation), sin = Math.sin(record.rotation);
+  const ux = cos * x + sin * y, uy = cos * y - sin * x;
+  const rect = spriteRect(record);
+  const w = record.sizeGiven ? record.size[0] : record.texture.width * Math.abs(rect[2] - rect[0]);
+  const h = record.sizeGiven ? record.size[1] : record.texture.height * Math.abs(rect[3] - rect[1]);
+  const u = ux / w + record.pivot[0], v = uy / h + record.pivot[1];
+  return u >= 0 && u <= 1 && v >= 0 && v <= 1 ? {} : null;
 }
 
 /** Scratch for frame(). Not re-entrant, and it never needs to be. */
