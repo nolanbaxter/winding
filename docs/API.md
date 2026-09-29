@@ -42,7 +42,7 @@ These hold everywhere, so one learned is one learned for good.
 <a id="contents"></a>
 ## Contents
 
-[Winding](#winding) · [Renderer settings](#renderer-settings) · [Debug lines](#debug-lines) · [Scene](#scene) · [Node](#node) · [Camera](#camera) · [Animation](#animation) · [Lights](#lights) · [Particles](#particles) · [Decals](#decals) · [Reflection probes](#reflection-probes) · [Sprites](#sprites) · [Text](#text) · [Shapes](#shapes) · [Paths](#paths) · [Tilemaps](#tilemaps) · [Camera2D](#camera2d) · [The 2D view](#the-2d-view) · [OrbitController](#orbitcontroller) · [StatsOverlay](#statsoverlay) · [Benchmark](#benchmark) · [Environment and HDR](#environment-and-hdr) · [Colour helpers](#colour-helpers) · [Math](#math)
+[Winding](#winding) · [Renderer settings](#renderer-settings) · [Debug lines](#debug-lines) · [Scene](#scene) · [Node](#node) · [Camera](#camera) · [Animation](#animation) · [Lights](#lights) · [Particles](#particles) · [Decals](#decals) · [Reflection probes](#reflection-probes) · [Sprites](#sprites) · [Text](#text) · [Shapes](#shapes) · [Paths](#paths) · [Tilemaps](#tilemaps) · [Camera2D](#camera2d) · [The 2D view](#the-2d-view) · [OrbitController](#orbitcontroller) · [StatsOverlay](#statsoverlay) · [Benchmark](#benchmark) · [Environment and HDR](#environment-and-hdr) · [Colour helpers](#colour-helpers) · [Math](#math) · [Renamed in 1.0](#renamed)
 
 <a id="index"></a>
 ## Index
@@ -55,7 +55,7 @@ Every call, setting and entry, A to Z by its name.
 
 **C** &nbsp; [`Camera properties`](#camera-properties) · [`new Camera()`](#camera) · [`new Camera2D()`](#camera2d) · [`engine.captureProbes()`](#engine-captureprobes) · [`node.children()`](#node-children) · [`scene.childrenOf()`](#scene-childrenof) · [`engine.debug.circle()`](#debug-circle) · [`engine.clock`](#engine-clock) · [`colorFromBytes()`](#color-colorfrombytes) · [`colorFromHex()`](#color-colorfromhex) · [`Winding.create()`](#winding-create) · [`scene.createNode()`](#scene-createnode) · [`engine.createScene()`](#engine-createscene) · [`engine.createTarget()`](#engine-createtarget)
 
-**D** &nbsp; [`engine.debug`](#engine-debug) · [`scene.decalOf()`](#scene-decalof) · [`engine.debug.depthTest`](#debug-depthtest) · [`engine.destroy()`](#engine-destroy) · [`node.destroy()`](#node-destroy) · [`overlay.destroy()`](#statsoverlay-destroy) · [`orbit.detach()`](#orbitcontroller-detach) · [`engine.renderer.dof`](#renderer-dof) · [`orbit.dragged`](#orbitcontroller-dragged)
+**D** &nbsp; [`engine.debug`](#engine-debug) · [`scene.decalOf()`](#scene-decalof) · [`engine.debug.depthTest`](#debug-depthtest) · [`engine.destroy()`](#engine-destroy) · [`node.destroy()`](#node-destroy) · [`overlay.destroy()`](#statsoverlay-destroy) · [`orbit.detach()`](#orbitcontroller-detach) · [`engine.renderer.dof`](#renderer-dof) · [`orbit.dragged`](#orbitcontroller-dragged) · [`engine.renderer.drawSkybox` (renamed)](#renderer-drawskybox)
 
 **E** &nbsp; [`scene.emitterOf()`](#scene-emitterof) · [`engine.environment`](#engine-environment) · [`scene.environment`](#scene-environment) · [`new Environment()`](#environment) · [`engine.renderer.exposure`](#renderer-exposure)
 
@@ -81,7 +81,7 @@ Every call, setting and entry, A to Z by its name.
 
 **Q** &nbsp; [`quat`](#math-quat)
 
-**R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
+**R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.renderer.post.requestedLevels` (renamed)](#post-requestedlevels) · [`engine.rhi` (renamed)](#engine-rhi) · [`camera.rotation` (renamed)](#camera2d-rotation) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
 
 **S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.debug.sphere()`](#debug-sphere) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
 
@@ -188,14 +188,14 @@ Loads a `.glb` or `.gltf` and returns a model that `scene.add()` takes. All the 
 | `fetch` | `globalThis.fetch` | Replaces `fetch` for every download: `source` when it is a URL, and the buffers and images the file names. Use it to refuse, rewrite or restrict URLs, above all from files you did not write. Every loader that downloads takes this option. |
 
 Returns: a model object: `{ nodes, roots, meshes, materials, materialIds, animations, skins, lights, cameras, textures, source, engine }`. Pass the whole object to `scene.add()`.
-Throws: `'load: <url> returned <status>'` for a failed download; `'load: this engine was destroyed'` if the engine is destroyed before or during the load; errors from the glTF parser (a malformed file, or one past the device's buffer or texture limits). A failed load frees everything it had made.
+Throws: `'load: <url> returned <status>'` for a failed download; `'load: this engine was destroyed'` if the engine is destroyed before or during the load; errors from the glTF parser (a malformed file, or one past the device's buffer limit). A failed load frees everything it had made.
 
 ```js
 const helmet = await engine.load('helmet.glb', { retainGeometry: true });
 scene.add(helmet);
 ```
 
-Notes: every call allocates, the same file included. Free a model you no longer need with [`engine.unload`](#engine-unload).
+Notes: every call allocates, the same file included. Free a model you no longer need with [`engine.unload`](#engine-unload). An image larger than the device's biggest texture is left out, with a warning in the console, and its material uses its factor alone. A relative `baseURL` is taken against the page, as a relative link in it would be.
 
 <a id="engine-unload"></a>
 ### `engine.unload(asset)` → `void`
@@ -280,8 +280,8 @@ Loads a Radiance `.hdr` panorama and bakes it into an [`Environment`](#environme
 | Option | Default | Meaning |
 |---|---|---|
 | `fetch` | `globalThis.fetch` | Replaces `fetch` for downloading `source`. |
-| `size` | map width / 4 | Edge of the baked cube, in texels. Smaller costs less memory and gives a softer background; the lighting is the same. |
-| `irradianceSize` | `32` | Edge of the diffuse-light cube. |
+| `size` | the power of two at or below map width / 4 | Edge of the baked cube, in texels. A power of two. Smaller costs less memory and gives a softer background; the lighting is the same. |
+| `irradianceSize` | `32` | Edge of the diffuse-light cube. A power of two. |
 | `prefilterMips` | `6` | Roughness levels of the reflection cube, capped by the cube's mip count. |
 | `label` | `'env'` | GPU label prefix. |
 
@@ -542,7 +542,7 @@ const x = event.offsetX * engine.gpu.pixelRatio;
 <a id="engine-gpu-readpixels"></a>
 ### `engine.gpu.readPixels({ x, y, width, height })` → `Promise<Uint8Array>`
 
-The canvas's pixels as RGBA bytes, row by row from the top-left: the whole canvas, or the region given in canvas pixels. For screenshots and tests.
+The canvas's pixels as RGBA bytes, row by row from the top-left: the whole canvas, or the region given in canvas pixels. Given only `x` and `y`, the region runs to the canvas's far edges. For screenshots and tests.
 
 ```js
 engine.renderFrame(scene, camera);
@@ -615,6 +615,8 @@ engine.renderer.ao = { radius: 0.5 };
 engine.renderer.ao.radius = 1;
 engine.renderer.ao = null;
 ```
+
+Throws (on the next frame): `'ao: radius must be positive, or null to fit the scene, …'`.
 
 Notes: the first time it is turned on, its pipelines build in the background. Frames draw without it until they are ready, a fraction of a second. After that, switching costs nothing. The same holds for [`oit`](#renderer-oit) and [`post.antialias`](#post-antialias).
 
@@ -825,6 +827,8 @@ Makes an empty node. Use it to group things you move together, or as a mount poi
 
 Returns: the new Node, at the origin of its parent's space.
 
+Throws: `'createNode: parent was removed'`; `'createNode: parent is a node of another scene'`. Every `addX` that takes a `parent` checks it the same way, named for itself.
+
 ```js
 const mount = scene.createNode({ parent: car });
 mount.setPosition(0, 2, 6);
@@ -945,7 +949,7 @@ const hit = scene.raycast([0, 5, 0], [0, -1, 0], { maxDistance: 20 });
 if (hit) console.log('ground at', 5 - hit.distance);
 ```
 
-Notes: the test is exact, triangle by triangle and as skinned or morphed, only for models loaded with `engine.load(url, { retainGeometry: true })`. Other models are hit at their bounding box. Only meshes are hit; for sprites and 2D things use [`scene.pick`](#scene-pick) with a `Camera2D`.
+Notes: the test is exact, triangle by triangle and as skinned or morphed, only for models loaded with `engine.load(url, { retainGeometry: true })`. Other models are hit at their bounding box. Only meshes are hit; for sprites and 2D things use [`scene.pick`](#scene-pick) with a `Camera2D`. A mesh drawn in levels of detail is hit by its finest level: a ray has no distance to choose one by.
 
 <a id="scene-pick"></a>
 ### `scene.pick(camera, x, y, width, height, options)` → `{ node, renderable, distance } | null`
@@ -1040,7 +1044,7 @@ Sets the rotation from angles in radians, applied in YXZ order: yaw about Y, pit
 
 Attaches the node to another. `null` moves it to the scene root. Its position, rotation and scale are kept as numbers, now in the new parent's space, so it moves in the world if the parents differ.
 
-Throws: `setParent: would create a cycle in the transform hierarchy`, if the new parent is the node itself or below it.
+Throws: `setParent: would create a cycle in the transform hierarchy`, if the new parent is the node itself or below it; `setParent: parent was removed`; `setParent: parent is a node of another scene`.
 
 <a id="node-worldposition"></a>
 ### `node.worldPosition(out)` → `out`
@@ -2179,13 +2183,13 @@ Notes:
 <a id="orbitcontroller"></a>
 ### `new OrbitController(camera, element, options)` → `OrbitController`
 
-Mouse and touch control for a 3D `Camera`: drag to orbit, wheel to zoom, right-drag or shift-drag to pan. It listens on `element` and only changes the camera, so it works with or without `engine.run`.
+Mouse and touch control for a 3D `Camera`: drag to orbit, wheel to zoom, right-drag or shift-drag to pan. It listens on `element` and only changes the camera, so it works with or without `engine.run`. It sets the element's CSS `touch-action` to `none`, so a touch browser gives it the finger instead of scrolling the page, and puts it back on `detach`.
 
 | Option | Default | Meaning |
 |---|---|---|
 | `distance` | `6` | Distance from the target. |
 | `yaw` | `0` | Angle around the vertical axis, radians. `0` looks from +Z. |
-| `pitch` | `0.3` | Angle above the horizontal, radians. Kept just short of straight up or down. |
+| `pitch` | `0.3` | Angle above the horizontal, radians. Kept just short of straight up or down, however it is set. |
 | `target` | `[0, 0, 0]` | Point the camera orbits and looks at. |
 | `minDistance` | `0.1` | Closest zoom. |
 | `maxDistance` | `1000` | Farthest zoom. |
@@ -2355,8 +2359,8 @@ A baked lighting environment: diffuse ambient light, reflections, and the backgr
 
 | Option | Default | Meaning |
 |---|---|---|
-| `size` | `128`; with a map, map width / 4 | Edge of the sky cube and reflection cube, in texels. |
-| `irradianceSize` | `32` | Edge of the diffuse-light cube. |
+| `size` | `128`; with a map, the power of two at or below map width / 4 | Edge of the sky cube and reflection cube, in texels. A power of two. |
+| `irradianceSize` | `32` | Edge of the diffuse-light cube. A power of two. |
 | `prefilterMips` | `6` | Roughness levels for reflections, capped by the cube's mip count. |
 | `label` | `'env'` | GPU label prefix. |
 | `sky` | the default sky | Procedural sky settings, merged over the defaults below. Ignored when `map` is given. |
@@ -2409,7 +2413,6 @@ const map = parseHDR(bytes, { maxDimension: engine.gpu.limits.maxTextureDimensio
 const sky = new Environment(engine.gpu, { map, size: 256 });
 ```
 
-Notes: pass a `Uint8Array`, not an `ArrayBuffer`.
 
 <a id="colour-helpers"></a>
 ## Colour helpers
@@ -2441,7 +2444,7 @@ linearToSrgb(0.214);   // 0.5
 
 A hex colour as linear RGBA. Takes 3, 4, 6 or 8 digits, with or without `#`. Alpha is `1` when not given.
 
-Throws: `'colorFromHex: "<hex>" is not a 3, 4, 6 or 8 digit hex colour'`.
+Throws: `'colorFromHex: "<hex>" is not a 3, 4, 6 or 8 digit hex colour'`, for a number as well: `0xff0000` is written `'#ff0000'`.
 
 ```js
 colorFromHex('#e03a2f');     // [0.745, 0.042, 0.028, 1]
@@ -2549,3 +2552,44 @@ A box is a pair of vec3s, `min` and `max`. An empty box has `min` at `+Infinity`
 | `aabbSetEmpty(min, max)` | Makes the box empty. Returns nothing. |
 | `aabbRayDistance(min, max, origin, direction, boundsOff = 0)` | Distance along a ray to where it enters the box: `0` if the origin is inside, `-1` for a miss. Does not check the ray is finite. |
 | `rayTriangleDistance(origin, direction, positions, a, b, c)` | Distance along a ray to a triangle, from either side, or `-1` for a miss. `a`, `b`, `c` index flat xyz `positions`, so pass `index * 3`. The distance is in units of `direction`'s length. |
+
+<a id="renamed"></a>
+## Renamed in 1.0
+
+Names that changed in 1.0, for code written against 0.x. A renamed option, and each of the four properties with an entry here, throws saying what it is called now; a renamed method is simply gone, and calling it says it is not a function.
+
+| Was | Is |
+|---|---|
+| `engine.run({ scene, camera, update, frame, overlay })` | [`engine.run(scene, camera, { update, frame, hud })`](#engine-run) |
+| `overlay` (in `run` and `renderFrame`) | `hud` |
+| `engine.stats.overlay2D`, `overlay2DWritten` | [`hudSprites`, `hudSpritesWritten`](#engine-stats) |
+| a sprite's `rotation` | [`angle`](#scene-addsprite) |
+| `addReflectionProbe`, `setReflectionProbe`, `reflectionProbeOf`, `engine.captureReflectionProbes` | [`addProbe`](#scene-addprobe), [`setProbe`](#scene-setprobe), [`probeOf`](#scene-probeof), [`engine.captureProbes`](#engine-captureprobes) |
+| a probe's `min` and `max`; its `blend` | `position` and `size`; `fade` |
+| `play({ add })` | [`play({ join })`](#node-play) |
+| `scene.advanceAnimations(dt)`, `scene.advanceParticles(dt)` | [`scene.advance(dt)`](#scene-advance) |
+| `node.setRotationAxisAngle`, `node.setRotationEuler`, `node.getWorldPosition` | [`setAxisAngle`](#node-setaxisangle), [`setEuler`](#node-seteuler), [`worldPosition`](#node-worldposition) |
+| `node.setLight(changes)` | [`scene.setLight(node, changes)`](#scene-setlight) |
+| `scene.playerFor(node)` | [`node.animation`](#node-animation) |
+| text's `anchor`; Camera2D's `anchor` | `pivot`, from the top-left |
+| an emitter's `size: [birth, death]` | `size` and `sizeEnd` |
+
+<a id="engine-rhi"></a>
+### `engine.rhi`
+
+Now [`engine.gpu`](#engine-gpu). Reading or assigning `engine.rhi` throws `'engine.rhi is now engine.gpu'`.
+
+<a id="camera2d-rotation"></a>
+### `camera.rotation` (Camera2D)
+
+Now [`camera.angle`](#camera2d-angle). Reading or assigning it throws.
+
+<a id="renderer-drawskybox"></a>
+### `engine.renderer.drawSkybox`
+
+Now [`engine.renderer.skybox`](#renderer-skybox). Reading or assigning it throws.
+
+<a id="post-requestedlevels"></a>
+### `engine.renderer.post.requestedLevels`
+
+Now [`engine.renderer.post.levels`](#post-levels); what the last frame drew is `post.levelsDrawn`. Reading or assigning it throws.

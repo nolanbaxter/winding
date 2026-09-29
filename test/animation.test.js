@@ -1368,4 +1368,48 @@ test('the instance\'s own node is never the one found, even when a clip moves it
 });
 
 
+
+test('a layer faded out, or weighted to nothing, hands its nodes back', () => {
+  // The arm's rest is x 4. Only the upper layer moves it.
+  const clips = [rigClip('walk', 'translation', { 0: holdX(1) }), rigClip('wave', 'translation', { 1: holdX(10) })];
+  for (const walking of [true, false]) {
+    const player = rigPlayer(clips);
+    const t = rigRecorder();
+    player.layer('upper', { mask: 'arm' });
+    if (walking) player.play('walk');
+    player.play('wave', { layer: 'upper' });
+    player.advance(1 / 60, t);
+    close(t.x(ARM), 10);
+    player.stop({ layer: 'upper', fade: 0.05 });
+    for (let f = 0; f < 10; f++) player.advance(0.02, t);
+    close(t.x(ARM), 4, EPS, `back at rest, not a fade step short (walk ${walking ? 'playing' : 'stopped'})`);
+  }
+  const player = rigPlayer(clips);
+  const t = rigRecorder();
+  player.layer('upper', { mask: 'arm' });
+  player.play('walk');
+  player.play('wave', { layer: 'upper' });
+  player.advance(0.02, t);
+  player.setWeight('wave', 0, { layer: 'upper' });
+  player.advance(0.02, t);
+  close(t.x(ARM), 4, EPS, 'weighted to nothing: silent');
+});
+
+test('seeking, looping or turning round a finished clip plays it again', () => {
+  const player = rigPlayer([rigClip('slide', 'translation', { 1: [0, 0, 0, 10, 0, 0] })]);
+  const t = rigRecorder();
+  player.play('slide', { loop: false });
+  for (let i = 0; i < 12; i++) player.advance(0.1, t);
+  assert.equal(player.finished, true);
+  player.time = 0;
+  for (let i = 0; i < 5; i++) player.advance(0.1, t);
+  close(t.x(ARM), 5, 1e-6, 'from where it was sought');
+  assert.equal(player.finished, false);
+  for (let i = 0; i < 8; i++) player.advance(0.1, t);
+  assert.equal(player.finished, true);
+  player.speed = -1;
+  player.advance(0.5, t);
+  close(t.x(ARM), 5, 1e-6, 'turned round, it plays back');
+});
+
 console.log(`\n${passed} checks passed\n`);

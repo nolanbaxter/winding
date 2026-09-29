@@ -74,6 +74,23 @@ fn fsHalve(v : VertexOut) -> @location(0) vec4<f32> {
   return vec4<f32>(0.0);
 }
 
+// A mip: half the level above, the plain average of its four texels, alpha
+// and all. For an image whose alpha isn't coverage -- a normal map with a
+// height in it, an opaque material's base colour with clear areas the glTF
+// spec says to ignore -- where fsHalve made fully clear blocks black.
+@fragment
+fn fsBox(v : VertexOut) -> @location(0) vec4<f32> {
+  let base = vec2<i32>(floor(v.position.xy)) * 2;
+  let size = vec2<i32>(textureDimensions(source));
+  var sum = vec4<f32>(0.0);
+  for (var y = 0; y < 2; y++) {
+    for (var x = 0; x < 2; x++) {
+      sum += textureLoad(source, clamp(base + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0);
+    }
+  }
+  return sum / 4.0;
+}
+
 // The full-size level, once: a clear texel takes its covered neighbours'
 // colour, keeping its alpha, so a filter enlarging the image blends an edge
 // toward its own colour and not toward black.
@@ -170,10 +187,12 @@ export function uploadImage(rhi, texture, source) {
  * preservation, and normal maps really want renormalization per level. Both are
  * a different fragment shader in this same loop.
  */
-export function generateMipmaps(rhi, texture, { bleed = false } = {}) {
+export function generateMipmaps(rhi, texture, { bleed = false, coverage = true } = {}) {
   if (texture.mipLevelCount <= 1 && !bleed) return;
 
-  const { pipeline, layout } = mipPipelineFor(rhi, texture.format, 'fsHalve');
+  // By coverage for an image whose alpha is how much each texel covers; a
+  // plain average for one whose alpha is data, or means nothing (fsBox).
+  const { pipeline, layout } = mipPipelineFor(rhi, texture.format, coverage ? 'fsHalve' : 'fsBox');
   const sampler = linearSampler(rhi);
   const encoder = rhi.device.createCommandEncoder({ label: 'mipmaps' });
 

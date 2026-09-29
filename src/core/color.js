@@ -47,7 +47,9 @@ export function linearToSrgb(c) {
  * and it would be perverse to introduce a second way to reach it.
  */
 export function colorFromHex(hex) {
-  const digits = String(hex).replace(/^#/, '');
+  // A string only: 0xff0000 as a number is 16711680, eight "hex digits" that
+  // made a dark green where it should have been refused.
+  const digits = typeof hex === 'string' ? hex.replace(/^#/, '') : '';
   if (!/^[0-9a-fA-F]+$/.test(digits) || ![3, 4, 6, 8].includes(digits.length)) {
     throw new Error(`colorFromHex: "${hex}" is not a 3, 4, 6 or 8 digit hex colour`);
   }

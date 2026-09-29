@@ -182,12 +182,17 @@ function pipelineKey(desc) {
 
   let key = `L${desc.layout.id}`;
   key += `|VS${vertexShader.id}:${desc.vertexEntry ?? 'vs'}`;
-  key += `|FS${fragmentShader.id}:${desc.fragmentEntry ?? 'fs'}`;
-  key += `|P${p.topology},${p.cullMode},${p.frontFace},${p.stripIndexFormat ?? '-'}`;
-  key += d
-    ? `|D${d.format},${d.depthCompare},${d.depthWriteEnabled ? 1 : 0},${d.depthBias ?? 0},${d.depthBiasSlopeScale ?? 0}`
-    : '|D-';
-  key += `|M${desc.multisample?.count ?? 1}`;
+  // No targets and no fragment entry is no fragment stage at all (a depth-only
+  // pass), where naming 'fs' is a depth-only pass that discards: different
+  // pipelines, which keyed alike shared one, and the discard was lost.
+  const noFragment = (desc.targets?.length ?? 0) === 0 && desc.fragmentEntry === undefined;
+  key += `|FS${fragmentShader.id}:${noFragment ? '-' : desc.fragmentEntry ?? 'fs'}`;
+  // Whole, not field by field: a field left out of the key (unclippedDepth,
+  // depthBiasClamp, the stencil state, alpha to coverage) is two pipelines
+  // sharing one. Built once per descriptor, so the cost is nothing.
+  key += `|P${JSON.stringify(p)}`;
+  key += `|D${JSON.stringify(d)}`;
+  key += `|M${JSON.stringify(desc.multisample ?? null)}`;
 
   // Sorted, so two callers that supply the same constants in different object
   // order still land on one cache entry.

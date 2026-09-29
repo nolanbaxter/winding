@@ -59,12 +59,13 @@ export class HandleAllocator {
    * allocating more memory.
    */
   _grow(needed) {
-    const capacity = grownCapacity(this.capacity, needed);
-    if (capacity > MAX_INDEX + 1) {
+    if (needed > MAX_INDEX + 1) {
       throw new Error(
         `HandleAllocator: ${needed} slots exceeds the 24-bit index space (${MAX_INDEX + 1})`,
       );
     }
+    // Doubling may overshoot the ceiling where the need doesn't: stop at it.
+    const capacity = Math.min(grownCapacity(this.capacity, needed), MAX_INDEX + 1);
     this.generations = growArray(this.generations, capacity);
     this.freeList = growArray(this.freeList, capacity);
     this.capacity = capacity;

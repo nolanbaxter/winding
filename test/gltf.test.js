@@ -18,7 +18,7 @@ import {
   imageSize, usedImages, imageColorSpaces,
 } from '../src/scene/gltf/images.js';
 import { TransformStore } from '../src/scene/transform.js';
-import { unweldAndComputeFlatNormals } from '../src/scene/gltf/tangents.js';
+import { unweldAndComputeFlatNormals, generateTangents } from '../src/scene/gltf/tangents.js';
 import { decodeAttributes, decodeTriangles, decodeIndexSequence, FILTERS } from '../src/scene/gltf/meshopt.js';
 
 let passed = 0;
@@ -727,9 +727,33 @@ await atest('generates tangents when UVs exist but TANGENT does not', async () =
   const model = await loadGLTF(quadGLB());
   const v0 = model.meshes[0].primitives[0].vertices;
 
-  // U increases along +X and V along +Y, so the tangent is +X. cross(N,T) is
-  // +Y, which matches the bitangent, so handedness is +1.
-  vecClose(v0.subarray(8, 12), [1, 0, 0, 1], EPS, 'tangent');
+  // U increases along +X, so the tangent is +X. V increases along +Y -- and
+  // glTF's V runs down the image, so this quad shows its image upside down:
+  // the image's up, a normal map's +Y, is -Y here. cross(N, T) is +Y, so the
+  // handedness is -1.
+  vecClose(v0.subarray(8, 12), [1, 0, 0, -1], EPS, 'tangent');
+
+  // The image upright -- top row (V = 0) at the top -- the map's +Y is the
+  // quad's up: handedness +1, as an exporter writes it, and the Khronos
+  // sample viewer derives it.
+  const upright = generateTangents(
+    Float32Array.from([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]),
+    Float32Array.from([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+    Float32Array.from([0, 1, 1, 1, 1, 0, 0, 0]),
+    Uint32Array.from([0, 1, 2, 0, 2, 3]),
+  );
+  vecClose(upright.subarray(0, 4), [1, 0, 0, 1], EPS, 'upright image');
+});
+
+await atest('tangents come from the UV set the normal map samples', async () => {
+  // Set 1 is set 0 turned a quarter: its U runs up the quad, along +Y.
+  const glb = quadGLB({ uv1s: Float32Array.from([0, 0, 0, 1, 1, 1, 1, 0]) });
+  const { json, binary } = parseContainer(glb);
+  json.textures = [{}];
+  json.materials = [{ normalTexture: { index: 0, texCoord: 1 } }];
+  json.meshes[0].primitives[0].material = 0;
+  const model = await loadGLTF(makeGLB(json, binary));
+  vecClose(model.meshes[0].primitives[0].vertices.subarray(8, 11), [0, 1, 0], EPS, 'along set 1\'s U, not set 0\'s');
 });
 
 await atest('a mesh with no NORMAL is de-indexed and flat shaded', async () => {
@@ -2439,9 +2463,19 @@ test('each image is uploaded in the colour spaces its materials read it in', () 
     ],
   };
   const spaces = imageColorSpaces(json);
-  assert.deepEqual(spaces.get(0), { srgb: true, linear: true });
-  assert.deepEqual(spaces.get(1), { srgb: false, linear: true });
-  assert.deepEqual(spaces.get(2), { srgb: true, linear: false });
+  assert.deepEqual(spaces.get(0), { srgb: true, linear: true, coverage: false });
+  assert.deepEqual(spaces.get(1), { srgb: false, linear: true, coverage: false });
+  assert.deepEqual(spaces.get(2), { srgb: true, linear: false, coverage: false });
+
+  // Alpha is coverage only in the base colour of a material that cuts out or
+  // blends: its mips average by it. Everywhere else glTF says alpha is
+  // ignored, and a normal map's may be a height.
+  json.materials[0].alphaMode = 'MASK';
+  assert.equal(imageColorSpaces(json).get(0).coverage, true);
+  json.materials[0].alphaMode = 'OPAQUE';
+  assert.equal(imageColorSpaces(json).get(0).coverage, false);
+  json.materials[1].alphaMode = 'BLEND';
+  assert.equal(imageColorSpaces(json).get(2).coverage, false, 'an emissive map of a blended material is still data');
 });
 
 // ------------------------------------------------------------------ meshopt

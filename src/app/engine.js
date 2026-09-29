@@ -19,6 +19,7 @@
 // one parameter and buys split-screen and shadow passes for free, since those
 // are just "render this scene from that camera".
 
+import { renamed } from '../core/assert.js';
 import { createDevice } from '../rhi/device.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { Environment } from '../render/ibl.js';
@@ -359,14 +360,17 @@ export class Winding {
     const { retainGeometry = false } = options;
     this._assertAlive('load');
     let bytes = source;
-    let baseURL = options.baseURL;
+    // Against the page, as a URL in it would be: a relative one, 'models/',
+    // reached no file at all -- new URL() refuses to resolve against it.
+    const page = globalThis.location?.href ?? 'http://localhost/';
+    let baseURL = options.baseURL === undefined ? undefined : new URL(options.baseURL, page);
 
     // Every await is a point where the engine may have been destroyed -- the
     // canvas left the page or the device was lost, and both now do that on
     // their own. Carrying on built an asset on a dead device, which a
     // recovering app then handed to its new engine.
     if (typeof source === 'string') {
-      baseURL = baseURL ?? new URL(source, globalThis.location?.href ?? 'http://localhost/');
+      baseURL = baseURL ?? new URL(source, page);
       // Through options.fetch, as everything the load downloads is: the one rule every loader keeps.
       const response = await (options.fetch ?? globalThis.fetch)(source);
       if (!response.ok) throw new Error(`load: ${source} returned ${response.status}`);
@@ -571,6 +575,8 @@ export class Winding {
     if (!Array.isArray(asset.meshes)) {
       // Everything but a model: a font or an environment frees itself; a
       // texture or a LUT is its GPU texture.
+      // A target's pooled frame textures go with it.
+      if (asset instanceof RenderTarget) this.renderer.graph.forget(asset);
       if (asset instanceof Font || asset instanceof Environment || asset instanceof RenderTarget) asset.destroy();
       else if (typeof asset.texture?.destroy === 'function') asset.texture.destroy();
       else throw new Error('unload: this is not something load, loadTexture, loadFont, loadLUT, loadEnvironment or createTarget returned');
@@ -635,6 +641,10 @@ export class Winding {
     const hud = this._hud('run', options);
     if (this._running) throw new Error('run: already running; call stop() first');
     this._running = true;
+    // The time spent stopped is not a frame's worth of time: without this,
+    // the first frame after a restart jumped clips, particles and update() a
+    // quarter of a second.
+    this.clock._last = -1;
 
     const loop = (nowMs) => {
       // The device going away ends the loop for good, so tear the running
@@ -660,6 +670,8 @@ export class Winding {
       else this.clock.accumulator = 0;   // nothing to simulate; do not let it grow
 
       if (frame) frame(this.clock.alpha, this.clock);
+      // update() or frame() may have stopped the loop, or destroyed the engine.
+      if (!this._running) return;
       if (this.onDemand && this._idle(scene, camera, hud)) {
         this.skippedFrames++;
       } else {
@@ -780,9 +792,10 @@ export class Winding {
     }
     if (target?.unloaded) throw new Error('renderFrame: that target was unloaded');
     this.renderer.render(scene, camera, this.jobs, null, this._hud('renderFrame', options), target);
-    // What was drawn into a target is shown by the scenes that use it, which
-    // run's idle check cannot see: the next frame is drawn.
-    if (target !== null) this._drawn = null;
+    // run's idle check compares with what run last drew. A frame drawn here
+    // replaced it on the canvas, or changed a target something shows: either
+    // way the next frame of run is drawn.
+    this._drawn = null;
   }
 
   /**
@@ -885,3 +898,6 @@ function settingsSignature(values) {
     return `#${id}`;
   });
 }
+
+// Names 1.0 changed: the old ones say so. See renamed.
+renamed(Winding.prototype, 'rhi', 'gpu', 'engine');

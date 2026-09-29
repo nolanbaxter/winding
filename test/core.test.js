@@ -21,7 +21,8 @@ import {
   mat4Invert, mat4LookAt, mat4NormalMatrix, mat4PerspectiveReverseZInfinite, mat4MultiplyAffine, mat4Decompose,
 } from '../src/core/math/mat4.js';
 
-import { rayTriangleDistance, aabbTransform, aabbRayDistance } from '../src/core/math/aabb.js';
+import { rayTriangleDistance, aabbTransform, aabbRayDistance, aabbBoundingSphere } from '../src/core/math/aabb.js';
+import { PipelineCache } from '../src/rhi/pipeline.js';
 import {
   srgbToLinear, linearToSrgb, colorFromHex, colorFromBytes,
 } from '../src/core/color.js';
@@ -870,6 +871,47 @@ test('quatFromTo is exact just short of a half turn', () => {
   const q = quatFromTo(quatCreate(), from, to);
   const moved = vec3TransformQuat(vec3Create(), from, q);
   for (let i = 0; i < 3; i++) close(moved[i], to[i], 1e-6, `component ${i}`);
+});
+
+
+test('1.0.1: quatFromTo finds the half turn between float32 opposites', () => {
+  let bad = 0;
+  for (let i = 0; i < 2000; i++) {
+    const from = vec3Normalize(new Float32Array(3), [Math.sin(i * 1.7) + 0.1, Math.cos(i * 2.3), Math.sin(i * 0.9)]);
+    const to = Float32Array.from(from, (v) => -v);
+    const q = quatFromTo(quatCreate(), from, to);
+    const turned = vec3TransformQuat(vec3Create(), from, q);
+    if (Math.hypot(turned[0] - to[0], turned[1] - to[1], turned[2] - to[2]) > 1e-5) bad++;
+  }
+  assert.equal(bad, 0);
+  vecClose(quatFromTo(quatCreate(), [0, 0, 0], [1, 0, 0]), [0, 0, 0, 1], 0, 'a zero vector: no turn');
+});
+
+test('1.0.1: an empty box is missed, a sphere survives aliasing, handles reach the ceiling', () => {
+  const inf = Infinity;
+  assert.equal(aabbRayDistance([inf, inf, inf], [-inf, -inf, -inf], [0, 0, 0], [0, 0, 1]), -1);
+  const max = [1, 1, 1];
+  close(aabbBoundingSphere(max, [-1, -1, -1], max), Math.sqrt(3), 1e-12, 'out === max');
+  const handles = new HandleAllocator(20000);
+  handles._grow(2 ** 24);
+  assert.equal(handles.capacity, 2 ** 24, 'every one of the 24 bits, from a capacity that is no power of two');
+  assert.throws(() => handles._grow(2 ** 24 + 1), /24-bit index space/);
+});
+
+test('1.0.1: pipelines that differ are never one cache entry, and a hex colour is a string', () => {
+  let made = 0;
+  const cache = new PipelineCache({ createRenderPipeline: (d) => ({ n: ++made, d }) });
+  const base = { layout: { id: 1, gpu: {} }, shader: { id: 7, module: {} }, buffers: [], targets: [] };
+  const pairs = [
+    [{ ...base }, { ...base, fragmentEntry: 'fs' }],
+    [{ ...base, multisample: { count: 4 } }, { ...base, multisample: { count: 4, alphaToCoverageEnabled: true } }],
+    [{ ...base }, { ...base, primitive: { unclippedDepth: true } }],
+    [{ ...base, depth: { depthBias: 2 } }, { ...base, depth: { depthBias: 2, depthBiasClamp: 0.01 } }],
+    [{ ...base }, { ...base, depth: { stencilFront: { compare: 'never' } } }],
+  ];
+  for (const [a, b] of pairs) assert.notEqual(cache.get(a), cache.get(b));
+  assert.equal(cache.get(pairs[0][1]).d.fragment.entryPoint, 'fs', 'the discarding one has its fragment stage');
+  assert.throws(() => colorFromHex(0xff0000), /not a 3, 4, 6 or 8 digit/);
 });
 
 console.log(`\n${passed} checks passed\n`);

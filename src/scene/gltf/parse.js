@@ -407,11 +407,13 @@ function buildPrimitive(json, buffers, primitive, label, maxBytes = Infinity) {
     vertexCount = positions.length / 3;
   }
 
-  if (!hadUVs) {
-    uvs = new Float32Array(vertexCount * 2);
-  } else if (tangents === null) {
-    tangents = generateTangents(positions, normals, uvs, indices);
-  }
+  // Tangents from the UVs the normal map samples, as the spec says: a map on
+  // set 1 had its frame worked out from set 0, or from nothing when set 0
+  // wasn't there.
+  const normalSet = texCoordOf(json.materials?.[primitive.material]?.normalTexture);
+  const normalUVs = normalSet === 1 && uv1s !== null ? uv1s : hadUVs ? uvs : null;
+  if (!hadUVs) uvs = new Float32Array(vertexCount * 2);
+  if (tangents === null && normalUVs !== null) tangents = generateTangents(positions, normals, normalUVs, indices);
 
   // A material may name texCoord 1 on an asset that only supplies set 0, which
   // is malformed but common. Falling back to set 0 renders it the way the

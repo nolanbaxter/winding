@@ -48,11 +48,14 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0        # tags, so an already-released version is visible
 
-      - uses: actions/setup-node@v4
+      # v5: the Node 24 runtime, and nothing else changed. v7 drops the
+      # placeholder NODE_AUTH_TOKEN the .npmrc it writes has relied on, and
+      # this job can only be tried by releasing -- move up deliberately.
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org

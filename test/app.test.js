@@ -16,6 +16,7 @@ import { packDecals, DECAL_FLOATS } from '../src/render/decals.js';
 import { Node } from '../src/scene/node.js';
 import { Camera } from '../src/scene/camera.js';
 import { OrbitController } from '../src/app/controllers.js';
+import { Clock } from '../src/core/time.js';
 import { NO_PARENT } from '../src/scene/transform.js';
 import { handleIndex } from '../src/core/handle.js';
 import { quatCreate, quatFromEuler } from '../src/core/math/quat.js';
@@ -2119,6 +2120,113 @@ test('the 2D view uploads all of a new tilemap, then only the tiles changed', ()
   view._uploadTiles(scene, true);
   assert.equal(destroyed.length, 1, 'a removed map gives its texture back');
   assert.equal(view._tilemaps.size, 0);
+});
+
+
+test('1.0.1: run sees a frame drawn by hand, and a restart is no jump', () => {
+  const engine = Object.create(Winding.prototype);
+  engine.gpu = { width: 320, height: 240, destroyed: false, canvas: { isConnected: true } };
+  const drawn = [];
+  engine.renderer = {
+    exposure: 1, fog: null, dof: null, skybox: true, shadowDistance: null, lightDistance: null, ao: null, oit: false,
+    debug: { count: 0, depthTest: true }, _variantSets: new Map(),
+    post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, levels: 5, antialias: true, grading: null, fxaaPipeline: {} },
+    shadows: { lambda: 0.7, casterExtent: 4, normalBias: 1.5 },
+    render(scene, camera) { scene.update(); scene.transforms.moved.fill(0); scene.transforms.movedPending = false; camera.update(320 / 240); drawn.push(scene.name); },
+  };
+  engine._drawn = null; engine.onDemand = true; engine.skippedFrames = 0; engine._running = false;
+  engine.clock = new Clock();
+  engine._fpsAccum = 0; engine._fpsFrames = 0;
+  let raf = null;
+  const [request, cancel] = [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame];
+  globalThis.requestAnimationFrame = (f) => { raf = f; return 1; };
+  globalThis.cancelAnimationFrame = () => {};
+  try {
+    const a = new Scene({ capacity: 8 }); a.name = 'A';
+    const b = new Scene({ capacity: 8 }); b.name = 'B';
+    const camera = new Camera();
+    engine.run(a, camera); raf(0); raf(16); engine.stop();
+    engine.renderFrame(b, camera);
+    engine.run(a, camera); raf(10000); raf(10016);
+    assert.deepEqual(drawn, ['A', 'B', 'A'], 'A drawn again over B, then idle');
+    close(engine.clock.realDelta, 0.016, 1e-9, 'ten seconds stopped is not a frame of time');
+    // Destroyed from inside frame(): nothing more is drawn that frame.
+    let destroying = false;
+    engine.stop();
+    engine.run(a, camera, { frame: () => { if (destroying) engine.stop(); } });
+    destroying = true;
+    const before = drawn.length;
+    engine.invalidate();
+    raf(10032);
+    assert.equal(drawn.length, before, 'stopped in frame(): not drawn');
+  } finally {
+    globalThis.requestAnimationFrame = request;
+    globalThis.cancelAnimationFrame = cancel;
+  }
+});
+
+test('1.0.1: a removed parent, a morph back at rest, levels of detail, renamed names, and a clamped orbit', () => {
+  // A removed node's slot is the next one's: hanging something off it is an error.
+  const scene = new Scene({ capacity: 16 });
+  const a = scene.createNode();
+  scene.remove(a);
+  const b = scene.createNode().setPosition(100, 0, 0);
+  assert.throws(() => scene.addLight({ parent: a }), /^Error: addLight: parent was removed/);
+  assert.throws(() => scene.createNode({ parent: a }), /^Error: createNode: parent was removed/);
+  assert.throws(() => scene.createNode().setParent(a), /^Error: setParent: parent was removed/);
+  assert.throws(() => scene.createNode({ parent: new Scene({ capacity: 4 }).createNode() }), /another scene/);
+  assert.equal(b.children().length, 0, 'nothing was hung off the stranger');
+
+  // A morph mesh whose weights return to 0 gets its own box back.
+  const morphed = new Scene({ capacity: 16 });
+  const node = morphed.add({
+    nodes: [{ name: 'head', position: [0, 0, -5], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children: [], mesh: 0, skin: -1, weights: Float32Array.from([0]) }],
+    meshes: [{ name: 'face', targetCount: 1, primitives: [{ indexCount: 6, materialId: 0, bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] }, morphExtent: Float32Array.from([2]) }] }],
+    roots: [0],
+  });
+  const min = [0, 0, 0], max = [0, 0, 0];
+  const drawn = () => { morphed.transforms.moved.fill(0); morphed.transforms.movedPending = false; };
+  morphed.bounds(min, max); drawn();
+  node.weights[0] = 1;
+  morphed.bounds(min, max); drawn();
+  node.weights[0] = 0;
+  morphed.bounds(min, max); drawn();
+  vecClose([...min, ...max], [-0.5, -0.5, -5.5, 0.5, 0.5, -4.5], 1e-6, 'the box at rest');
+  assert.equal(morphed.raycast([2, 0, 0], [0, 0, -1]), null, 'a ray beside it misses');
+
+  // A ray hits a mesh in levels of detail by its finest.
+  const lods = new Scene({ capacity: 8 });
+  const prim = (h) => ({ indexCount: 3, materialId: 0, bounds: { min: [-h, -h, -h], max: [h, h, h] } });
+  const trs = { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] };
+  lods.add({
+    nodes: [
+      { name: 'fine', ...trs, children: [], mesh: 0, skin: -1, lod: { ids: [1], coverage: [0.5, 0] } },
+      { name: 'coarse', ...trs, children: [], mesh: 1, skin: -1 },
+    ],
+    meshes: [{ name: 'fine', targetCount: 0, primitives: [prim(0.5)] }, { name: 'coarse', targetCount: 0, primitives: [prim(2)] }],
+    roots: [0],
+  });
+  assert.equal(lods.raycast([1.5, 0, 10], [0, 0, -1]), null, 'beside the fine level, inside the coarse');
+  assert.equal(lods.raycast([0, 0, 10], [0, 0, -1])?.distance, 9.5);
+
+  // Names 1.0 changed say what they're called now, read or written.
+  const engine = Object.create(Winding.prototype);
+  assert.throws(() => engine.rhi, /engine.rhi is now engine.gpu/);
+  const view = new Camera2D();
+  assert.throws(() => { view.rotation = 1; }, /camera.rotation is now camera.angle/);
+
+  // An orbit's pitch and distance are held in range however they're set.
+  const listeners = { addEventListener() {}, removeEventListener() {}, style: { touchAction: 'auto' } };
+  const camera = new Camera({ fovY: 1, near: 0.1 });
+  const orbit = new OrbitController(camera, listeners, { pitch: Math.PI / 2 });
+  camera.update(1);
+  assert.ok(camera.view.every(Number.isFinite), 'straight up is just short of it');
+  assert.equal(listeners.style.touchAction, 'none', 'a finger turns it, not the page');
+  orbit.desired.distance = 0;
+  orbit.update(0);
+  close(orbit.distance, orbit.minDistance, 1e-9, "held at its nearest");
+  orbit.detach();
+  assert.equal(listeners.style.touchAction, 'auto', 'put back');
 });
 
 console.log(`\n${passed} checks passed\n`);

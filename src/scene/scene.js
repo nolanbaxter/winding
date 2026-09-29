@@ -888,7 +888,7 @@ export class Scene {
       return entity;
     };
 
-    const parentEntity = parent ? parent.entity : NULL_HANDLE;
+    const parentEntity = this._parentOf('add', parent);
 
     // ALL OR NOTHING. A walk that throws -- an asset graph that is not a tree,
     // a skin naming a joint outside the default scene -- used to leave behind
@@ -1050,10 +1050,23 @@ export class Scene {
   }
 
   /** An empty node, for grouping things you position together. */
-  createNode({ parent = null } = {}) {
+  createNode({ parent = null } = {}, caller = 'createNode') {
+    const parentEntity = this._parentOf(caller, parent);
     const entity = this.entities.alloc();
-    this.transforms.add(entity, { parent: parent ? parent.entity : NULL_HANDLE });
+    this.transforms.add(entity, { parent: parentEntity });
     return new Node(this, entity);
+  }
+
+  /**
+   * The entity to hang something off, checked: a removed node's slot is
+   * reused by the next one made, so hanging something off it attached it to
+   * a stranger -- and removing the stranger took it too.
+   */
+  _parentOf(caller, parent) {
+    if (parent === null || parent === undefined) return NULL_HANDLE;
+    if (parent.scene !== this) throw new Error(`${caller}: parent is a node of another scene`);
+    if (!parent.alive) throw new Error(`${caller}: parent was removed`);
+    return parent.entity;
   }
 
   node(entity) {
@@ -1247,7 +1260,7 @@ export class Scene {
     this.changes++;
     const record = spriteRecord({ texture, ...options });
     record.added = this._added++;
-    const node = this.createNode({ parent });
+    const node = this.createNode({ parent }, 'addSprite');
     node.setPosition(...position);
     this._added2D(node.entity);
     this.sprites.set(node.entity, record);
@@ -1355,7 +1368,7 @@ export class Scene {
     this.changes++;
     const record = shapeRecord(options);
     record.added = this._added++;
-    const node = this.createNode({ parent });
+    const node = this.createNode({ parent }, 'addShape');
     node.setPosition(...position);
     this._added2D(node.entity);
     this.shapes.set(node.entity, record);
@@ -1397,7 +1410,7 @@ export class Scene {
     this.spriteOrder++;
     const record = pathRecord(options);
     record.added = this._added++;
-    const node = this.createNode({ parent });
+    const node = this.createNode({ parent }, 'addPath');
     node.setPosition(...position);
     this.paths.set(node.entity, record);
     return node;
@@ -1456,7 +1469,7 @@ export class Scene {
     this.spriteOrder++;
     const record = emitterRecord(options);
     record.added = this._added++;
-    const node = this.createNode({ parent });
+    const node = this.createNode({ parent }, 'addEmitter');
     node.setPosition(...position);
     this.emitters.set(node.entity, record);
     return node;
@@ -1528,7 +1541,7 @@ export class Scene {
     this.changes++;
     const record = textRecord(options);
     record.added = this._added++;
-    const node = this.createNode({ parent });
+    const node = this.createNode({ parent }, 'addText');
     node.setPosition(...position);
     this._added2D(node.entity);
     this.texts.set(node.entity, record);
@@ -1579,7 +1592,7 @@ export class Scene {
   addDecal({ position = [0, 0, 0], parent = null, ...options } = {}) {
     this.changes++;
     const record = decalRecord(options);
-    const node = this.createNode({ parent });
+    const node = this.createNode({ parent }, 'addDecal');
     node.setPosition(...position);
     this.decals.set(node.entity, record);
     return node;
@@ -1626,7 +1639,7 @@ export class Scene {
     this.spriteOrder++;
     const record = tilemapRecord(options);
     record.added = this._added++;
-    const node = this.createNode({ parent });
+    const node = this.createNode({ parent }, 'addTilemap');
     node.setPosition(...position);
     this.tilemaps.set(node.entity, record);
     return node;
@@ -1709,7 +1722,7 @@ export class Scene {
    */
   addProbe({ position = [0, 0, 0], parent = null, ...options } = {}) {
     this.changes++;
-    const node = this.createNode({ parent });
+    const node = this.createNode({ parent }, 'addProbe');
     node.setPosition(...position);
     const probe = probeRecord(options);
     probe.entity = node.entity;
@@ -1804,12 +1817,13 @@ export class Scene {
     // [x, y] aims one across a 2D view.
     const rotation = direction ? quatLookAlong(quatCreate(), [direction[0], direction[1], direction[2] ?? 0]) : undefined;
 
+    const parentEntity = this._parentOf('addLight', parent);
     const entity = this.entities.alloc();
     this.transforms.add(entity, {
       // [x, y] places one in a 2D view, as node.setPosition(x, y) does.
       position: [position[0], position[1], position[2] ?? 0],
       rotation,
-      parent: parent ? parent.entity : NULL_HANDLE,
+      parent: parentEntity,
     });
     this._attachLight(entity, { type, color, intensity, radius, innerAngle, outerAngle, castShadow });
     return new Node(this, entity);
@@ -2230,6 +2244,10 @@ export class Scene {
     const candidates = [];
 
     for (let i = 0; i < this.renderableCount; i++) {
+      // Of a mesh drawn in levels of detail, only the finest: a ray has no
+      // distance to choose a level by, and a coarser level's looser shape
+      // would be hit where the mesh shown up close isn't.
+      if (this.renderableCoverage[i * 2 + 1] < F32_MAX) continue;
       const distance = aabbRayDistance(this.worldMin, this.worldMax, origin, direction, i * 3);
       // Not `>= 0`: a miss is -1, and a hit at exactly 0 means the origin is
       // already inside the box, which is a hit.

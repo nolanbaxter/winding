@@ -220,6 +220,13 @@ export function quatSlerp(out, a, b, t) {
  */
 export function quatFromTo(out, from, to) {
   const dot = from[0] * to[0] + from[1] * to[1] + from[2] * to[2];
+  // |from| |to|, which a unit pair makes 1 -- but a vector normalised into a
+  // Float32Array is 1 give or take 6e-8, and measured against an exact 1 an
+  // exact half turn missed the test below half the time and came back as
+  // no turn at all. Against the pair's own lengths it can't.
+  const norms = Math.sqrt((from[0] * from[0] + from[1] * from[1] + from[2] * from[2])
+    * (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]));
+  if (norms === 0) return quatIdentity(out);
 
   // No early-out for "already aligned". The general path below handles it
   // exactly -- the cross product is zero and w is 2, which normalizes to the
@@ -230,7 +237,7 @@ export function quatFromTo(out, from, to) {
   // at rounding noise and has no direction. The threshold was -0.999999, which
   // snapped turns up to 0.08 degrees short of opposite onto an exact half
   // turn about an arbitrary axis; the general form below is accurate there.
-  if (1 + dot < 1e-12) {
+  if (norms + dot < 1e-12 * norms) {
     const ax = Math.abs(from[0]);
     const ay = Math.abs(from[1]);
     const az = Math.abs(from[2]);
@@ -245,11 +252,11 @@ export function quatFromTo(out, from, to) {
 
   // The standard half-way trick: the cross product is the axis scaled by
   // sin(angle), and 1 + cos(angle) as w gives the half-angle after
-  // normalizing -- no trigonometry anywhere.
+  // normalizing -- no trigonometry anywhere. Both scaled by the lengths.
   out[0] = from[1] * to[2] - from[2] * to[1];
   out[1] = from[2] * to[0] - from[0] * to[2];
   out[2] = from[0] * to[1] - from[1] * to[0];
-  out[3] = 1 + dot;
+  out[3] = norms + dot;
   return quatNormalize(out, out);
 }
 

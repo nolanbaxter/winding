@@ -151,18 +151,22 @@ export function usedImages(json) {
 }
 
 /**
- * How each sampled image is read, by index: { srgb, linear }, either or both
- * -- a colour map is sRGB, a data map linear, and one image can be both. What
- * an uploader needs to make an image's textures before any material asks.
+ * How each sampled image is read, by index: { srgb, linear, coverage } -- a
+ * colour map is sRGB, a data map linear, and one image can be both. What an
+ * uploader needs to make an image's textures before any material asks.
+ * `coverage` is whether its alpha is: the base colour of a material that
+ * blends or cuts out. Everywhere else the spec says alpha is ignored.
  */
 export function imageColorSpaces(json) {
   const spaces = new Map();
   for (const material of json.materials ?? []) {
-    for (const { path, srgb } of MATERIAL_TEXTURES) {
+    const covers = material.alphaMode === 'MASK' || material.alphaMode === 'BLEND';
+    for (const { slot, path, srgb } of MATERIAL_TEXTURES) {
       const image = textureImageIndex(json, textureReference(material, path)?.index);
       if (image < 0) continue;
-      const entry = spaces.get(image) ?? { srgb: false, linear: false };
+      const entry = spaces.get(image) ?? { srgb: false, linear: false, coverage: false };
       if (srgb) entry.srgb = true; else entry.linear = true;
+      if (slot === 'baseColor' && covers) entry.coverage = true;
       spaces.set(image, entry);
     }
   }

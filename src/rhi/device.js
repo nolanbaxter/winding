@@ -336,7 +336,7 @@ export class Device {
    * bgra8unorm nearly everywhere, so blue and red are swapped back -- a method
    * that says RGBA and returns BGRA is a trap that reads as a rendering bug.
    */
-  async readPixels({ x = 0, y = 0, width = this.width, height = this.height } = {}) {
+  async readPixels({ x = 0, y = 0, width = this.width - x, height = this.height - y } = {}) {
     const BYTES_PER_ROW_ALIGNMENT = 256;
     const tightRow = width * 4;
     const paddedRow = Math.ceil(tightRow / BYTES_PER_ROW_ALIGNMENT) * BYTES_PER_ROW_ALIGNMENT;
@@ -355,15 +355,18 @@ export class Device {
     );
     this.queue.submit([encoder.finish()]);
 
-    await staging.mapAsync(GPUMapMode.READ);
-    const padded = new Uint8Array(staging.getMappedRange());
-
     const out = new Uint8Array(tightRow * height);
-    for (let row = 0; row < height; row++) {
-      out.set(padded.subarray(row * paddedRow, row * paddedRow + tightRow), row * tightRow);
+    try {
+      await staging.mapAsync(GPUMapMode.READ);
+      const padded = new Uint8Array(staging.getMappedRange());
+      for (let row = 0; row < height; row++) {
+        out.set(padded.subarray(row * paddedRow, row * paddedRow + tightRow), row * tightRow);
+      }
+      staging.unmap();
+    } finally {
+      // A region off the canvas fails to map: the buffer goes either way.
+      staging.destroy();
     }
-    staging.unmap();
-    staging.destroy();
 
     if (this._swapBlueAndRed) {
       for (let i = 0; i < out.length; i += 4) {

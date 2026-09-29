@@ -3,6 +3,7 @@
 // The layouts below are the important part: they are the engine's contract with
 // its own shader, and a Tier 2 custom material is handed them to build against.
 
+import { renamed } from '../core/assert.js';
 import { compileShader } from '../rhi/shader.js';
 import { PipelineCache } from '../rhi/pipeline.js';
 import { DrawList, opaqueSortKey, transparentSortKey, transparentDepthBucket } from './drawlist.js';
@@ -10,6 +11,9 @@ import {
   createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW,
 } from '../rhi/bindgroups.js';
 import { DEPTH_CLEAR_VALUE, DEPTH_FORMAT, DEPTH_COMPARE } from '../rhi/device.js';
+
+/** What a probe capture's frames are drawn for, to the render graph's pool: one view, however many probes. */
+const CAPTURE = Object.freeze({ view: 'capture' });
 
 /** OIT targets. accum sums weighted colour; reveal is the surviving background. */
 export const OIT_ACCUM_FORMAT = 'rgba16float';
@@ -41,7 +45,7 @@ import { createTexture, cubeFaceView } from '../rhi/texture.js';
 import { OIT_RESOLVE_SHADER } from './shaders/oit.js';
 import { SkyboxPass } from './skybox.js';
 import { ShadowMaps, stableShadowDistance } from './shadows.js';
-import { RenderGraph } from './graph.js';
+import { RenderGraph, CANVAS } from './graph.js';
 import { GpuProfiler } from './timing.js';
 import { SkinPalette } from './skin.js';
 import { MorphStore } from './morph.js';
@@ -687,6 +691,11 @@ export class Renderer {
     if (probes.length === 0) return;
     // Built before any frame reads probes, so render() never has to compile.
     await this._enableFeatures(FEATURE_PROBES);
+    // And what the captures themselves draw with -- decals, and AO or OIT
+    // switched on -- or all six faces of every probe are drawn without them,
+    // and stay that way until the next capture.
+    const drawn = (this.decals.prepare(scene) > 0 ? FEATURE_DECALS : 0) | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
+    if (drawn !== 0) await this._enableFeatures(drawn);
     const set = this._probesFor(scene, environment);
     const size = environment.size;
     if (this._captureColor?.width !== size) {
@@ -827,6 +836,12 @@ export class Renderer {
     const rhi = this.rhi;
     const environment = scene.environment;
     if (!environment) throw new Error('Renderer: the scene has no environment');
+    // Checked as fog and depth of field are: a radius of 0 divided by itself
+    // in the blur and took every bit of ambient light away.
+    const aoRadius = this.ao ? this.ao.radius : null;
+    if (aoRadius !== null && aoRadius !== undefined && !(aoRadius > 0 && Number.isFinite(aoRadius))) {
+      throw new Error(`ao: radius must be positive, or null to fit the scene, got ${aoRadius} (renderer.ao = null turns it off)`);
+    }
     const width = target?.width ?? output?.width ?? rhi.width;
     const height = target?.height ?? output?.height ?? rhi.height;
     const depthView = target?.depthView ?? output?.depthView ?? rhi.depthView();
@@ -1140,7 +1155,8 @@ export class Renderer {
     this._frameEnvironment = environment;
 
     const graph = this.graph;
-    graph.begin();
+    // Pooled textures age by the frames of what they're drawn for: see RenderGraph.begin.
+    graph.begin(output ?? (target !== null ? CAPTURE : CANVAS));
 
     const surface = target === null ? graph.importTexture('surface', output?.view ?? rhi.currentColorView()) : null;
     // Imported but NOT external: the device owns the memory, and nothing reads
@@ -1387,25 +1403,37 @@ export class Renderer {
     const rhi = this.rhi;
     const p = this.profiler;
     p?.frameStart();
+    const tFrame = now();
     const view = this._view2D(scene);
     this.stats.recomposed = this._prepare2D(view, scene, camera, jobs, output);
+    const tAfterTransforms = now();
     this.stats.sprites2D = view.count;
     this.stats.sprites2DWritten = view.written;
     this.stats.tiles2DWritten = view.tilesWritten;
     this.stats.emitters = this.particles.prepare(scene, camera, null);
+    const tAfterUpload = now();
     p?.mark('2d');
     const graph = this.graph;
-    graph.begin();
+    graph.begin(output ?? CANVAS);
     const surface = graph.importTexture('surface', output?.plainView ?? rhi.currentColorView({ linear: false }));
     const particles = this.particles.addSimulation(graph);
     view.addPass(graph, { surface, background: camera.background, particles });
     if (output === null) this.debug.addPass(graph, { surface, depth: null, viewProjection: camera.viewProjection });
     graph.compile();
+    const tAfterGraph = now();
     p?.mark('graph build');
     const encoder = rhi.device.createCommandEncoder({ label: 'frame-2d' });
     graph.execute(encoder);
     if (overlay !== null) this._drawOverlay(encoder, overlay, jobs, output);
     this.gpuTiming.resolve(encoder);
+    // As a 3D frame reports them, for the stats overlay: a 2D frame's
+    // transforms include its slots, which it writes as it goes.
+    const tEnd = now();
+    this.timing.transforms = tAfterTransforms - tFrame;
+    this.timing.upload = tAfterUpload - tAfterTransforms;
+    this.timing.graph = tAfterGraph - tAfterUpload;
+    this.timing.encode = tEnd - tAfterGraph;
+    this.timing.total = tEnd - tFrame;
     p?.mark('encode');
     rhi.queue.submit([encoder.finish()]);
     if (output === null) this.debug.clear();
@@ -1832,3 +1860,6 @@ function writeDrawData(out, offset, scene, renderable) {
 function alignUp(value, alignment) {
   return Math.ceil(value / alignment) * alignment;
 }
+
+// Names 1.0 changed: the old ones say so. See renamed.
+renamed(Renderer.prototype, 'drawSkybox', 'skybox', 'renderer');

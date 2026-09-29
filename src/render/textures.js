@@ -9,7 +9,7 @@ import {
   createTexture2D, uploadImage, generateMipmaps, linearSampler,
 } from '../rhi/texture.js';
 import {
-  materialTextureSlots, samplerDescriptor, textureImageIndex, textureSamplerIndex,
+  materialTextureSlots, samplerDescriptor, textureImageIndex, textureSamplerIndex, imageColorSpaces,
 } from '../scene/gltf/images.js';
 
 /**
@@ -29,6 +29,8 @@ export class GLTFTextures {
     this._textures = new Map();
     this._samplers = new Map();
     this.uploaded = 0;
+    /** Images whose alpha is coverage, which their mips average by (see imageColorSpaces). */
+    this._coverage = new Set([...imageColorSpaces(json)].filter(([, spaces]) => spaces.coverage).map(([image]) => image));
   }
 
   /** {baseColor, normal, metallicRoughness, occlusion, emissive, sampler} */
@@ -79,8 +81,9 @@ export class GLTFTextures {
     });
     uploadImage(this.rhi, texture, bitmap);
     // Mips are averaged through an -srgb view when the format is sRGB, so the
-    // filtering happens in linear light without any manual conversion.
-    generateMipmaps(this.rhi, texture);
+    // filtering happens in linear light without any manual conversion. By
+    // coverage only where alpha is coverage: elsewhere a clear block went black.
+    generateMipmaps(this.rhi, texture, { coverage: srgb && this._coverage.has(imageIndex) });
 
     this._textures.set(key, texture);
     this.uploaded++;

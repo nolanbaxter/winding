@@ -129,6 +129,12 @@ export class OrbitController {
 
     this._onContextMenu = (event) => event.preventDefault();
 
+    // Without this a touch browser takes a finger's drag for a page scroll or
+    // zoom, cancels the pointer, and the camera never turns. Put back on detach.
+    if (element.style) {
+      this._touchAction = element.style.touchAction;
+      element.style.touchAction = 'none';
+    }
     element.addEventListener('pointerdown', this._onPointerDown);
     element.addEventListener('pointermove', this._onPointerMove);
     element.addEventListener('pointerup', this._onPointerUp);
@@ -142,6 +148,12 @@ export class OrbitController {
     // A camera riding a node belongs to the node (Camera.follow). Writing the
     // pose here as well would make the two fight every frame.
     if (this.camera.following) return;
+
+    // However they were set -- options, or `desired` written directly -- a
+    // pitch straight up or down has no up to look along, and a distance of 0
+    // no direction: held just inside, as a drag or the wheel holds them.
+    this.desired.pitch = clamp(this.desired.pitch, MIN_PITCH, MAX_PITCH);
+    this.desired.distance = clamp(this.desired.distance, this.minDistance, this.maxDistance);
 
     // Frame-rate independent exponential decay. The naive `x += (target - x) *
     // k` eases faster on a fast display, which makes the feel change with the
@@ -265,6 +277,7 @@ export class OrbitController {
     element.removeEventListener('pointercancel', this._onPointerUp);
     element.removeEventListener('wheel', this._onWheel);
     element.removeEventListener('contextmenu', this._onContextMenu);
+    if (element.style) element.style.touchAction = this._touchAction ?? '';
   }
 }
 

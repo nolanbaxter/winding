@@ -19,7 +19,6 @@
 import {
   quatCreate, quatSetAxisAngle, quatFromEuler, quatNormalize, quatLookAlong,
 } from '../core/math/quat.js';
-import { NULL_HANDLE } from '../core/handle.js';
 
 // Shared scratch. Node methods are called from user code, never concurrently,
 // and a fresh quaternion per setRotation call would allocate in someone's loop.
@@ -98,7 +97,7 @@ export class Node {
 
   /** Pass null to detach to the scene root. */
   setParent(node) {
-    this.scene.transforms.setParent(this.entity, node ? node.entity : NULL_HANDLE);
+    this.scene.transforms.setParent(this.entity, this.scene._parentOf('setParent', node));
     return this;
   }
 

@@ -747,8 +747,8 @@ test('no profiler means no timestampWrites key to confuse a driver', () => {
 console.log('\ncompile reuse');
 
 /** A small frame: a transient bloom-like chain into an imported target. */
-function declareFrame(graph, { size = 8, reader = true, clearTarget = true, extraPass = false } = {}) {
-  graph.begin();
+function declareFrame(graph, { size = 8, reader = true, clearTarget = true, extraPass = false, view } = {}) {
+  graph.begin(view);
   const target = graph.importTexture('target', { id: 'target-view' });
   const scratch = graph.createTexture('scratch', { ...COLOR, width: size, height: size });
   const unused = graph.createTexture('unused', COLOR);
@@ -813,6 +813,30 @@ test('reused textures are kept alive, not evicted as unasked-for', () => {
   for (let f = 0; f < 10; f++) declareFrame(graph);
   assert.equal(rhi.counts.destroyed, 0);
   assert.equal(rhi.counts.created, 2);
+});
+
+test('a canvas and targets of other sizes, drawn in turn, keep their textures; a resize still frees the old', () => {
+  // Three views a tick were three graph frames: each one's textures were two
+  // frames old by its next turn, destroyed and made again every tick.
+  const rhi = countingRhi();
+  const graph = new RenderGraph(rhi);
+  const minimap = {}, screen = {};
+  for (let tick = 0; tick < 20; tick++) {
+    declareFrame(graph, { size: 8 });
+    declareFrame(graph, { size: 16, view: minimap });
+    declareFrame(graph, { size: 32, view: screen });
+  }
+  assert.equal(rhi.counts.destroyed, 0, 'nothing thrown away');
+  assert.equal(rhi.counts.created, 4, 'one a size, and the one all three share: made once');
+
+  // The canvas dragged through sizes: each frame's old one goes, two frames on.
+  for (let size = 40; size < 60; size++) declareFrame(graph, { size });
+  assert.ok(rhi.counts.destroyed >= 17, `old canvas sizes freed: ${rhi.counts.destroyed}`);
+
+  // A target unloaded gives its textures back at once.
+  const before = rhi.counts.destroyed;
+  graph.forget(minimap);
+  assert.equal(rhi.counts.destroyed - before, 1, "the minimap's own texture");
 });
 
 test('a pass that comes alive recompiles, and runs', () => {

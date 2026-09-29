@@ -13,6 +13,7 @@
 // colour comes out exactly as authored and half-transparent edges blend the
 // way they do in an image editor. See render/view2d.js.
 
+import { renamed } from '../core/assert.js';
 import { mat4Create } from '../core/math/mat4.js';
 
 export class Camera2D {
@@ -124,3 +125,6 @@ export class Camera2D {
     return out;
   }
 }
+
+// Names 1.0 changed: the old ones say so. See renamed.
+renamed(Camera2D.prototype, 'rotation', 'angle', 'camera');

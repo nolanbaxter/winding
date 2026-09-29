@@ -326,10 +326,18 @@ export class Environment {
         throw new RangeError(`Environment: a ${map.width}x${map.height} map is past this device's ${max}`);
       }
     }
-    size ??= map === null ? 128 : Math.max(1, Math.min(Math.floor(map.width / 4), max));
+    // A cube's faces are a power of two a side: the most that fits in a
+    // quarter of the map's width, which is about one texel of it a texel.
+    size ??= map === null ? 128 : 2 ** Math.floor(Math.log2(Math.max(1, Math.min(map.width / 4, max))));
     this._map = map;
     if (size > max || irradianceSize > max) {
       throw new RangeError(`Environment: size ${Math.max(size, irradianceSize)} is past this device's ${max}`);
+    }
+    // Before any texture is made, so a bad one leaves nothing behind.
+    for (const [name, value] of [['size', size], ['irradianceSize', irradianceSize]]) {
+      if (!(Number.isInteger(value) && value >= 1 && (value & (value - 1)) === 0)) {
+        throw new RangeError(`Environment: ${name} must be a power of two, got ${value}`);
+      }
     }
     // No more levels than the cube has. Asking for more made an invalid
     // texture -- size 16 has five -- and every frame after it was black.

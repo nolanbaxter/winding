@@ -367,11 +367,18 @@ export class AnimationPlayer {
   get _current() { return this.tracks[this.tracks.length - 1] ?? null; }
   get clip() { return this._current?.clip ?? null; }
   get time() { return this._current?.time ?? 0; }
-  set time(value) { if (this._current) { this._current.time = value; this._changed = true; } }
+  // Each resumes a clip that had finished: seeking it back, looping it, or
+  // turning it round is asking it to play again.
+  set time(value) { if (this._current) { this._current.time = value; this._resume(); } }
   get speed() { return this._current?.speed ?? 1; }
-  set speed(value) { if (this._current) this._current.speed = value; }
+  set speed(value) { if (this._current) { this._current.speed = value; this._resume(); } }
   get loop() { return this._current?.loop ?? true; }
-  set loop(value) { if (this._current) this._current.loop = value; }
+  set loop(value) { if (this._current) { this._current.loop = value; this._resume(); } }
+
+  _resume() {
+    this._current.finished = false;
+    this._changed = true;
+  }
   /** True once a non-looping clip has reached its end. */
   get finished() { return this._current?.finished ?? false; }
 
@@ -497,14 +504,17 @@ export class AnimationPlayer {
 
     let playing = 0;
     for (const layer of layers) playing += stepLayer(layer, dt);
-    if (playing === 0) return false;
+    // A clip faded out this frame, or weighted to nothing, hands what it
+    // moved back to the layers beneath it -- to rest, where nothing is.
+    const released = layers.some((layer) => layer.released.length > 0 || layer.tracks.some((track) => track.weight <= 0));
+    if (playing === 0 && !released) return false;
     if (root !== null) this._measureMotion(root, transforms);
 
     // Root motion rewrites the pose before it is written, which the direct
     // path has no pose to do to.
     const base = layers[0];
     if (root === null && playing === 1 && base.tracks.length === 1 && base.mask === null && base.weight === 1
-      && base.tracks[0].weight > 0) {
+      && base.tracks[0].weight > 0 && !released) {
       const track = base.tracks[0];
       sampleClip(track.clip, track.time, transforms, this.entityOf, this.entities, this.weightsOf, this.properties);
       return true;
@@ -522,6 +532,13 @@ export class AnimationPlayer {
         }
       }
       composeLayer(pose, acc, layer, i === 0);
+    }
+    if (released) {
+      for (const layer of layers) {
+        for (const clip of layer.released) this._release(pose, clip);
+        for (const track of layer.tracks) if (track.weight <= 0) this._release(pose, track.clip);
+        layer.released.length = 0;
+      }
     }
     if (root !== null) this._keepRootInPlace(root, pose, transforms);
     this._write(pose, transforms);
@@ -796,6 +813,22 @@ export class AnimationPlayer {
     return pose;
   }
 
+  /**
+   * Mark what `clip` moves as written, so the pose -- what the layers still
+   * playing make of it, or the rest pose where none touch it -- goes back.
+   */
+  _release(pose, clip) {
+    for (const channel of clip.channels) {
+      if (channel.path === 'property') {
+        const property = this.properties?.get(channel.key);
+        if (property !== undefined) pose.propertyTouched[property.slot] = 1;
+        continue;
+      }
+      const bit = { translation: POSITION, rotation: ROTATION, scale: SCALE, weights: MORPH }[channel.path];
+      if (bit !== undefined && (bit !== MORPH || pose.morph[channel.node])) pose.touched[channel.node] |= bit;
+    }
+  }
+
   /** Write every property some layer touched, through the usual setters. */
   _write(pose, transforms) {
     for (let n = 0; n < this.entityOf.length; n++) {
@@ -907,7 +940,7 @@ function chainRotation(out, chain, transforms) {
 const IDENTITY = new Float32Array([0, 0, 0, 1]);
 
 function newLayer(name) {
-  return { name, tracks: [], mask: null, weight: 1, additive: false, phase: 0 };
+  return { name, tracks: [], mask: null, weight: 1, additive: false, phase: 0, released: [] };
 }
 
 function checkWeight(weight, what) {
@@ -965,6 +998,7 @@ function stepLayer(layer, dt) {
     // Only a clip on its way out is dropped at zero; one weighted to zero by
     // setWeight is still playing, waiting to be weighted back in.
     if (!(track.leaving && track.weight <= 0)) tracks[kept++] = track;
+    else layer.released.push(track.clip);
   }
   tracks.length = kept;
   syncLayer(layer, dt);

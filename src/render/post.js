@@ -20,6 +20,7 @@
 // that wrong by hand and the bloom is simply the top mip with everything below
 // it thrown away.
 
+import { renamed } from '../core/assert.js';
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { clampSampler } from '../rhi/texture.js';
@@ -648,10 +649,10 @@ export class PostStack {
     return entry.bindGroup;
   }
 
-  /** Drop bind groups naming views the last frame did not use. */
+  /** Drop bind groups naming views no frame has used for eight: the canvas and targets of other sizes take turns. */
   _evictBindGroups() {
     for (const [key, entry] of this._bindGroups) {
-      if (entry.lastFrame < this._frame - 2) this._bindGroups.delete(key);
+      if (entry.lastFrame < this._frame - 8) this._bindGroups.delete(key);
     }
   }
 
@@ -699,3 +700,6 @@ function viewId(view) {
   if (!view.__postId) view.__postId = nextViewId++;
   return view.__postId;
 }
+
+// Names 1.0 changed: the old ones say so. See renamed.
+renamed(PostStack.prototype, 'requestedLevels', 'levels', 'post');

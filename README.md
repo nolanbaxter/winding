@@ -4,6 +4,7 @@
 </picture>
 
 [![npm](https://img.shields.io/npm/v/winding-engine?color=%23cb3837&label=winding-engine)](https://www.npmjs.com/package/winding-engine)
+[![API reference](https://img.shields.io/badge/API-reference-2f6f4e)](docs/API.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 A WebGPU rendering engine for the browser, in 3D and 2D. No dependencies, no build step — ES modules, served as-is.
@@ -108,7 +109,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.0.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.0.1/src/winding.js';
 </script>
 ```
 
@@ -128,8 +129,8 @@ import { Winding, Camera } from 'winding-engine';
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.0.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.0.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.0.1/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.0.1/src/"
   }
 }
 </script>
@@ -186,7 +187,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 737 checks, Node, no browser
+npm test          # 746 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 52 checks on a real device
 ```
 

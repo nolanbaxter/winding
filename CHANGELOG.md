@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-29
+
+**A hunt for bugs, engine-wide.** Four reviews of everything the 2D audit hadn't covered -- loading,
+the scene and animation, the 3D renderer, the foundations -- each bug proven by a script or a
+render before it was fixed, and each fix with a test that fails without it.
+
+### Fixed
+
+- **Normal maps on models without their own tangents were lit upside down in Y.** The generated
+  tangents measured handedness against the direction V increases, and glTF's V runs down the
+  image. They now match what exporters write: on Khronos's NormalTangentMirrorTest, generated
+  and authored tangents draw the same image to the pixel.
+- **A normal map under a texture transform was corrected with the wrong matrix**: rotated, it lit
+  from the wrong side; scaled 2x, its bumps were a quarter as deep. It carries the slopes by the
+  chain rule now.
+- **Tangents came from the first UV set** when the normal map samples the second.
+- **Mipmaps averaged every glTF texture by its alpha**, so a normal map with a height in its alpha,
+  or an opaque material's clear areas, went black in the distance. Only a cut-out or blended
+  material's base colour averages by alpha now; everything else is a plain average.
+- **An animation layer faded out, or weighted to nothing, didn't give its nodes back**: an arm
+  the layer had moved stayed a fade step short of where the layers beneath put it, or stayed
+  where it was. A clip switched without a fade still holds, as documented.
+- **Seeking, looping or reversing a finished clip didn't play it again.**
+- **A morph mesh kept the bounds of its biggest shape** after its weights went back to zero, so a
+  ray beside it still hit it.
+- **A removed node passed as a `parent` attached to the node that reused its slot**, and removing
+  that node took the new one with it. It throws now: `parent was removed`.
+- **A ray hit a mesh drawn in levels of detail by its coarsest level**, where only the finest is
+  seen up close. It tests the finest.
+- **`run` didn't see a frame drawn with `renderFrame`**, and kept showing it; restarting `run`
+  after a stop jumped the clock a quarter of a second; and destroying the engine inside `update`
+  or `frame` still drew that frame.
+- **Text sharing a font with another scene drew from a freed texture in 3D** once the other
+  scene's text grew the font's atlas, as it did in 2D until 1.0.
+- **Probe captures before the first frame drew without decals**, and without AO or OIT switched on.
+- **A canvas and two targets of other sizes, drawn each frame, rebuilt their textures every
+  frame**: the frame textures a view uses now age by that view's frames, and a target unused for
+  600 frames, or unloaded, gives them back.
+- **3D sprite-sheet frames showed an edge of their neighbour** when smooth-filtered, as 2D frames
+  did until 1.0.
+- **`quatFromTo` returned no turn for exact opposites** about half the time, when the vectors had
+  been normalised in 32-bit floats.
+- **Different pipelines could share one cache entry**: a depth-only pass and one that discards,
+  or two that differed only in their stencil, alpha-to-coverage, unclipped depth or depth-bias
+  clamp.
+- **An `OrbitController` given a pitch straight up or down**, or a `desired.distance` of 0,
+  threw on its next frame; both are held just inside now, as a drag holds them. It also sets the
+  element's `touch-action`, so touch browsers give it the finger instead of scrolling the page.
+- **A panorama whose width over four isn't a power of two couldn't be loaded** as an environment;
+  its size rounds down to one now, and a size that isn't one says so before making anything.
+- **A relative `baseURL` failed every `.gltf` load**; it's taken against the page.
+- **`readPixels({ x, y })` read past the canvas**, and left its buffer behind when it failed.
+- **The stats overlay showed stale CPU times for a 2D frame.**
+- **`engine.renderer.ao = { radius: 0 }` took away all ambient light.** It throws, as fog and
+  depth of field do for values they can't use.
+- **Scenes of 20,000 or so capacity ran out of handles** at 10 million instead of 16.7 million.
+- **`aabbRayDistance` hit an empty box; `aabbBoundingSphere` with an input as its output gave a
+  radius of 0; `colorFromHex(0xff0000)` returned a dark green** instead of refusing a number.
+- **Assigning a property 1.0 renamed did nothing**: `engine.rhi`, `renderer.drawSkybox`,
+  `post.requestedLevels`, a Camera2D's `rotation`. Reading or assigning one throws with its new
+  name, as renamed options do, and docs/API.md lists every 1.0 rename.
+- The release workflow's actions move to their Node 24 versions.
+
 ## [1.0.0] - 2026-09-29
 
 **1.0: one convention everywhere, a reference for every call, and 2D finished.** From here the API
@@ -2017,7 +2080,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/nolanbaxter/winding/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/nolanbaxter/winding/compare/v0.14.0...v1.0.0
 [0.14.0]: https://github.com/nolanbaxter/winding/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/nolanbaxter/winding/compare/v0.12.0...v0.13.0

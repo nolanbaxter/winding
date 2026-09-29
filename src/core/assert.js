@@ -33,3 +33,14 @@ export function assertFinite(array, what, offset = 0, length = array.length - of
     }
   }
 }
+
+/**
+ * A property renamed in 1.0, on `owner` (a class's prototype): reading or
+ * assigning the old name throws, naming the new one. A renamed option throws
+ * the same way; a plain property had nothing to catch it, so assigning the
+ * old name did nothing at all, and said nothing.
+ */
+export function renamed(owner, old, now, where) {
+  const fail = () => { throw new Error(`${where}.${old} is now ${where}.${now}`); };
+  Object.defineProperty(owner, old, { get: fail, set: fail, configurable: true });
+}

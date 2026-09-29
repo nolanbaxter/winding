@@ -111,11 +111,16 @@ export function generateTangents(positions, normals, uvs, indices) {
     // Handedness: whether the bitangent should be cross(N, T) or its negative.
     // Mirrored UV islands flip it, which is exactly why glTF stores it per
     // vertex in w instead of assuming one convention for the whole mesh.
+    //
+    // Measured against -B, not B. B is where V increases, and glTF's V runs
+    // DOWN the image (0 is its top row), while a normal map's +Y -- the
+    // bitangent, cross(N, T) * w -- is the image's up. Taken against +B, every
+    // normal map on a mesh without its own tangents was lit upside down in Y.
     const cx = ny * tz - nz * ty;
     const cy = nz * tx - nx * tz;
     const cz = nx * ty - ny * tx;
     const handedness = cx * bitanAccum[n] + cy * bitanAccum[n + 1] + cz * bitanAccum[n + 2];
-    tangents[v * 4 + 3] = handedness < 0 ? -1 : 1;
+    tangents[v * 4 + 3] = handedness < 0 ? 1 : -1;
   }
 
   return tangents;

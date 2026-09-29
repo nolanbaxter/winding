@@ -259,7 +259,7 @@ export class DepthOfField {
       this._groups.set(key, entry);
     }
     entry.frame = this._frame;
-    for (const [k, e] of this._groups) if (e.frame < this._frame - 2) this._groups.delete(k);
+    for (const [k, e] of this._groups) if (e.frame < this._frame - 8) this._groups.delete(k);
     pass.setPipeline(this.pipelines.get(this._descriptors[name]));
     pass.setBindGroup(0, entry.group);
     pass.draw(3);

@@ -803,17 +803,17 @@ fn transformUV(slot : u32, uv : vec2<f32>) -> vec2<f32> {
 
 /**
  * A normal map's tangent-space xy, from the transformed texture's axes back
- * to the mesh's. Its UVs are A uv + t, so the texture's own u and v axes lie
- * along the columns of A^-1 in the mesh's UV space -- a rotated normal map
- * encodes rotated slopes, and without this a bump lights from the wrong side.
- * The identity leaves it exactly as sampled.
+ * to the mesh's. The map stores slopes, s = (-dH/du', +dH/dv') -- +Y is the
+ * image's up, and V runs down it -- of a height H over the texture's UVs,
+ * which are A uv + t. A slope carries back by the chain rule: the mesh's
+ * gradient is A^T times the texture's, so s becomes F A^T F s, F flipping x.
+ * Not A^-1, which it was: a rotated map lit from the wrong side, and one
+ * scaled 2x bumped a quarter as much. The identity leaves it as sampled.
  */
 fn untransformNormal(row : u32, xy : vec2<f32>) -> vec2<f32> {
   let r0 = material.uvTransforms[row].xy;
   let r1 = material.uvTransforms[row + 1u].xy;
-  let det = r0.x * r1.y - r0.y * r1.x;
-  if (abs(det) < F32_MIN_NORMAL) { return xy; }
-  return vec2<f32>(r1.y * xy.x - r0.y * xy.y, -r1.x * xy.x + r0.x * xy.y) / det;
+  return vec2<f32>(r0.x * xy.x - r1.x * xy.y, -r0.y * xy.x + r1.y * xy.y);
 }
 
 /**

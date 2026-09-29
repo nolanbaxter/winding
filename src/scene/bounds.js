@@ -308,14 +308,17 @@ export function applyMorphBounds(
     if (extent === null || extent === undefined) continue;
 
     const pad = morphPadding(morphs[m].weights, extent);
-    if (pad !== lastPad[i]) {
+    const was = lastPad[i];
+    if (pad !== was) {
       lastPad[i] = pad;
       changed++;
     }
     // Every weight at zero is the undeformed mesh, which is what the pass
     // before this one already computed. The resting state of every morphed
-    // mesh in the scene, so it is worth not touching.
-    if (pad === 0) continue;
+    // mesh in the scene, so it is worth not touching -- once its box is the
+    // undeformed one: the frame its weights return to zero, the padded box
+    // from before is still there, and a mesh that didn't move keeps it.
+    if (pad === 0 && was === 0) continue;
 
     const o = i * 3;
     // In place only on a box applySkinBounds rebuilt this frame. A skin with

@@ -52,6 +52,11 @@ import { createTexture } from '../rhi/texture.js';
 /** What an attachment declared without a clear value, but cleared, clears to. */
 const TRANSPARENT_BLACK = Object.freeze({ r: 0, g: 0, b: 0, a: 0 });
 
+/** The view a frame is for when begin() is told none: the canvas. */
+export const CANVAS = Object.freeze({ view: 'canvas' });
+/** Frames, of any view, after which a view's unused textures go back regardless. */
+const STALE = 600;
+
 export class RenderGraph {
   constructor(rhi, { profiler = null } = {}) {
     this.rhi = rhi;
@@ -71,6 +76,9 @@ export class RenderGraph {
     // Physical textures, cached across frames by descriptor. The aliasing pass
     // hands these out; without the cache every frame would recreate them.
     this._pool = new Map();
+    /** Frames drawn for each view (see begin), and the view this one is for. */
+    this._viewFrames = new WeakMap();
+    this._view = CANVAS;
     this._frame = 0;
 
     // Scratch for the sort, sized from passCount at compile() rather than up
@@ -104,15 +112,33 @@ export class RenderGraph {
     this._compiledLastUse = new Int32Array(0);
   }
 
-  /** Start a new frame's declaration. Frees nothing; resets counters. */
-  begin() {
+  /**
+   * Start a new frame's declaration. Frees nothing; resets counters. `view` is
+   * what the frame is drawn for -- the canvas, by default, or a target -- and
+   * the pool ages each texture by the frames of the view that used it last.
+   */
+  begin(view = CANVAS) {
     this.profiler?.begin();
     this.passCount = 0;
     this.resourceCount = 0;
     this._compiled = false;
     this._frame++;
+    this._view = view;
+    this._viewFrames.set(view, (this._viewFrames.get(view) ?? 0) + 1);
     this._evictUnused();
     return this;
+  }
+
+  /** Give back every pooled texture `view` used: a target that was unloaded. */
+  forget(view) {
+    this._evictUnused((entry) => entry.owner !== view);
+  }
+
+  /** Mark a pooled texture as used by this frame, and by its view. */
+  _stamp(entry) {
+    entry.lastFrame = this._frame;
+    entry.owner = this._view;
+    entry.ownerFrame = this._viewFrames.get(this._view);
   }
 
   /**
@@ -132,11 +158,11 @@ export class RenderGraph {
    * destroy() is safe on a texture the GPU has not finished with; WebGPU defers
    * the memory until submitted work referencing it completes.
    */
-  _evictUnused() {
+  _evictUnused(keep = (entry) => this._fresh(entry)) {
     for (const [key, entries] of this._pool) {
       let kept = 0;
       for (const entry of entries) {
-        if (entry.lastFrame >= this._frame - 2) {
+        if (keep(entry)) {
           entries[kept++] = entry;
           entry.inUse = 0;
           continue;
@@ -147,6 +173,19 @@ export class RenderGraph {
       entries.length = kept;
       if (kept === 0) this._pool.delete(key);
     }
+  }
+
+  /**
+   * Whether a pooled texture was used in the last two frames of its own view.
+   * By its view's frames, not the graph's: the canvas and two targets of other
+   * sizes, drawn in turn, are three frames a tick, and counted together each
+   * one's textures were two frames old by its next turn -- destroyed and made
+   * again every frame. A view not drawn for STALE frames of any kind gives its
+   * textures back anyway: a target left unused, and never unloaded.
+   */
+  _fresh(entry) {
+    if (entry.lastFrame >= this._frame - 2) return true;
+    return this._frame - entry.lastFrame <= STALE && this._viewFrames.get(entry.owner) - entry.ownerFrame <= 2;
   }
 
   /**
@@ -428,7 +467,7 @@ export class RenderGraph {
       const physical = this._compiledPhysical[r];
       if (!physical) continue;
       physical.inUse = 1;
-      physical.lastFrame = this._frame;
+      this._stamp(physical);
       resource.physical = physical;
       resource.view = physical.view;
     }
@@ -697,7 +736,7 @@ export class RenderGraph {
     for (const entry of entries) {
       if (entry.inUse) continue;
       entry.inUse = 1;
-      entry.lastFrame = this._frame;
+      this._stamp(entry);
       return entry;
     }
 
@@ -709,7 +748,8 @@ export class RenderGraph {
       usage: d.usage,
       sampleCount: d.sampleCount,
     });
-    const entry = { texture, view: texture.createView(), inUse: 1, lastFrame: this._frame };
+    const entry = { texture, view: texture.createView(), inUse: 1, lastFrame: 0 };
+    this._stamp(entry);
     entries.push(entry);
     return entry;
   }

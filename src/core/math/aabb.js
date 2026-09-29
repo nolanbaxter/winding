@@ -67,14 +67,12 @@ export function aabbTransform(
 
 /** Bounding sphere of an AABB. Cheaper to test than the box, and looser. */
 export function aabbBoundingSphere(outCenter, min, max) {
+  // Half the box's size first: outCenter may be min or max itself.
+  const hx = (max[0] - min[0]) * 0.5, hy = (max[1] - min[1]) * 0.5, hz = (max[2] - min[2]) * 0.5;
   outCenter[0] = (min[0] + max[0]) * 0.5;
   outCenter[1] = (min[1] + max[1]) * 0.5;
   outCenter[2] = (min[2] + max[2]) * 0.5;
-  return hypot3(
-    max[0] - outCenter[0],
-    max[1] - outCenter[1],
-    max[2] - outCenter[2],
-  );
+  return hypot3(hx, hy, hz);
 }
 
 /** Grow `min`/`max` to contain another box. */
@@ -120,6 +118,9 @@ export function aabbSetEmpty(min, max) {
  * the scene keeps.
  */
 export function aabbRayDistance(min, max, origin, direction, boundsOff = 0) {
+  // An empty box -- min above max, as aabbSetEmpty leaves one -- is missed:
+  // its slabs swapped round were the whole of space, a hit at 0.
+  if (!(min[boundsOff] <= max[boundsOff])) return -1;
   let enter = 0;
   let exit = Infinity;
 

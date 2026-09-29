@@ -68,6 +68,7 @@ struct Out {
   @location(3) @interpolate(flat) cutoff : f32,   // a glyph's: where its outline ends
   @location(4) @interpolate(flat) sdf    : f32,
   @location(5) @interpolate(flat) stroke : vec4<f32>,
+  @location(6) @interpolate(flat) rect   : vec4<f32>,   // low corner, high corner
 };
 
 @vertex
@@ -121,13 +122,17 @@ fn vs(
   out.color = color;
   out.cutoff = extra.y;
   out.stroke = stroke;
+  out.rect = vec4<f32>(min(rect.xy, rect.zw), max(rect.xy, rect.zw));
   out.sdf = select(0.0, 1.0, (flags & ${FLAG_SDF}u) != 0u);
   return out;
 }
 
 @fragment
 fn fs(v : Out) -> @location(0) vec4<f32> {
-  let texel = textureSample(image, imageSampler, v.uv);
+  // Half a texel inside its rect, so filtering never reaches the next frame
+  // of a sheet or the next glyph of an atlas -- as the 2D view samples.
+  let half = 0.5 / vec2<f32>(textureDimensions(image));
+  let texel = textureSample(image, imageSampler, clamp(v.uv, v.rect.xy + half, max(v.rect.zw - half, v.rect.xy + half)));
   // A distance field's edge is at 0.5; one screen pixel either side of it
   // blends, however large or small the glyph is drawn.
   // How far the field moves across a pixel. Out here, not in a branch: a
@@ -296,7 +301,7 @@ export function packSprites(scene, camera, out = null) {
     const repeat = !glyph && repeats(source);
     const last = runs[runs.length - 1];
     if (last && last.texture === texture && last.blend === blend && last.repeat === repeat) last.count++;
-    else runs.push({ texture, blend, first: k, count: 1, repeat });
+    else runs.push({ texture, blend, first: k, count: 1, repeat, font: glyph ? source.font : null });
   }
   return { count: n, runs, out };
 }
@@ -396,7 +401,10 @@ export class SpritePass {
     if (!moved && last !== null && last !== undefined && last.scene === scene && last.revision === scene.revision
       && last.changes === scene.changes && last.width === width && last.height === height
       && camera.view.every((v, i) => v === last.view[i])
-      && camera.position.every((v, i) => v === last.eye[i])) {
+      && camera.position.every((v, i) => v === last.eye[i])
+      // A font's atlas grows when any scene needs new glyphs -- a HUD sharing
+      // the font -- which replaces its texture and moves every glyph's rect.
+      && !this._runs.some((run) => run.font !== null && run.font.texture !== run.texture)) {
       this._environment = environment;
       return this.count;
     }
