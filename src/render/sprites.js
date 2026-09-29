@@ -17,18 +17,22 @@ import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { DEPTH_FORMAT, DEPTH_COMPARE } from '../rhi/device.js';
-import { clampSampler, pixelatedSampler } from '../rhi/texture.js';
+import { spriteSampler } from '../rhi/texture.js';
 import { grownCapacity } from '../core/grow.js';
 import { FRAME_WGSL } from './shaders/pbr.js';
 import { FOG_WGSL } from './fog.js';
 import { handleIndex } from '../core/handle.js';
-import { spriteRect } from '../scene/scene.js';
+import { spriteRect, repeats } from '../scene/scene.js';
 
-/** position, rotation, size, pivot, rect, colour, flags, cutoff, and the plane's two axes. */
-export const SPRITE_FLOATS = 24;
+/** position, angle, size, pivot, rect, colour, flags, cutoff, the plane's two axes, and a glyph's outline colour. */
+export const SPRITE_FLOATS = 28;
 const SPRITE_BYTES = SPRITE_FLOATS * 4;
 /** Cutouts, then additive, then alpha; see the header. */
-const DRAW_ORDER = { cutout: 0, additive: 1, alpha: 2 };
+// Cutouts first, as they write depth; additive next, as its order is free;
+// the rest far to near, as their order is not.
+const DRAW_ORDER = { cutout: 0, additive: 1, alpha: 2, multiply: 2, screen: 2 };
+/** The shader's BLEND for each: alpha, additive, cutout, multiply, screen. */
+const BLEND_VALUE = { alpha: 0, additive: 1, cutout: 2, multiply: 3, screen: 4 };
 const FLAG_UPRIGHT = 1;
 const FLAG_PIXELS = 2;
 /** In the node's own plane, along its x and y: a sign, not a billboard. */
@@ -61,8 +65,9 @@ struct Out {
   @location(0) uv     : vec2<f32>,
   @location(1) color  : vec4<f32>,
   @location(2) world  : vec3<f32>,
-  @location(3) @interpolate(flat) cutoff : f32,
+  @location(3) @interpolate(flat) cutoff : f32,   // a glyph's: where its outline ends
   @location(4) @interpolate(flat) sdf    : f32,
+  @location(5) @interpolate(flat) stroke : vec4<f32>,
 };
 
 @vertex
@@ -77,6 +82,7 @@ fn vs(
   @location(6) extra    : vec2<f32>,   // x = flags, y = cutoff
   @location(7) planeRight : vec3<f32>,
   @location(8) planeUp    : vec3<f32>,
+  @location(9) stroke     : vec4<f32>,
 ) -> Out {
   var corners = array<vec2<f32>, 6>(
     vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
@@ -114,6 +120,7 @@ fn vs(
   out.uv = mix(rect.xy, rect.zw, vec2<f32>(corner.x, 1.0 - corner.y));
   out.color = color;
   out.cutoff = extra.y;
+  out.stroke = stroke;
   out.sdf = select(0.0, 1.0, (flags & ${FLAG_SDF}u) != 0u);
   return out;
 }
@@ -123,23 +130,64 @@ fn fs(v : Out) -> @location(0) vec4<f32> {
   let texel = textureSample(image, imageSampler, v.uv);
   // A distance field's edge is at 0.5; one screen pixel either side of it
   // blends, however large or small the glyph is drawn.
-  let edge = clamp((texel.a - 0.5) / max(fwidth(texel.a), 1e-5) + 0.5, 0.0, 1.0);
-  var colour = select(texel, vec4<f32>(1.0, 1.0, 1.0, edge), v.sdf > 0.5) * v.color;
+  // How far the field moves across a pixel. Out here, not in a branch: a
+  // derivative needs every pixel around it to be running this line.
+  let perPixel = max(fwidth(texel.a), 1e-5);
+  let edge = clamp((texel.a - 0.5) / perPixel + 0.5, 0.0, 1.0);
+  var colour = texel * v.color;
+  if (v.sdf > 0.5) {
+    // A glyph's outline, from its edge out to where the field reaches
+    // v.cutoff: the fill over it, premultiplied.
+    let outer = clamp((texel.a - v.cutoff) / perPixel + 0.5, 0.0, 1.0);
+    let ring = max(outer - edge, 0.0);
+    let a = v.color.a * edge + v.stroke.a * ring;
+    colour = vec4<f32>((v.color.rgb * v.color.a * edge + v.stroke.rgb * v.stroke.a * ring) / max(a, 1e-6), a);
+  }
   if (BLEND == 2u && colour.a < v.cutoff) { discard; }
   if (frame.fog.x > 0.0) {
     let toSprite = v.world - frame.cameraPosition.xyz;
     let distance = length(toSprite);
     let through = exp(-fogDepth(frame.fog, frame.cameraPosition.xyz, toSprite / max(distance, 1e-6), distance));
     let inscatter = frame.fogAlbedo.rgb * fogMeanRadiance(irradiance, envSampler) + frame.fogLight.rgb;
-    // Additive light is dimmed by the fog in front of it; the fog's own glow
-    // is already there, under it.
-    colour = vec4<f32>(select(colour.rgb * through + inscatter * (1.0 - through), colour.rgb * through, BLEND == 1u), colour.a);
+    // Additive and screen light is dimmed by the fog in front of it, and a
+    // multiply's darkening fades to white, which changes nothing; the fog's
+    // own glow is already there, under them.
+    var fogged = colour.rgb * through + inscatter * (1.0 - through);
+    if (BLEND == 1u || BLEND == 4u) { fogged = colour.rgb * through; }
+    if (BLEND == 3u) { fogged = mix(vec3<f32>(1.0), colour.rgb, through); }
+    colour = vec4<f32>(fogged, colour.a);
   }
   if (BLEND == 1u) { return vec4<f32>(colour.rgb * colour.a, 0.0); }
+  if (BLEND >= 3u) { return vec4<f32>(min(colour.rgb, vec3<f32>(65504.0)) * colour.a, colour.a); }
   if (BLEND == 2u) { return vec4<f32>(colour.rgb, 1.0); }
   return vec4<f32>(min(colour.rgb, vec3<f32>(65504.0)), colour.a);
 }
 `;
+
+/**
+ * How each blend meets the target, shared by the 2D view. Multiply and
+ * screen take a premultiplied colour: multiply is dst x lerp(1, src, a), and
+ * screen src + dst - src x dst, each faded by the alpha.
+ */
+export const BLEND_STATE = {
+  alpha: {
+    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+    alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+  },
+  additive: {
+    color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+    alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
+  },
+  multiply: {
+    color: { srcFactor: 'dst', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+    alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+  },
+  screen: {
+    color: { srcFactor: 'one', dstFactor: 'one-minus-src', operation: 'add' },
+    alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+  },
+  cutout: undefined,
+};
 
 /**
  * This frame's sprites and text, packed and ordered, and the runs to draw
@@ -181,7 +229,7 @@ export function packSprites(scene, camera, out = null) {
     boxes[n] = null;
     matrix[n] = m;
     drawOrder[n] = DRAW_ORDER[sprite.blend];
-    key[n] = sprite.blend === 'alpha' ? farness(m) : textureId(sprite.texture);
+    key[n] = DRAW_ORDER[sprite.blend] === 2 ? farness(m) : textureId(sprite.texture);
     order[n] = n++;
   }
   for (const [entity, text] of scene.texts) {
@@ -191,7 +239,7 @@ export function packSprites(scene, camera, out = null) {
       sources[n] = text;
       boxes[n] = box;
       matrix[n] = m;
-      drawOrder[n] = DRAW_ORDER.alpha;
+      drawOrder[n] = DRAW_ORDER[text.blend];
       key[n] = far;
       order[n] = n++;
     }
@@ -214,13 +262,13 @@ export function packSprites(scene, camera, out = null) {
     // A glyph is a sprite of its font's atlas, sized and pivoted by its box.
     const glyph = box !== null;
     const texture = glyph ? source.font.texture : source.texture;
-    const blend = glyph ? 'alpha' : source.blend;
+    const blend = source.blend;
     const rect = glyph ? source.font.metrics.glyphs.get(box.char).rect : spriteRect(source);
     const color = source.color;
     out[o] = world[m + 12];
     out[o + 1] = world[m + 13];
     out[o + 2] = world[m + 14];
-    out[o + 3] = glyph ? 0 : source.rotation;
+    out[o + 3] = glyph ? 0 : source.angle;
     // Scaled by the node, as a mesh would be: its x and y axes' lengths. A
     // size in pixels is on the screen, where the node's scale means nothing.
     const lx = Math.sqrt(world[m] * world[m] + world[m + 1] * world[m + 1] + world[m + 2] * world[m + 2]);
@@ -230,22 +278,25 @@ export function packSprites(scene, camera, out = null) {
     out[o + 4] = width * (source.pixels ? 1 : lx);
     out[o + 5] = height * (source.pixels ? 1 : ly);
     out[o + 6] = glyph ? -box.x / box.width : source.pivot[0];
-    out[o + 7] = glyph ? -box.y / box.height : source.pivot[1];
+    // A pivot's [0, 0] is the image's top-left, as in 2D; the quad here is measured y up.
+    out[o + 7] = glyph ? -box.y / box.height : 1 - source.pivot[1];
     for (let c = 0; c < 4; c++) {
       out[o + 8 + c] = rect[c];
       out[o + 12 + c] = color[c];
     }
     out[o + 16] = (source.facing === 'upright' ? FLAG_UPRIGHT : 0) | (source.facing === 'plane' ? FLAG_PLANE : 0)
       | (source.pixels ? FLAG_PIXELS : 0) | (glyph ? FLAG_SDF : 0);
-    out[o + 17] = glyph ? 0 : source.cutoff;
+    out[o + 17] = glyph ? source.strokeEdge : source.cutoff;
     // The node's own x and y, for a sprite in its plane.
     for (let c = 0; c < 3; c++) {
       out[o + 18 + c] = world[m + c] / (lx || 1);
       out[o + 21 + c] = world[m + 4 + c] / (ly || 1);
     }
+    for (let c = 0; c < 4; c++) out[o + 24 + c] = glyph ? source.stroke[c] : 0;
+    const repeat = !glyph && repeats(source);
     const last = runs[runs.length - 1];
-    if (last && last.texture === texture && last.blend === blend) last.count++;
-    else runs.push({ texture, blend, first: k, count: 1 });
+    if (last && last.texture === texture && last.blend === blend && last.repeat === repeat) last.count++;
+    else runs.push({ texture, blend, first: k, count: 1, repeat });
   }
   return { count: n, runs, out };
 }
@@ -286,21 +337,10 @@ export class SpritePass {
     const layout = createPipelineLayout(device, { 0: frameLayout, 1: imageLayout }, 'sprites');
     const attributes = [
       ['float32x3', 0], ['float32', 12], ['float32x2', 16], ['float32x2', 24],
-      ['float32x4', 32], ['float32x4', 48], ['float32x2', 64], ['float32x3', 72], ['float32x3', 84],
+      ['float32x4', 32], ['float32x4', 48], ['float32x2', 64], ['float32x3', 72], ['float32x3', 84], ['float32x4', 96],
     ].map(([format, offset], shaderLocation) => ({ format, offset, shaderLocation }));
-    const BLEND_STATE = {
-      alpha: {
-        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-      },
-      additive: {
-        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-        alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
-      },
-      cutout: undefined,
-    };
     const descriptors = {};
-    for (const [value, blend] of [[0, 'alpha'], [1, 'additive'], [2, 'cutout']]) {
+    for (const [blend, value] of Object.entries(BLEND_VALUE)) {
       descriptors[blend] = {
         label: `sprites:${blend}`,
         layout,
@@ -416,24 +456,23 @@ export class SpritePass {
     pass.setBindGroup(0, frameGroup);
     pass.setVertexBuffer(0, this._buffer);
     let bound = null;
-    for (const { texture, blend, first, count } of this._runs) {
+    for (const { texture, blend, first, count, repeat } of this._runs) {
       if (blend !== bound) {
         pass.setPipeline(this.pipelines.get(this._descriptors[blend]));
         bound = blend;
       }
-      let imageGroup = this._imageGroups.get(texture);
-      if (!imageGroup) {
-        imageGroup = this.rhi.device.createBindGroup({
-          label: 'sprite-image',
-          layout: this._imageLayout,
-          entries: [
-            { binding: 0, resource: texture.view },
-            { binding: 1, resource: texture.pixelated ? pixelatedSampler(this.rhi) : clampSampler(this.rhi) },
-          ],
-        });
-        this._imageGroups.set(texture, imageGroup);
-      }
-      pass.setBindGroup(1, imageGroup);
+      // One group per texture and sampler: clamped, or repeating.
+      let groups = this._imageGroups.get(texture);
+      if (!groups) this._imageGroups.set(texture, groups = []);
+      groups[repeat ? 1 : 0] ??= this.rhi.device.createBindGroup({
+        label: 'sprite-image',
+        layout: this._imageLayout,
+        entries: [
+          { binding: 0, resource: texture.view },
+          { binding: 1, resource: spriteSampler(this.rhi, texture.pixelated, repeat) },
+        ],
+      });
+      pass.setBindGroup(1, groups[repeat ? 1 : 0]);
       pass.draw(6, count, 0, first);
     }
   }

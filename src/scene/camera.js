@@ -302,6 +302,9 @@ export class Camera {
     const ndcY = 1 - (y / height) * 2;
 
     const tanHalf = Math.tan(this.fovY * 0.5);
+    // The size given, not this.aspect: that is the last frame's, and before
+    // the first frame or after a resize it is not this canvas's.
+    const aspect = width / height;
 
     // The camera basis. `up` is the caller's hint, not necessarily perpendicular
     // to the view direction, so the real up is recovered from the cross product.
@@ -317,7 +320,7 @@ export class Camera {
       // here would fan the rays out from the eye and pick things that are not
       // under the cursor at all.
       const halfHeight = this.orthographicHalfHeight();
-      const sx = ndcX * halfHeight * this.aspect;
+      const sx = ndcX * halfHeight * aspect;
       const sy = ndcY * halfHeight;
       for (let i = 0; i < 3; i++) {
         outOrigin[i] = this.position[i] + RIGHT[i] * sx + UP[i] * sy;
@@ -326,7 +329,7 @@ export class Camera {
       return outDirection;
     }
 
-    const sx = ndcX * tanHalf * this.aspect;
+    const sx = ndcX * tanHalf * aspect;
     const sy = ndcY * tanHalf;
     for (let i = 0; i < 3; i++) {
       outDirection[i] = FORWARD[i] + RIGHT[i] * sx + UP[i] * sy;

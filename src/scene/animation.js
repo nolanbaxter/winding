@@ -295,7 +295,7 @@ function changeFromFirstKey(channel, components) {
  *
  * Within a layer, clips blend by their weights. play() with a `fade` ramps the
  * new clip up and the others down over that many seconds; without one, the new
- * clip replaces them; with `add`, it joins them and nothing else changes, and
+ * clip replaces them; with `join`, it joins them and nothing else changes, and
  * setWeight() then moves any one of them -- a walk and a run weighted by how
  * fast the character is going. Weights are normalized per node, so a node only
  * some of a layer's clips animate takes the value of those that do: the clip
@@ -402,15 +402,16 @@ export class AnimationPlayer {
    * Start a clip by name or index. Returns false if there is no such clip.
    *
    * `fade`, in seconds, cross-fades from whatever that layer is playing, or
-   * fades the layer in when it is playing nothing. `add` joins the clips
+   * fades the layer in when it is playing nothing. `join` joins the clips
    * already playing instead of replacing them. `weight` is where the clip's
    * weight ends up. Sets state only: the pose does not change until the next
    * advance(), so a player left at speed 0 holds whatever pose the asset
    * loaded in.
    */
   play(nameOrIndex, {
-    loop = true, speed = 1, time = 0, fade = 0, layer = 'base', weight = 1, add = false, sync = false,
+    loop = true, speed = 1, time = 0, fade = 0, layer = 'base', weight = 1, join = false, sync = false, add,
   } = {}) {
+    if (add !== undefined) throw new Error('play: add is now join, with the same value');
     const clip = this._clip(nameOrIndex);
     if (!clip) return false;
     const target = this._layer(layer);
@@ -432,8 +433,8 @@ export class AnimationPlayer {
       track.weight = 0;
       track.rate = weight / fade;
     }
-    if (add || ramp) {
-      if (!add) for (const old of target.tracks) leave(old, fade);
+    if (join || ramp) {
+      if (!join) for (const old of target.tracks) leave(old, fade);
       target.tracks.push(track);
     } else {
       target.tracks = [track];

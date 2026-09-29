@@ -11,7 +11,8 @@
 // never a read past the end.
 
 /**
- * Decode an .hdr file to linear RGB floats, top row first.
+ * Decode an .hdr file to linear RGB floats, top row first. `bytes` is a
+ * Uint8Array or the ArrayBuffer a fetch gave.
  *
  * `maxDimension` is the device's texture limit: a map it could not hold is
  * refused here, before a byte of it is decoded.
@@ -19,6 +20,7 @@
  * @returns {{ width: number, height: number, data: Float32Array }} RGB, 3 floats a pixel
  */
 export function parseHDR(bytes, { maxDimension = Infinity } = {}) {
+  if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
   let at = 0;
   const line = () => {
     const start = at;

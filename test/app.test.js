@@ -10,7 +10,7 @@ import { Scene, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
 import { packSprites, SPRITE_FLOATS, SpritePass } from '../src/render/sprites.js';
 import { order2D, write2D, View2D, SPRITE2D_FLOATS } from '../src/render/view2d.js';
 import { Camera2D } from '../src/scene/camera2d.js';
-import { spriteSheet } from '../src/scene/scene.js';
+import { spriteSheet, shapeRadius } from '../src/scene/scene.js';
 import { ringCapacity, packEmitter } from '../src/render/particles.js';
 import { packDecals, DECAL_FLOATS } from '../src/render/decals.js';
 import { Node } from '../src/scene/node.js';
@@ -153,7 +153,7 @@ test('a sprite takes the aspect of its texture, or its pixels, and names a bad o
   assert.deepEqual([...scene.spriteOf(node).size], [10, 10], 'a size asked for stays');
   for (const [options, why] of [
     [{}, /texture must be/], [{ texture, size: [1, 0] }, /size must be positive/],
-    [{ texture, facing: 'down' }, /facing/], [{ texture, blend: 'multiply' }, /blend/],
+    [{ texture, facing: 'down' }, /facing/], [{ texture, blend: 'overlay' }, /blend/],
     [{ texture, cutoff: 2 }, /cutoff/], [{ texture, color: [1, 1, 1] }, /color must be 4/],
   ]) assert.throws(() => scene.addSprite(options), why);
   scene.remove(node);
@@ -186,14 +186,115 @@ test('sprites draw cutouts, then additive, then alpha from far to near, in runs 
   assert.deepEqual([out[4 * SPRITE_FLOATS + 4], out[4 * SPRITE_FLOATS + 5]], [2, 3], 'scaled by its node');
 });
 
+test('one convention everywhere: pivots from the top-left, two numbers mean 2D, a getter and a node for every kind', () => {
+  const texture = { view: {}, width: 4, height: 4 };
+  const scene = new Scene({ capacity: 16 });
+
+  // A pivot's [0, 0] is the image's top-left in 3D as in 2D: [0.5, 1] stands it on the ground.
+  const tree = scene.addSprite({ texture, pivot: [0.5, 1], position: [0, 0, -3] });
+  scene.update();
+  const camera = new Camera({ fovY: 1, near: 0.1 });
+  camera.target.set([0, 0, -1]);
+  camera.update(1);
+  const out = new Float32Array(2 * SPRITE_FLOATS);
+  packSprites(scene, camera, out);
+  vecClose(out.subarray(6, 8), [0.5, 0], 1e-6, 'bottom middle, where the 3D quad measures y up');
+
+  // With no size, a sprite is the shape of the frame it shows, not of the whole sheet.
+  const sheet = { view: {}, width: 64, height: 16 };
+  const walker = scene.addSprite({ texture: sheet, animation: { frames: spriteSheet({ columns: 4 }) } });
+  assert.deepEqual([...scene.spriteOf(walker).size], [1, 1], 'a 16 x 16 frame of a 64 x 16 sheet: square');
+  scene.remove(walker);
+
+  // Two numbers leave z alone, as setPosition(x, y) does; one scales every axis.
+  tree.setScale(-1, 2);
+  scene.update();
+  const m = handleIndex(tree.entity) * 16;
+  vecClose([scene.transforms.world[m], scene.transforms.world[m + 5], scene.transforms.world[m + 10]], [-1, 2, 1], 1e-6, 'z stays 1');
+  tree.setScale(3);
+  scene.update();
+  close(scene.transforms.world[m + 10], 3);
+
+  // Every addX has an xOf, a copy.
+  const ring = scene.addShape({ shape: 'ellipse', size: [8, 8] });
+  assert.equal(scene.shapeOf(ring).shape, 'ellipse');
+  assert.equal(scene.shapeOf(tree), null, 'a node without one');
+  scene.shapeOf(ring).size[0] = 99;
+  assert.equal(scene.shapes.get(ring.entity).size[0], 8, 'a copy: changing it changes nothing');
+  assert.throws(() => scene.setShape(ring, { size: [0, 1] }), /^Error: setShape:/, 'a set call names itself');
+  const route = scene.addPath({ points: [[0, 0], [5, 5]], closed: false, strokeWidth: 2 });
+  scene.setPath(route, scene.pathOf(route));
+  assert.deepEqual(scene.pathOf(route).points, [[0, 0], [5, 5]], 'read back as addPath took it, and taken back');
+  const lamp = scene.addLight({ direction: [0, -1, 0], radius: 7, outerAngle: 0.4, castShadow: true });
+  const spot = scene.lightOf(lamp);
+  assert.deepEqual([spot.type, [...spot.color], spot.intensity, spot.radius, spot.castShadow], ['spot', [1, 1, 1], 1, 7, true]);
+  vecClose([spot.innerAngle, spot.outerAngle], [0.2, 0.4], 1e-6, 'its cone, as stored: 32-bit');
+  scene.setLight(lamp, { intensity: 3 });
+  assert.equal(scene.lightOf(lamp).intensity, 3);
+  assert.throws(() => scene.setLight(ring, { intensity: 1 }), /not a light/);
+
+  // A reflection probe is a node: boxed around where it is, moved with it, removed with it.
+  const hall = scene.addProbe({ position: [0, 2, 0], size: [10, 4, 16] });
+  scene.update();
+  const probe = scene.reflectionProbes[0];
+  assert.deepEqual([...probe.min, ...probe.max], [-5, 0, -8, 5, 4, 8]);
+  probe.captured = true;
+  hall.setPosition(1, 2, 0);
+  scene.update();
+  assert.deepEqual([probe.min[0], probe.captured], [-4, false], 'moved: its capture was of somewhere else');
+  assert.deepEqual([...scene.probeOf(hall).size], [10, 4, 16]);
+  assert.throws(() => scene.addProbe({ min: [0, 0, 0], max: [1, 1, 1] }), /a node now/);
+  scene.remove(hall);
+  assert.equal(scene.reflectionProbes.length, 0);
+
+  // One way to free anything a load call returned.
+  const engine = Object.create(Winding.prototype);
+  let destroyed = 0;
+  const loaded = { texture: { destroy: () => destroyed++ }, view: {}, width: 4, height: 4 };
+  engine.unload(loaded);
+  engine.unload(loaded);
+  assert.equal(destroyed, 1, 'freed once');
+  assert.throws(() => engine.unload({}), /not something load/);
+});
+
+test('one name per idea: a renamed option says what it is called now', () => {
+  const texture = { view: {}, width: 4, height: 4 };
+  const scene = new Scene({ capacity: 16 });
+  assert.throws(() => scene.addSprite({ texture, rotation: 1 }), /^Error: addSprite: rotation is now angle/);
+  assert.equal(scene.spriteOf(scene.addSprite({ texture, angle: 1 })).angle, 1);
+  assert.throws(() => new Camera2D({ rotation: 1 }), /Camera2D: rotation is now angle/);
+  assert.equal(new Camera2D({ angle: 1 }).angle, 1);
+  assert.throws(() => scene.addProbe({ size: [1, 1, 1], blend: 1 }), /addProbe: blend is now fade/);
+  assert.equal(scene.probeOf(scene.addProbe({ size: [1, 1, 1], fade: 0.5 })).fade, 0.5);
+
+  // A node sets where it is; what a kind is goes through the scene, for lights as for the rest.
+  const node = scene.createNode().setAxisAngle([0, 1, 0], 1).setEuler(1, 0);
+  assert.equal(node.setLight, undefined);
+  assert.deepEqual([...node.setPosition(1, 2, 3).worldPosition([0, 0, 0])], [0, 0, 0], 'as of the last update');
+  scene.update();
+  assert.deepEqual(node.worldPosition([0, 0, 0]), [1, 2, 3]);
+
+  // One call moves a scene on: its clips, its sprite frames and its particles.
+  const walker = scene.addSprite({ texture, animation: { frames: spriteSheet({ columns: 2 }), fps: 10 } });
+  const sparks = scene.addEmitter({ rate: 10, lifetime: 1, size: 1 });
+  scene.advance(0.15);
+  assert.equal(scene.sprites.get(walker.entity).frame, 1);
+  close(scene.emitters.get(sparks.entity).owed, 1.5, 1e-9);
+
+  // run takes the scene and camera first, as renderFrame does; the old one object says so.
+  const engine = Object.create(Winding.prototype);
+  assert.throws(() => engine.run({ scene, camera: new Camera2D() }), /^Error: run: takes \(scene, camera, \{ update, frame, hud \}\)/);
+});
+
 test('run() skips a frame only when nothing it is drawn from has changed', () => {
   const engine = Object.create(Winding.prototype);
-  engine.rhi = { width: 320, height: 240 };
+  engine.gpu = { width: 320, height: 240 };
   const sets = new Map([[0, { ready: true }]]);
   engine.renderer = {
-    exposure: 1, fog: null, dof: null, drawSkybox: true, shadowDistance: null, lightDistance: null, ao: null,
+    exposure: 1, fog: null, dof: null, skybox: true, shadowDistance: null, lightDistance: null, ao: null,
     debug: { count: 0, depthTest: true }, _variantSets: sets,
-    post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, requestedLevels: 5, antialias: true, grading: null },
+    post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, levels: 5, antialias: true, grading: null, fxaaPipeline: {} },
+    shadows: { lambda: 0.7, casterExtent: 4, normalBias: 1.5 },
   };
   engine._drawn = null;
   const scene = new Scene({ capacity: 16 });
@@ -202,7 +303,7 @@ test('run() skips a frame only when nothing it is drawn from has changed', () =>
   camera.position.set([0, 0, 5]);
   scene.update();
   // What renderFrame leaves behind: composed transforms, spent moves, an updated camera.
-  const drawn = () => { scene.update(); scene.transforms.movedPending = false; camera.update(engine.rhi.width / engine.rhi.height); engine._remember(scene, camera); };
+  const drawn = () => { scene.update(); scene.transforms.movedPending = false; camera.update(engine.gpu.width / engine.gpu.height); engine._remember(scene, camera); };
   const check = (why, change, restore = () => {}) => {
     drawn();
     assert.equal(engine._idle(scene, camera), true, `settled, before: ${why}`);
@@ -217,26 +318,32 @@ test('run() skips a frame only when nothing it is drawn from has changed', () =>
   check('a setting changed', () => { engine.renderer.exposure = 2; });
   check('a LUT was swapped for another', () => { engine.renderer.post.grading = { lut: {} }; }, () => {});
   check('a light changed', () => scene.addLight({ position: [0, 1, 0], radius: 2 }));
-  check('the canvas resized', () => { engine.rhi.width = 640; });
+  check('the canvas resized', () => { engine.gpu.width = 640; });
   check('debug lines are queued', () => { engine.renderer.debug.count = 2; }, () => { engine.renderer.debug.count = 0; });
   check('a pipeline set is still building', () => sets.set(2, { ready: false }), () => sets.delete(2));
   check('a material changed', () => scene.changedMaterials.set(0, {}), () => scene.changedMaterials.clear());
+  check('the environment was swapped', () => { scene.environment = {}; });
+  check('a shadow setting changed', () => { engine.renderer.shadows.lambda = 0.5; });
+  check('order-independent transparency was switched on', () => { engine.renderer.oit = true; });
+  check('antialiasing was asked for and is still building', () => { engine.renderer.post.fxaaPipeline = undefined; },
+    () => { engine.renderer.post.fxaaPipeline = {}; });
   const emitter = scene.addEmitter({ rate: 0, lifetime: 2, size: 0.1 });
-  check('particles were born', () => { scene.burst(emitter, 5); scene.advanceParticles(0.016); });
+  check('particles were born', () => { scene.burst(emitter, 5); scene.advance(0.016); });
   scene.emitters.get(emitter.entity).owed = 0;   // the frame that births them settles what is owed
-  scene.advanceParticles(2.1);
+  scene.advance(2.1);
   drawn();
   assert.equal(engine._idle(scene, camera), true, 'the burst has lived out its lifetime');
   check('invalidate() was called', () => engine.invalidate());
 });
 
-test('an overlay is part of what run() compares before skipping a frame', () => {
+test('a HUD is part of what run() compares before skipping a frame', () => {
   const engine = Object.create(Winding.prototype);
-  engine.rhi = { width: 320, height: 240 };
+  engine.gpu = { width: 320, height: 240 };
   engine.renderer = {
-    exposure: 1, fog: null, dof: null, drawSkybox: true, shadowDistance: null, lightDistance: null, ao: null,
+    exposure: 1, fog: null, dof: null, skybox: true, shadowDistance: null, lightDistance: null, ao: null,
     debug: { count: 0, depthTest: true }, _variantSets: new Map(),
-    post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, requestedLevels: 5, antialias: true, grading: null },
+    post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, levels: 5, antialias: true, grading: null, fxaaPipeline: {} },
+    shadows: { lambda: 0.7, casterExtent: 4, normalBias: 1.5 },
   };
   engine._drawn = null;
   const scene = new Scene({ capacity: 16 });
@@ -244,20 +351,21 @@ test('an overlay is part of what run() compares before skipping a frame', () => 
   camera.position.set([0, 0, 5]);
   const hudScene = new Scene({ capacity: 16 });
   const bar = hudScene.addShape({ size: [100, 10] });
-  const hud = engine._overlay({ scene: hudScene });
+  const hud = engine._hud('run', { hud: { scene: hudScene } });
   assert.equal(hud.camera.is2D, true, 'a plain Camera2D when none is given');
-  assert.equal(engine._overlay({ scene: hudScene }), hud, 'and the same overlay each time');
-  assert.throws(() => engine._overlay({ scene: hudScene, camera }), /Camera2D/);
+  assert.equal(engine._hud('run', { hud: { scene: hudScene } }), hud, 'and the same one each time');
+  assert.throws(() => engine._hud('run', { hud: { scene: hudScene, camera } }), /^Error: run: the hud's camera must be a Camera2D/);
+  assert.throws(() => engine._hud('renderFrame', { overlay: { scene: hudScene } }), /renderFrame: overlay is now hud/);
 
   const drawn = () => {
     for (const s of [scene, hudScene]) { s.update(); s.transforms.movedPending = false; }
-    camera.update(engine.rhi.width / engine.rhi.height);
-    hud.camera.update(1, engine.rhi.width, engine.rhi.height);
+    camera.update(engine.gpu.width / engine.gpu.height);
+    hud.camera.update(1, engine.gpu.width, engine.gpu.height);
     engine._remember(scene, camera, hud);
   };
   drawn();
   assert.equal(engine._idle(scene, camera, hud), true, 'settled');
-  assert.equal(engine._idle(scene, camera), false, 'the overlay went away');
+  assert.equal(engine._idle(scene, camera), false, 'the HUD went away');
   hudScene.setShape(bar, { color: [1, 0, 0, 1] });
   assert.equal(engine._idle(scene, camera, hud), false, 'a HUD shape changed');
   drawn();
@@ -306,12 +414,12 @@ test('sprites are packed again only when something they are drawn from changed',
 
 test('an emitter owes particles by its rate and carries time until a frame settles them', () => {
   const scene = new Scene({ capacity: 8 });
-  const node = scene.addEmitter({ rate: 30, lifetime: [0.5, 2], size: [0.2, 0] });
+  const node = scene.addEmitter({ rate: 30, lifetime: [0.5, 2], size: 0.2, sizeEnd: 0 });
   const record = scene.emitters.get(node.entity);
   assert.deepEqual([...record.lifetime, ...record.speed, record.blend], [0.5, 2, 0, 0, 'additive']);
   assert.deepEqual([...record.colorEnd], [...record.color], 'the end colour is the start unless given');
-  scene.advanceParticles(0.25);
-  scene.advanceParticles(0.25);
+  scene.advance(0.25);
+  scene.advance(0.25);
   assert.deepEqual([record.owed, record.time], [15, 0.5]);
   scene.burst(node, 7);
   assert.equal(record.owed, 22);
@@ -325,6 +433,7 @@ test('an emitter owes particles by its rate and carries time until a frame settl
     [{ lifetime: [2, 1], size: 1 }, /lifetime/], [{ lifetime: 0, size: 1 }, /lifetime must be a positive/],
     [{ lifetime: 1, size: 1, spread: 4 }, /spread/], [{ lifetime: 1, size: 1, direction: [0, 0, 0] }, /direction/],
     [{ lifetime: 1, size: 1, blend: 'cutout' }, /blend/], [{ lifetime: 1, size: 1, rate: -1 }, /rate/],
+    [{ lifetime: 1, size: [1, 0] }, /sizeEnd is the size at death/],
   ]) assert.throws(() => scene.addEmitter(options), why);
   assert.throws(() => scene.burst(node, 1.5), /whole number/);
   scene.remove(node);
@@ -334,7 +443,7 @@ test('an emitter owes particles by its rate and carries time until a frame settl
 test('the emitter uniform lands where the WGSL struct reads it', () => {
   const scene = new Scene({ capacity: 4 });
   const node = scene.addEmitter({
-    lifetime: [1, 3], size: [0.5, 0.25], speed: [2, 4], spread: 0.5, radius: 0.75, drag: 0.1,
+    lifetime: [1, 3], size: 0.5, sizeEnd: 0.25, speed: [2, 4], spread: 0.5, radius: 0.75, drag: 0.1,
     direction: [0, 0, 1], acceleration: [0, -9, 0], color: [1, 2, 3, 4], colorEnd: [5, 6, 7, 8],
   });
   const record = scene.emitters.get(node.entity);
@@ -360,7 +469,7 @@ test('a decal maps its box onto [-1, 1] and faces along its +Z', () => {
   const scene = new Scene({ capacity: 8 });
   // A 4 x 2 x 1 box at (5, 0, 0), turned to project straight down.
   const node = scene.addDecal({ texture, size: [4, 2, 1], color: [1, 0.5, 0.25, 0.75], position: [5, 0, 0] });
-  node.setRotationAxisAngle([1, 0, 0], -Math.PI / 2);
+  node.setAxisAngle([1, 0, 0], -Math.PI / 2);
   scene.addDecal({ texture, size: [1, 1, 1] });
   scene.update();
   const out = new Float32Array(2 * DECAL_FLOATS);
@@ -381,7 +490,7 @@ test('a decal maps its box onto [-1, 1] and faces along its +Z', () => {
   const parent = scene.createNode();
   parent.setScale(3, 1, 1);
   const sheared = scene.addDecal({ texture, size: [1, 2, 0.5], parent });
-  sheared.setRotationAxisAngle([0, 0, 1], Math.PI / 5);
+  sheared.setAxisAngle([0, 0, 1], Math.PI / 5);
   scene.update();
   const three = new Float32Array(12);
   packDecals(scene, new Float32Array(3 * DECAL_FLOATS), new Map([[texture, 0]]), three);
@@ -462,7 +571,7 @@ test('nested nodes become a real transform hierarchy', () => {
 
   scene.update();
   const child = root.children()[0];
-  vecClose(child.getWorldPosition(vec3Create()), [10, 5, 0]);
+  vecClose(child.worldPosition(vec3Create()), [10, 5, 0]);
 });
 
 test('adding under a parent node inherits its transform', () => {
@@ -472,7 +581,7 @@ test('adding under a parent node inherits its transform', () => {
 
   const child = scene.add(fakeAsset({ nodes: [node('x', { position: [1, 2, 3], mesh: 0 })] }), { parent: group });
   scene.update();
-  vecClose(child.getWorldPosition(vec3Create()), [101, 2, 3]);
+  vecClose(child.worldPosition(vec3Create()), [101, 2, 3]);
 });
 
 // ------------------------------------------------------------------- node
@@ -488,14 +597,14 @@ test('setters mark the transform dirty, so the world matrix follows', () => {
 
   n.setPosition(4, 5, 6);
   assert.equal(scene.update(), 1, 'exactly one transform recomposed');
-  vecClose(n.getWorldPosition(vec3Create()), [4, 5, 6]);
+  vecClose(n.worldPosition(vec3Create()), [4, 5, 6]);
 });
 
 test('setters chain', () => {
   const scene = new Scene({ capacity: 16 });
   const n = scene.createNode().setPosition(1, 0, 0).setScale(2);
   scene.update();
-  vecClose(n.getWorldPosition(vec3Create()), [1, 0, 0]);
+  vecClose(n.worldPosition(vec3Create()), [1, 0, 0]);
   assert.equal(scene.transforms.scale[handleIndex(n.entity) * 3], 2);
 });
 
@@ -506,9 +615,9 @@ test('setScale with one argument scales uniformly', () => {
   assert.deepEqual([...scene.transforms.scale.subarray(o, o + 3)], [3, 3, 3]);
 });
 
-test('setRotationEuler converts at the edge and stores a quaternion', () => {
+test('setEuler converts at the edge and stores a quaternion', () => {
   const scene = new Scene({ capacity: 16 });
-  const n = scene.createNode().setRotationEuler(Math.PI / 2, 0, 0);
+  const n = scene.createNode().setEuler(Math.PI / 2, 0, 0);
 
   const o = handleIndex(n.entity) * 4;
   const stored = scene.transforms.rotation.subarray(o, o + 4);
@@ -525,11 +634,11 @@ test('setParent reparents, and null detaches to the root', () => {
 
   b.setParent(a);
   scene.update();
-  vecClose(b.getWorldPosition(vec3Create()), [11, 0, 0]);
+  vecClose(b.worldPosition(vec3Create()), [11, 0, 0]);
 
   b.setParent(null);
   scene.update();
-  vecClose(b.getWorldPosition(vec3Create()), [1, 0, 0]);
+  vecClose(b.worldPosition(vec3Create()), [1, 0, 0]);
 });
 
 test('identity is by entity, not by object', () => {
@@ -544,19 +653,19 @@ test('identity is by entity, not by object', () => {
 
   b.setPosition(7, 0, 0);
   scene.update();
-  vecClose(a.getWorldPosition(vec3Create()), [7, 0, 0], EPS, 'both see the same data');
+  vecClose(a.worldPosition(vec3Create()), [7, 0, 0], EPS, 'both see the same data');
 });
 
-test('getWorldPosition reads the LAST update, not pending edits', () => {
+test('worldPosition reads the LAST update, not pending edits', () => {
   // Stated plainly because it is the one surprising thing about a cursor API.
   const scene = new Scene({ capacity: 16 });
   const n = scene.createNode();
   scene.update();
 
   n.setPosition(9, 9, 9);
-  vecClose(n.getWorldPosition(vec3Create()), [0, 0, 0], EPS, 'stale until update()');
+  vecClose(n.worldPosition(vec3Create()), [0, 0, 0], EPS, 'stale until update()');
   scene.update();
-  vecClose(n.getWorldPosition(vec3Create()), [9, 9, 9]);
+  vecClose(n.worldPosition(vec3Create()), [9, 9, 9]);
 });
 
 // ---------------------------------------------------------------- removal
@@ -1076,7 +1185,7 @@ test('an imported spot turns with the asset', () => {
   const root = scene.add(carrierAsset({ light: 0 }, {
     lights: [{ color: [1, 1, 1], intensity: 1, radius: 4, type: 'spot', innerAngle: 0.1, outerAngle: 0.5 }],
   }));
-  root.setRotationAxisAngle([0, 1, 0], Math.PI / 2);   // quarter turn about +Y
+  root.setAxisAngle([0, 1, 0], Math.PI / 2);   // quarter turn about +Y
   scene.update();
   scene.refreshLights();
   vecClose([...scene.lights.subarray(8, 11)], [-1, 0, 0], 1e-5, '-Z swung onto -X');
@@ -1111,13 +1220,13 @@ test('aiming and recolouring a directional light is aiming and recolouring its n
   const scene = new Scene({ capacity: 16 });
   const light = scene.addLight({ type: 'directional', direction: [-0.35, -0.55, -0.45], intensity: 3 });
   light.setDirection(0, -1, 0);
-  assert.equal(light.setLight({ color: [1, 0.5, 0.25], intensity: 2 }), true);
+  scene.setLight(light, { color: [1, 0.5, 0.25], intensity: 2 });
   settleLights(scene);
   vecClose(scene.directionals.subarray(0, 3), [0, -1, 0], 1e-6, 'straight down: the degenerate look-along case');
   vecClose(scene.directionals.subarray(4, 7), [2, 1, 0.5], 1e-6, 'colour at intensity');
   assert.equal(scene.lightCount, 0, 'not a clustered light');
 
-  light.setLight({ intensity: 4 });
+  scene.setLight(light, { intensity: 4 });
   settleLights(scene);
   vecClose(scene.directionals.subarray(4, 7), [4, 2, 1], 1e-6, 'partial: the colour stayed');
 });
@@ -1127,7 +1236,7 @@ test('a directional light turns with its parent, so a day cycle is one rotating 
   const sky = scene.createNode();
   const light = scene.addLight({ type: 'directional', direction: [0, 0, -1] });
   light.setParent(sky);
-  sky.setRotationAxisAngle([1, 0, 0], -Math.PI / 2);   // tip -Z down to -Y
+  sky.setAxisAngle([1, 0, 0], -Math.PI / 2);   // tip -Z down to -Y
   settleLights(scene);
   vecClose(scene.directionals.subarray(0, 3), [0, -1, 0], 1e-5);
 });
@@ -1153,8 +1262,8 @@ test('every light casts or not by the same switch, defaulting by what it costs',
   const carrier = scene.childrenOf(imported)[0];
   assert.ok(casters.has(carrier.entity), 'a file\'s directional light casts, as one added by hand does');
 
-  fill.setLight({ castShadow: true });
-  key.setLight({ castShadow: false });
+  scene.setLight(fill, { castShadow: true });
+  scene.setLight(key, { castShadow: false });
   assert.ok(casters.has(fill.entity) && !casters.has(key.entity), 'and the switch works both ways, for every kind');
 
   settleLights(scene);
@@ -1181,7 +1290,42 @@ test('the packed directionals grow past their starting size, with their entities
 
 test('addLight refuses a type it does not have', () => {
   const scene = new Scene({ capacity: 16 });
-  assert.throws(() => scene.addLight({ type: 'area' }), /point, spot or directional/);
+  assert.throws(() => scene.addLight({ type: 'area' }), /^Error: addLight: .*point, spot or directional/);
+});
+
+test('addLight and setLight check the values they are given, and name the call', () => {
+  const scene = new Scene({ capacity: 16 });
+  assert.throws(() => scene.addLight({ color: [1, 1] }), /^Error: addLight: color/);
+  assert.throws(() => scene.addLight({ color: [1, -1, 1] }), /addLight: color/);
+  assert.throws(() => scene.addLight({ intensity: NaN }), /addLight: intensity/);
+  assert.throws(() => scene.addLight({ radius: 0 }), /addLight: radius must be positive/);
+  assert.throws(() => scene.addLight({ direction: [0, -1, 0], innerAngle: 0.6, outerAngle: 0.5 }), /addLight: angles/);
+  assert.throws(() => scene.addLight({ direction: [0, -1, 0], outerAngle: 2 }), /addLight: angles/);
+  assert.equal(scene.lightCount, 0, 'nothing half-added');
+
+  const spot = scene.addLight({ direction: [0, -1, 0] });
+  const sun = scene.addLight({ type: 'directional', direction: [0, -1, 0] });
+  const bulb = scene.addLight({});
+  assert.throws(() => scene.setLight(spot, { intensity: -1 }), /^Error: setLight: intensity/);
+  assert.throws(() => scene.setLight(spot, { innerAngle: 0.6 }), /setLight: angles/, 'checked against the outer angle it keeps');
+  assert.throws(() => scene.setLight(spot, { type: 'point' }), /setLight: type can't change/);
+  assert.throws(() => scene.setLight(spot, { position: [1, 1, 1] }), /setLight: position can't change here; use the node/);
+  assert.throws(() => scene.setLight(sun, { radius: 4 }), /a directional light has no radius/);
+  assert.throws(() => scene.setLight(bulb, { outerAngle: 0.4 }), /a point light has no outerAngle/);
+  scene.setLight(spot, { innerAngle: 0.1, outerAngle: 0.3 });
+  assert.equal(scene.lightOf(spot).outerAngle, Math.fround(0.3));
+});
+
+test('a transform setter that throws leaves the node as it was', () => {
+  const scene = new Scene({ capacity: 16 });
+  const node = scene.createNode().setPosition(1, 2, 3).setScale(2);
+  assert.throws(() => node.setPosition(4, NaN), /setPosition: non-finite/);
+  assert.throws(() => node.setScale(Infinity), /setScale: non-finite/);
+  assert.throws(() => node.setRotation([0, 0, NaN, 1]), /setRotation: non-finite/);
+  const o = handleIndex(node.entity);
+  assert.deepEqual([...scene.transforms.position.subarray(o * 3, o * 3 + 3)], [1, 2, 3]);
+  assert.deepEqual([...scene.transforms.scale.subarray(o * 3, o * 3 + 3)], [2, 2, 2]);
+  assert.deepEqual([...scene.transforms.rotation.subarray(o * 4, o * 4 + 4)], [0, 0, 0, 1]);
 });
 
 test('setDirection keeps the node upright, where the shortest turn would roll it', () => {
@@ -1257,7 +1401,7 @@ test('a following camera goes where its node goes, and points where it points', 
   const camera = new Camera().follow(mount);
 
   car.setPosition(10, 0, 0);
-  car.setRotationAxisAngle([0, 1, 0], Math.PI / 2);   // car turns to face -X
+  car.setAxisAngle([0, 1, 0], Math.PI / 2);   // car turns to face -X
   scene.update();
   camera.update(1);
 
@@ -1355,7 +1499,7 @@ test('destroying a child and then its parent frees everything, and nothing else'
 
   assert.ok(other.alive, 'the unrelated node survived');
   scene.update();
-  vecClose(other.getWorldPosition(vec3Create()), [5, 0, 0], EPS, 'with its transform intact');
+  vecClose(other.worldPosition(vec3Create()), [5, 0, 0], EPS, 'with its transform intact');
 });
 
 test('destroying a node twice does nothing the second time', () => {
@@ -1368,7 +1512,7 @@ test('destroying a node twice does nothing the second time', () => {
 
   assert.ok(b.alive);
   scene.update();
-  vecClose(b.getWorldPosition(vec3Create()), [1, 2, 3], EPS, 'b was not touched');
+  vecClose(b.worldPosition(vec3Create()), [1, 2, 3], EPS, 'b was not touched');
 });
 
 test('every way of making a child makes one its parent takes with it', () => {
@@ -1466,11 +1610,11 @@ test('Camera2D maps the world to screen pixels, and back', () => {
 
   // Centred on (500, 300), twice as large, turned a quarter.
   camera.position.set([500, 300]);
-  camera.anchor.set([0.5, 0.5]);
+  camera.pivot.set([0.5, 0.5]);
   camera.zoom = 2;
-  camera.rotation = Math.PI / 2;
+  camera.angle = Math.PI / 2;
   camera.update(2, 200, 100);
-  vecClose(camera.worldToScreen(500, 300), [100, 50], 1e-3, 'position sits at the anchor');
+  vecClose(camera.worldToScreen(500, 300), [100, 50], 1e-3, 'position sits at the pivot');
   vecClose(camera.worldToScreen(510, 300), [100, 30], 1e-3, 'turned and scaled');
   vecClose(camera.screenToWorld(100, 30), [510, 300], 1e-3, 'and back');
 
@@ -1483,6 +1627,15 @@ test('Camera2D maps the world to screen pixels, and back', () => {
   const snapped = new Camera2D({ position: [0.3, 0.6], pixelSnap: true }).update(2, 200, 100);
   close(snapped.view[12], 0);
   close(snapped.view[13], -1);
+  // And a unit is a whole number of screen pixels: on a 1.5x screen, 2 of them.
+  snapped.update(2, 300, 150, 1.5);
+  close(snapped.view[0], 2);
+  snapped.zoom = 0.1;
+  snapped.update(2, 300, 150, 1.5);
+  close(snapped.view[0], 1, 1e-9, 'never less than one');
+  snapped.pixelSnap = false;
+  snapped.update(2, 300, 150, 1.5);
+  close(snapped.view[0], 0.15, 1e-6, 'unsnapped, exactly as asked');
 });
 
 test('spriteSheet gives frames in reading order', () => {
@@ -1525,7 +1678,7 @@ test('write2D: frame-sized by default, mirrored by a negative scale, animated by
   close(out[5], 16, 1e-5, 'and 16 tall');
   vecClose(out.subarray(8, 12), [0, 0, 0.25, 0.5]);
 
-  scene.advanceAnimations(0.25);
+  scene.advance(0.25);
   assert.ok(scene.spritesChanged.has(node.entity), 'a new frame marks the sprite changed');
   write();
   vecClose(out.subarray(8, 12), [0.5, 0, 0.75, 0.5], 1e-6, 'frame 2 at 0.25 s and 10 fps');
@@ -1557,7 +1710,11 @@ test('the 2D view rewrites only the slots of what moved or changed', () => {
   view._upload = () => {};
   view._data = new Float32Array(0);
   view._grow = function (count) {
-    if (count * SPRITE2D_FLOATS > this._data.length) this._data = new Float32Array(count * SPRITE2D_FLOATS);
+    if (count * SPRITE2D_FLOATS > this._data.length) {
+      const data = new Float32Array(count * SPRITE2D_FLOATS);
+      data.set(this._data);
+      this._data = data;
+    }
   };
   view._buffer = {};
   view._tilemaps = new Map();
@@ -1592,11 +1749,120 @@ test('the 2D view rewrites only the slots of what moved or changed', () => {
   nodes[4].setPosition(45, 5);
   assert.equal(frame(), 1, 'one node moved: one slot');
   close(view._data[4 * SPRITE2D_FLOATS], 45);
+  nodes[9].setPosition(99, 1);
+  nodes[0].setPosition(1, 1);
+  assert.equal(frame(), 2, 'two movers at either end: two slots, not the ten from one to the other');
+  nodes[2].setPosition(21, 1);
+  nodes[4].setPosition(41, 1);
+  assert.equal(frame(), 3, 'two a slot apart: one upload, the slot between with them');
   scene.setSprite(nodes[7], { color: [0, 1, 0, 1] });
   assert.equal(frame(), 1, 'one sprite changed: one slot');
-  scene.addSprite({ texture });
-  assert.equal(frame(), 11, 'a new sprite rebuilds the list');
-  assert.equal(scene.spritesChanged.size, 0, 'and the changes are consumed');
+  assert.deepEqual([...view._data.subarray(7 * SPRITE2D_FLOATS + 12, 7 * SPRITE2D_FLOATS + 16)], [0, 1, 0, 1], 'with what it changed to');
+  scene.setSprite(nodes[7], { size: [9, 3] });
+  frame();
+  assert.deepEqual([...view._data.subarray(7 * SPRITE2D_FLOATS + 4, 7 * SPRITE2D_FLOATS + 6)], [9, 3], 'and again: a set call replaces the record');
+  const bar = scene.addShape({ size: [10, 10] });
+  frame();
+  scene.setShape(bar, { size: [50, 10] });
+  frame();
+  assert.deepEqual([...view._data.subarray(10 * SPRITE2D_FLOATS + 4, 10 * SPRITE2D_FLOATS + 6)], [50, 10], 'a health bar shrinks and grows');
+  const order = scene.spriteOrder;
+  const late = scene.addSprite({ texture, color: [1, 0, 0, 1] });
+  assert.equal(frame(), 1, 'a new sprite goes on the end: one slot');
+  assert.equal(scene.spriteOrder, order, 'no rebuild');
+  assert.deepEqual([...view._data.subarray(11 * SPRITE2D_FLOATS + 12, 11 * SPRITE2D_FLOATS + 16)], [1, 0, 0, 1]);
+  assert.deepEqual(view._data.subarray(7 * SPRITE2D_FLOATS + 12, 7 * SPRITE2D_FLOATS + 16), Float32Array.of(0, 1, 0, 1), 'and the list is kept');
+  assert.equal(scene.spritesChanged.size + scene.added2D.size, 0, 'and the changes are consumed');
+  scene.remove(nodes[3]);
+  assert.equal(frame(), 1, 'a removed sprite leaves a hole: one slot');
+  assert.deepEqual([view._data[3 * SPRITE2D_FLOATS + 4], view._data[3 * SPRITE2D_FLOATS + 5]], [0, 0], 'drawn as nothing');
+  assert.equal(view.count, 12, 'the list keeps its length until a rebuild');
+  scene.setSprite(late, { color: [0, 0, 1, 1] });
+  assert.equal(frame(), 1, 'what came after the hole is where it was');
+  scene.addSprite({ texture, layer: -1 });
+  assert.equal(frame(), 12, 'one added below the last layer goes in the middle: a rebuild, and the hole is gone');
+
+  // A font's atlas grows when any scene asks for new glyphs, moving every
+  // glyph: a view drawing its text rebuilds, though its own order is the same.
+  const font = { metrics: { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', { advance: 0.5, left: 0, width: 0.5, height: 1, descent: 0, rect: [0, 0, 0.5, 0.5] }], [' ', { advance: 0.5, left: 0, width: 0, height: 0, descent: 0, rect: null }]]) }, ensure() {}, texture: {} };
+  const label = scene.addText({ font, text: 'aa', size: 10 });
+  frame();
+  assert.equal(frame(), 0, 'settled');
+  const glyphs = view.count;
+  scene.setText(label, { text: 'a a' });
+  assert.equal(frame(), 2, 'as many glyphs: rewritten where they are');
+  assert.equal(view.count, glyphs);
+  close(view._data[(glyphs - 1) * SPRITE2D_FLOATS + 6], -0.5, 1e-6, 'from the new layout: its second glyph a space further on');
+  font.texture = {};
+  font.metrics.glyphs.get('a').rect = [0, 0, 0.25, 0.25];
+  assert.equal(frame(), 14, 'the atlas grew: every slot again');
+  assert.equal(view._runs.at(-1).texture, font.texture, 'drawn from the new texture');
+});
+
+test('2D: pick where it is drawn, position at the pivot, one empty tile, and idle between sprite frames', () => {
+  // A camera's position is at its pivot however the view is turned.
+  const camera = new Camera2D({ position: [30, 40], pivot: [0, 0], angle: Math.PI / 2 }).update(2, 200, 100);
+  vecClose(camera.worldToScreen(30, 40), [0, 0], 1e-4, 'the top-left pivot, turned a quarter');
+  camera.pivot.set([0.5, 0.9]);
+  camera.angle = 0.5;
+  camera.update(2, 200, 100);
+  vecClose(camera.worldToScreen(30, 40), [100, 90], 1e-4);
+
+  // A sprite's own angle on a node scaled unevenly: picked where it is drawn.
+  // Drawn 20 x 3 = 60 along the node's x, then turned a quarter: x 99..101, y 70..130.
+  const scene = new Scene({ capacity: 16 });
+  const texture = { view: {}, width: 16, height: 16 };
+  const bar = scene.addSprite({ texture, size: [20, 2], angle: Math.PI / 2, position: [100, 100] });
+  bar.setScale(3, 1);
+  const view = new Camera2D().update(1, 320, 240);
+  assert.equal(scene.pick(view, 100, 125, 320, 240)?.node.entity, bar.entity, 'drawn there, so hit there');
+  assert.equal(scene.pick(view, 102.5, 105, 320, 240), null, 'nothing drawn there');
+
+  // An empty tile is 0, and only 0.
+  const map = scene.addTilemap({ tileset: { view: {}, width: 32, height: 32 }, tileSize: [16, 16], columns: 2, rows: 2 });
+  assert.throws(() => scene.setTile(map, 0, 0, 0x80000000), /^Error: setTile: tile 2147483648 flips no tile; an empty tile is 0/);
+
+  // A sprite animation is a change when its frame turns, and nothing between.
+  const sheet = { view: {}, width: 64, height: 16 };
+  scene.addSprite({ texture: sheet, animation: { frames: spriteSheet({ columns: 4 }), fps: 10 } });
+  let changes = scene.changes;
+  scene.advance(0.01);
+  assert.equal(scene.animating, false, 'a sprite animation does not keep the loop drawing');
+  assert.equal(scene.changes, changes, 'no new frame yet');
+  scene.advance(0.1);
+  assert.ok(scene.changes > changes, 'a new frame is a change, so it is drawn');
+
+  // An emitter seen in 2D is told so, to stay in the screen's plane.
+  const puff = scene.addEmitter({ rate: 1, lifetime: 1, size: 1, direction: [0, -1], spread: Math.PI });
+  const out = new Uint8Array(512);
+  const f32 = new Float32Array(out.buffer);
+  const ring = { offset: 0, capacity: 4, head: 0 };
+  packEmitter(out, 0, scene.emitters.get(puff.entity), scene.transforms.world, 0, ring, 0, 0, 1, true);
+  assert.equal(f32[27], 2, 'flat, no texture');
+  packEmitter(out, 0, scene.emitters.get(puff.entity), scene.transforms.world, 0, ring, 0, 0, 1);
+  assert.equal(f32[27], 0, 'in 3D, the cone');
+});
+
+test('a 2D view redraws when only the page zoom changes', () => {
+  const engine = Object.create(Winding.prototype);
+  engine.gpu = { width: 320, height: 240, pixelRatio: 1 };
+  engine.renderer = {
+    exposure: 1, fog: null, dof: null, skybox: true, shadowDistance: null, lightDistance: null, ao: null,
+    debug: { count: 0, depthTest: true }, _variantSets: new Map(),
+    post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, levels: 5, antialias: true, grading: null, fxaaPipeline: {} },
+    shadows: { lambda: 0.7, casterExtent: 4, normalBias: 1.5 },
+  };
+  engine._drawn = null;
+  const scene = new Scene({ capacity: 16 });
+  scene.addShape({ size: [50, 50] });
+  const camera = new Camera2D();
+  scene.update();
+  scene.transforms.movedPending = false;
+  camera.update(1, 320, 240, 1);
+  engine._remember(scene, camera);
+  assert.equal(engine._idle(scene, camera), true, 'settled');
+  engine.gpu.pixelRatio = 2;   // the same canvas pixels, twice as many to a CSS pixel
+  assert.equal(engine._idle(scene, camera), false, 'everything is drawn twice the size');
 });
 
 test('a tilemap keeps its ids, and marks the block that changed', () => {
@@ -1620,6 +1886,15 @@ test('a tilemap keeps its ids, and marks the block that changed', () => {
   const flipped = (0x80000000 | 3) >>> 0;
   scene.setTile(map, 0, 0, flipped);
   assert.equal(scene.tileAt(map, 0, 0), flipped, 'flip bits kept');
+  // 64 x 32 in 16 x 16 tiles is eight: 8 is the last, 9 is past it, flipped or not.
+  assert.throws(() => scene.setTile(map, 0, 1, 9), /^Error: setTile: tile 9 is not in the tileset, which holds 8/);
+  assert.throws(() => scene.setTile(map, 0, 1, (0x40000000 | 9) >>> 0), /setTile: tile/);
+  assert.throws(() => scene.setTiles(map, 0, 1, 2, [1, 2.5]), /setTiles: tile 2.5/);
+  assert.throws(() => scene.setTile(map, 0, 1, -1), /setTile: tile -1/);
+  assert.equal(scene.tileAt(map, 0, 1), 0, 'a refused id writes nothing');
+  assert.throws(() => scene.addTilemap({ tileset, tileSize: [16, 16], columns: 1, rows: 1, tiles: [9] }), /addTilemap: tile 9/);
+  assert.throws(() => scene.setTilemap(map, { tileSize: [32, 32] }), /setTilemap: tile \d+ is not in the tileset, which holds 2/,
+    'bigger tiles mean fewer of them, and the ids are checked against that');
 
   const order = scene.spriteOrder;
   scene.setTilemap(map, { color: [1, 0, 0, 1] });
@@ -1662,7 +1937,8 @@ test('shapes: checked, drawn in their layer, batched together, and scaled by the
   assert.throws(() => scene.addShape({ size: [0, 1] }), /positive/);
   assert.throws(() => scene.addShape({ size: [1, 1], strokeWidth: -1 }), /0 or more/);
   const pill = scene.addShape({ size: [40, 10], radius: 99, color: [1, 0, 0, 1], stroke: [0, 0, 1, 1], strokeWidth: 2, position: [100, 50] });
-  assert.equal(scene.shapes.get(pill.entity).radius, 5, 'a corner no bigger than half the shorter side');
+  assert.equal(shapeRadius(scene.shapes.get(pill.entity)), 5, 'drawn no bigger than half the shorter side');
+  assert.equal(scene.shapeOf(pill).radius, 99, 'and kept as asked');
   scene.addShape({ shape: 'ellipse', size: [8, 8] });
   scene.addShape({ size: [8, 8], blend: 'additive' });
   const texture = { view: {}, width: 4, height: 4 };
@@ -1770,7 +2046,7 @@ test('a light takes [x, y] in 2D, and a spot aims across the view', () => {
 
 test('a 2D unit is a CSS pixel on any screen', () => {
   // A 100 x 50 CSS canvas on a screen with two pixels to a CSS pixel.
-  const camera = new Camera2D({ anchor: [0.5, 0.5], position: [50, 25] }).update(2, 200, 100, 2);
+  const camera = new Camera2D({ pivot: [0.5, 0.5], position: [50, 25] }).update(2, 200, 100, 2);
   vecClose(camera.worldToScreen(10, 20), [20, 40], 1e-4, 'twice as many canvas pixels');
   vecClose(camera.worldToScreen(50, 25), [100, 50], 1e-4, 'and still centred');
   vecClose(camera.screenToWorld(20, 40), [10, 20], 1e-4);
@@ -1786,7 +2062,7 @@ test('picking a 2D view finds what is drawn on top, by its real shape', () => {
   const coin = scene.addSprite({ texture, position: [60, 20], layer: 1 });   // 16 x 16, over the ball's middle
   const bar = scene.addSprite({ texture, size: [20, 2], position: [20, 60] });
   bar.setAngle(Math.PI / 4);
-  const label = scene.addText({ font, text: 'a a', size: 10, anchor: [0, 0], position: [100, 100] });
+  const label = scene.addText({ font, text: 'a a', size: 10, pivot: [0, 1], position: [100, 100] });
   const floor = scene.addSprite({ texture, size: [400, 400], pivot: [0, 0], layer: -5 });
   const map = scene.addTilemap({ tileset: texture, tileSize: [8, 8], columns: 4, rows: 2, tiles: [1, 0, 0, 0, 0, 0, 0, 1], position: [200, 200] });
 
@@ -1800,11 +2076,16 @@ test('picking a 2D view finds what is drawn on top, by its real shape', () => {
   assert.equal(hit(68.5, 28.5), floor.entity, "inside the ball's box but outside the ball");
   assert.equal(hit(25, 65), bar.entity, 'along the turned bar');
   assert.equal(hit(29, 60), floor.entity, 'where the bar would be unturned');
-  // anchor [0, 0] is the text's bottom-left: text lays out y up.
+  // pivot [0, 1] is the block's bottom-left, so the text sits above the node.
   assert.equal(hit(107, 96), label.entity, 'between two letters: text is hit by its block');
   assert.deepEqual(at(200 + 28, 200 + 12).tile, [3, 1], 'a tilemap says which tile');
   assert.equal(hit(200 + 12, 200 + 4), floor.entity, 'an empty tile shows what is under it');
   vecClose(at(123, 45).point, [123, 45], 1e-4, 'the world point');
+  // A sprite's own angle on a mirrored node: drawn down the diagonal, so hit down it.
+  const mirrored = scene.addSprite({ texture, size: [20, 2], angle: Math.PI / 4, position: [300, 120], layer: 3 });
+  mirrored.setScale(-1, 1);
+  assert.equal(hit(307, 127), mirrored.entity, 'along the diagonal it is drawn on');
+  assert.equal(hit(307, 113), floor.entity, 'not along the other one');
   scene.remove(floor);
   assert.equal(at(399, 299), null, 'nothing there');
 });

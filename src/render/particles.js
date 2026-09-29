@@ -49,7 +49,7 @@ struct Emitter {
   seed         : u32,           //  84
   radius       : f32,           //  88
   spread       : f32,           //  92
-  direction    : vec4<f32>,     //  96  in the emitter's space; w = 1 if it has a texture
+  direction    : vec4<f32>,     //  96  in the emitter's space; w: 1 if it has a texture, + 2 if seen in 2D
   speed        : vec2<f32>,     // 112  [min, max]
   lifetime     : vec2<f32>,     // 120  [min, max]
   acceleration : vec4<f32>,     // 128  world space; w = drag
@@ -106,21 +106,32 @@ fn simulate(@builtin(global_invocation_id) id : vec3<u32>) {
   if ((i + emitter.capacity - emitter.spawnFirst) % emitter.capacity < emitter.spawnCount) {
     var n = hash(emitter.seed ^ hash(i));
     var p : Particle;
-    // A direction in the cone, uniform over the cap of the sphere it cuts.
-    let cosTheta = mix(1.0, cos(emitter.spread), random(&n));
-    let sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
-    let phi = TAU * random(&n);
-    let axis = normalize(emitter.direction.xyz);
-    let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(axis.x) > 0.9);
-    let tangent = normalize(cross(helper, axis));
-    let bitangent = cross(axis, tangent);
-    let local = axis * cosTheta + (tangent * cos(phi) + bitangent * sin(phi)) * sinTheta;
+    // Seen in 2D, everything stays in the screen's plane: a direction turned
+    // up to \`spread\` either way, and a start in a disc.
+    let flat = (u32(emitter.direction.w) & 2u) != 0u;
+    var local : vec3<f32>;
+    if (flat) {
+      let turn = (2.0 * random(&n) - 1.0) * emitter.spread;
+      let aim = normalize(emitter.direction.xy);
+      local = vec3<f32>(aim.x * cos(turn) - aim.y * sin(turn), aim.x * sin(turn) + aim.y * cos(turn), 0.0);
+    } else {
+      // A direction in the cone, uniform over the cap of the sphere it cuts.
+      let cosTheta = mix(1.0, cos(emitter.spread), random(&n));
+      let sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+      let phi = TAU * random(&n);
+      let axis = normalize(emitter.direction.xyz);
+      let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(axis.x) > 0.9);
+      let tangent = normalize(cross(helper, axis));
+      let bitangent = cross(axis, tangent);
+      local = axis * cosTheta + (tangent * cos(phi) + bitangent * sin(phi)) * sinTheta;
+    }
     let heading = (emitter.spawnMatrix * vec4<f32>(local, 0.0)).xyz;
-    // A point in the ball, uniform by volume.
-    let z = 2.0 * random(&n) - 1.0;
+    // A point in the ball, uniform by volume; in the disc, by area.
+    let z = select(2.0 * random(&n) - 1.0, 0.0, flat);
     let around = TAU * random(&n);
     let ring = sqrt(max(1.0 - z * z, 0.0));
-    let within = vec3<f32>(ring * cos(around), ring * sin(around), z) * emitter.radius * pow(random(&n), 1.0 / 3.0);
+    let reach = select(pow(random(&n), 1.0 / 3.0), sqrt(random(&n)), flat);
+    let within = vec3<f32>(ring * cos(around), ring * sin(around), z) * emitter.radius * reach;
     p.position = (emitter.spawnMatrix * vec4<f32>(within, 1.0)).xyz;
     p.velocity = normalize(heading) * mix(emitter.speed.x, emitter.speed.y, random(&n));
     p.lifetime = mix(emitter.lifetime.x, emitter.lifetime.y, random(&n));
@@ -198,7 +209,7 @@ fn fs(v : Out) -> @location(0) vec4<f32> {
   // Without a texture, a soft round dot: full at the centre, nothing at the rim.
   let r = v.uv * 2.0 - 1.0;
   let disc = vec4<f32>(1.0, 1.0, 1.0, clamp(1.0 - dot(r, r), 0.0, 1.0));
-  var colour = select(disc, sampled, emitter.direction.w > 0.5) * v.color;
+  var colour = select(disc, sampled, (u32(emitter.direction.w) & 1u) != 0u) * v.color;
   if (frame.fog.x > 0.0) {
     let toParticle = v.world - frame.cameraPosition.xyz;
     let distance = length(toParticle);
@@ -263,7 +274,7 @@ fn fs(v : Out) -> @location(0) vec4<f32> {
   let r = v.uv * 2.0 - 1.0;
   let disc = vec4<f32>(1.0, 1.0, 1.0, clamp(1.0 - dot(r, r), 0.0, 1.0));
   // An image is sampled as linear light: back to the sRGB the 2D view blends.
-  let colour = select(disc, vec4<f32>(encode(sampled.rgb), sampled.a), emitter.direction.w > 0.5) * v.color;
+  let colour = select(disc, vec4<f32>(encode(sampled.rgb), sampled.a), (u32(emitter.direction.w) & 1u) != 0u) * v.color;
   let rgb = clamp(colour.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
   if (ADDITIVE) { return vec4<f32>(rgb * colour.a, 0.0); }
   return vec4<f32>(rgb, colour.a);
@@ -280,7 +291,7 @@ export function ringCapacity(record, births) {
 }
 
 /** Pack an emitter's uniform: see Emitter in the shader. */
-export function packEmitter(out, o, record, world, m, ring, births, dt, seed) {
+export function packEmitter(out, o, record, world, m, ring, births, dt, seed, flat = false) {
   const f32 = new Float32Array(out.buffer, out.byteOffset + o, EMITTER_BYTES / 4);
   const u32 = new Uint32Array(out.buffer, out.byteOffset + o, EMITTER_BYTES / 4);
   f32.set(world.subarray(m, m + 16), 0);
@@ -293,7 +304,7 @@ export function packEmitter(out, o, record, world, m, ring, births, dt, seed) {
   f32[22] = record.radius;
   f32[23] = record.spread;
   f32.set(record.direction, 24);
-  f32[27] = record.texture ? 1 : 0;
+  f32[27] = (record.texture ? 1 : 0) + (flat ? 2 : 0);
   f32.set(record.speed, 28);
   f32.set(record.lifetime, 30);
   f32.set(record.acceleration, 32);
@@ -489,7 +500,7 @@ export class ParticleSystem {
     this._frame++;
     list.forEach((item, k) => {
       const seed = (item.record.seed ^ Math.imul(this._frame, 0x85ebca6b)) >>> 0;
-      packEmitter(this._staging, k * this.stride, item.record, world, item.m, item.ring, item.births, item.dt, seed);
+      packEmitter(this._staging, k * this.stride, item.record, world, item.m, item.ring, item.births, item.dt, seed, camera.is2D === true);
       item.slot = k;
       item.ring.head = (item.ring.head + item.births) % item.ring.capacity;
     });

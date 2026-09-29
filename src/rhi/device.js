@@ -320,8 +320,8 @@ export class Device {
    * Read rendered pixels back as RGBA bytes, row by row, from the top left.
    *
    *     engine.renderFrame(scene, camera);
-   *     const pixels = await engine.rhi.readPixels();
-   *     const at = (x, y) => pixels.subarray((y * engine.rhi.width + x) * 4, ...);
+   *     const pixels = await engine.gpu.readPixels();
+   *     const at = (x, y) => pixels.subarray((y * engine.gpu.width + x) * 4, ...);
    *
    * ONCE PER FRAME, and before anything else awaits. The swap chain hands out
    * a fresh texture each frame and presents the old one when the task ends, so

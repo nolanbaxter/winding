@@ -7,6 +7,159 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-29
+
+**1.0: one convention everywhere, a reference for every call, and 2D finished.** From here the API
+is stable: nothing in [docs/API.md](docs/API.md) changes in a way that breaks code without a 2.0.
+Names and rules that differed between parts of the engine now match -- a renamed option throws,
+saying what it's called now, and renamed methods are listed below. 2D gained targets, multiply and
+screen blending, text outlines and kerning, and the fixes and speed-ups an audit of it turned up.
+
+### Changed (breaking)
+
+- **`pixelSnap` also makes a unit a whole number of screen pixels**: zoom times the pixel ratio,
+  rounded. On a 1.5x screen pixel art drew texels 1 and 2 pixels wide by turns; it draws them 2 now,
+  so a snapped view is a little larger or smaller than its CSS size there.
+- **Text moves a little**: pairs are kerned, and a word's width is measured with them.
+
+- **`pivot` is from the top-left everywhere.** `[0, 0]` is an image's top-left in a 3D view as in
+  a 2D one. A 3D sprite's `[0.5, 0]` (bottom middle) is now `[0.5, 1]`; `[0.5, 0.5]` is unchanged.
+- **Text's `anchor` is now `pivot`**, by the same rule: `[0, 0]` is the block's top-left, where it
+  was the bottom-left. `anchor: [x, y]` becomes `pivot: [x, 1 - y]`. `anchor` throws.
+- **`Camera2D`'s `anchor` is now `pivot`**, with the same values. `anchor` throws.
+- **An emitter's `size` is one number, and `sizeEnd` is the size at death**, as `color` and
+  `colorEnd` are. `size: [a, b]` becomes `size: a, sizeEnd: b`, and throws.
+- **`scene.setLight(node, changes)` takes a node**, as every other setter does, and throws for a
+  node that isn't a light instead of returning false.
+- **A reflection probe is a node, and a probe.** `scene.addProbe({ position, size, fade })`
+  returns a Node with a box `size` centred on it, square to the world, removed with
+  `scene.remove`. `addReflectionProbe({ min: [-5, 0, -8], max: [5, 4, 8], blend })` becomes
+  `addProbe({ position: [0, 2, 0], size: [10, 4, 16], fade })`: `blend` was a distance where every
+  other `blend` is a mode. Moving it asks for a new capture. `engine.captureReflectionProbes` is
+  `engine.captureProbes`, and takes probe nodes. `removeReflectionProbe` is gone, and so is
+  capturing from off the box's centre. `min`, `max` and `blend` throw.
+- **`node.setScale(x, y)` leaves z at 1**, as `setPosition(x, y)` leaves it at 0. One number still
+  scales every axis.
+- **`engine.run(scene, camera, { update, frame, hud })`** takes the scene and camera first, as
+  `renderFrame` and `benchmark.run` do. `run({ scene, camera, ... })` throws, saying so.
+- **The HUD is `hud`**, where it was `overlay`, in `run` and `renderFrame`: `StatsOverlay` is the
+  other overlay. The stats `overlay2D` and `overlay2DWritten` are `hudSprites` and
+  `hudSpritesWritten`. `overlay` throws.
+- **An in-plane turn is an `angle`**, as `node.setAngle` and a spot's `innerAngle` are: a
+  sprite's `rotation` and `Camera2D`'s `rotation` are `angle`. `rotation` is always a quaternion
+  now. The old options throw.
+- **`play({ join: true })`**, where it was `add`, beside the layer's `additive`, which means
+  something else. `add` throws.
+- **`scene.advance(dt)`** moves a scene's clips, sprite frames and particles on in one call, in
+  place of `advanceAnimations` and `advanceParticles`. `run` now advances a HUD's particles too.
+- **Node rotation setters are named for what they take**, as `setDirection` and `setAngle` are:
+  `setAxisAngle` and `setEuler`. `getWorldPosition` is `worldPosition`, the one `get` there was.
+- **A light is changed through the scene**, as every other kind is: `node.setLight` is gone; use
+  `scene.setLight(node, changes)`. `scene.playerFor` is gone too; `node.animation` is the player.
+- **`post.levels` is the bloom setting**, as the `levels` option is, where it was
+  `requestedLevels`; what the last frame drew is `post.levelsDrawn`.
+- **`renderer.skybox`**, where it was `drawSkybox`, as the other switches are named (`oit`,
+  `antialias`).
+- **`engine.gpu`**, where it was `engine.rhi`: the device, its size, `pixelRatio` and limits.
+  `new Environment(engine.gpu, ...)`.
+- **Lights check what they're given.** `addLight` and `setLight` throw for a colour that isn't
+  three numbers of 0 or more, a negative intensity, a radius that isn't positive, or spot angles
+  outside `0 <= innerAngle <= outerAngle <= PI/2`. `setLight` throws for `type`, `position`,
+  `direction` and `parent`, which it used to ignore, and for a field the light's type doesn't have.
+  `addLight`'s type error no longer starts `Scene.`.
+- **Tile ids are checked against the tileset**, and flip bits on tile 0 are refused: empty is 0. `addTilemap`, `setTilemap`, `setTile` and
+  `setTiles` throw for an id whose tile is past the tileset's last, or that isn't a whole 32-bit
+  number, where it used to draw some other tile.
+
+### Added
+
+- **Targets.** `engine.createTarget({ size })` makes a texture, and `renderFrame(scene, camera,
+  { target })` draws a 2D or a 3D scene into it; a sprite shows it like a loaded image. Minimaps,
+  screens within screens, split screen, pixel art drawn small and shown large.
+- **`multiply` and `screen` blending**, on sprites, text, shapes, paths and tilemaps, in 2D and 3D.
+  Text and tilemaps take a `blend` now, as the rest did.
+- **Text outlines**: `stroke` and `strokeWidth`, the names shapes use, drawn outside the letters.
+- **Text kerns, and breaks Chinese and Japanese.** Pairs sit as the font sets them; lines break
+  between CJK characters, but not before a closing mark; and a letter with its accents, or an emoji
+  with its skin tone, is one character.
+- **A sprite's `rect` past 0..1 repeats the image**, for scrolling backgrounds and parallax strips.
+- **2D sprites have smooth edges**, as shapes do, so a turned one isn't jagged.
+- **An `xOf(node)` for every kind**, as `spriteOf` was the only one: `shapeOf`, `pathOf`, `textOf`,
+  `tilemapOf`, `emitterOf`, `decalOf`, `lightOf`, `probeOf`, and `setProbe`.
+- **`engine.unload` frees anything a load call returned**: a model, as before, and now a texture,
+  font, LUT or environment, which had no way.
+- **Ambient occlusion, OIT and antialiasing switch on and off at any time**, where they were
+  fixed at creation: `engine.renderer.ao = { radius }` or `null`, `engine.renderer.oit`, and
+  `post.antialias`. The first switch-on builds in the background and frames draw without it
+  until it's ready; after that switching costs nothing, and an engine that never turns one on
+  never builds it.
+- **Every loader that downloads takes `fetch`**: `loadTexture` and `loadLUT` now, as `load` and
+  `loadEnvironment` did. `load`'s now covers `source` too, not only the files it names.
+- `parseHDR` takes an `ArrayBuffer`, and `engine.debug.sphere` and `.axes` take `[x, y]`, as the
+  other debug lines do.
+
+- **An API reference**, [docs/API.md](docs/API.md): every public call, option and setting, with
+  what it takes, returns and throws, an example, and an A-to-Z index. The test suite checks it has
+  an entry for every public method of every exported class, and that none of its links is broken.
+  The README keeps how the engine is built, and points into it for how to use it.
+
+### Fixed
+
+- **A 2D view rebuilt its whole list whenever anything was added or removed, or any text changed**:
+  about 3.5 ms and 1 MB of upload a frame at 10,000 sprites, for each bullet fired or score ticked.
+  An added item goes on the end, a removed one leaves a hole until a quarter of the list is holes,
+  and a text with as many glyphs is rewritten in place: 0.16 ms for a spawn and a despawn a frame.
+- **Scattered movers uploaded everything between them**: 100 moving sprites among 10,000 sent 919 KB
+  a frame. Each goes on its own now, or with neighbours a few slots away: 12 KB.
+- **A long open path tested every segment across its whole box**, which for a line across the
+  screen was every pixel of the screen. It is drawn in pieces of 16 segments now.
+- **Picking a 2D view sorted the whole scene on every call**: 1.5 ms at 10,000 sprites, for each
+  pointer move. The order is kept until it changes.
+
+- **A 2D `setSprite`, `setShape` or `setPath` wasn't drawn** until something else was added,
+  removed or moved to another layer: the view kept drawing the record it had before. A HUD's
+  health bar resized with `setShape` stayed full, and a sprite's animation froze after a
+  `setSprite`.
+- **A still 2D scene with an animated sprite drew every frame**, as if it were never still. It
+  draws when a frame turns, 12 times a second for a 12 fps animation, not 60.
+- **Zooming the page didn't redraw a still 2D view**, whose size in canvas pixels changes with the
+  pixel ratio alone.
+- **`pixelSnap` put the pivot on a whole pixel, not the sprite's edges**, so a sprite an odd number
+  of pixels across sampled between texels: columns doubled or dropped as it moved, and a strip one
+  texel tall could vanish. Its corner is snapped now.
+- **Sprite-sheet frames and glyphs showed an edge of their neighbour** when smooth-filtered. Each
+  samples only inside its own rect now.
+- **Text sharing a font with another scene drew from a freed texture** once the other scene's text
+  grew the font's atlas.
+- **`Camera2D` with an `angle` and a pivot off-centre didn't put `position` at the pivot.**
+- **A 2D emitter's `spread` sent particles out of the screen's plane**, as a 3D cone does, so a
+  burst was a slow filled disc instead of a ring. Seen in 2D, particles turn within the plane and
+  start in a disc.
+- **A sprite with its own `angle` on a node scaled unevenly was picked where it isn't drawn.**
+- **`setShape` lost a corner radius for good** once a smaller size had fitted it; the radius asked
+  for is kept.
+- **Text laid out in time that grew with the square of a line's length**: 8,000 characters on one
+  line took 52 ms, now 0.3 ms.
+
+- **`Winding.create(canvas, { fog, dof })` did nothing.** Both were passed on and dropped before
+  the renderer saw them; setting `engine.renderer.fog` or `.dof` afterwards was the only way.
+- **A mirrored 2D sprite with a `rotation` was picked where it would be turned the other way.**
+- **A 3D sprite from a sprite sheet took the whole sheet's shape** when given no `size`. It takes
+  its frame's shape now, as a 2D sprite always did.
+- **`xOf` getters returned live arrays**, so changing a "copy" changed the thing without the scene
+  noticing. They return copies all the way down, without the engine's bookkeeping, and text,
+  paths and emitters read back as they were given: `pathOf`'s points can be passed back.
+- **A still scene skipped frames it shouldn't have** after assigning `scene.environment`, turning
+  on `oit`, or changing `renderer.shadows`' `lambda`, `casterExtent` or `normalBias`. Each now
+  draws a frame without `engine.invalidate()`.
+- **`camera.rayFromScreen` and `scene.pick` used the aspect of the last frame drawn**, not the
+  size passed, so before the first frame or straight after a resize the ray was off to the side.
+- **A transform setter that threw on a NaN had already written it**, so catching the error left
+  the node broken. It checks first now.
+- **Bloom `levels` set outside 1 to 6** broke bloom. They're clamped each frame.
+- **A `setX` call's errors named `addX`**, text's `align` error named `text`, and `setTile`'s named
+  `setTiles`. Each names the call that was made.
+
 ## [0.14.0] - 2026-09-29
 
 **2D, and frames that cost nothing.** Winding draws 2D now -- sprites, tilemaps, shapes, paths,
@@ -1864,7 +2017,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/nolanbaxter/winding/compare/v0.14.0...v1.0.0
 [0.14.0]: https://github.com/nolanbaxter/winding/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/nolanbaxter/winding/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/nolanbaxter/winding/compare/v0.11.0...v0.12.0

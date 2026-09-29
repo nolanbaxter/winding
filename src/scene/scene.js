@@ -20,7 +20,7 @@ import {
 import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
 import { unboundedLightRadius, uvTransformRows } from './gltf/parse.js';
-import { layoutText } from '../render/text.js';
+import { layoutText, SPREAD } from '../render/text.js';
 import { hypot3, vec3Create, vec3TransformMat4, vec3TransformMat4Dir } from '../core/math/vec3.js';
 import {
   mat4Create, mat4Copy, mat4Invert, mat4Multiply, mat4FromQuatPosScale, mat4Decompose,
@@ -54,7 +54,7 @@ let nextRevision = 1;
  */
 export function emitterRecord(options = {}) {
   const {
-    rate = 0, lifetime, size, speed = 0, direction = [0, 1, 0], spread = 0, radius = 0,
+    rate = 0, lifetime, size, sizeEnd = size, speed = 0, direction = [0, 1, 0], spread = 0, radius = 0,
     acceleration = [0, 0, 0], drag = 0, color = [1, 1, 1, 1], colorEnd, texture = null, blend = 'additive', layer = 0,
   } = options;
   if (!Number.isFinite(layer)) throw new Error(`addEmitter: layer must be a finite number, got ${layer}`);
@@ -74,9 +74,11 @@ export function emitterRecord(options = {}) {
   if (!(rate >= 0 && Number.isFinite(rate))) throw new Error(`addEmitter: rate must be 0 or more, got ${rate}`);
   if (lifetime === undefined) throw new Error('addEmitter: lifetime is required: how long a particle lives, in seconds');
   if (size === undefined) throw new Error('addEmitter: size is required: how wide a particle is, in world units');
-  const sizes = typeof size === 'number' ? [size, size] : size;
-  if (!(sizes?.length === 2 && sizes.every((x) => Number.isFinite(x) && x >= 0))) {
-    throw new Error(`addEmitter: size must be a number or [birth, death], got ${size}`);
+  // A size and a sizeEnd, as a colour and a colorEnd: [a, b] elsewhere is a width and height.
+  if (typeof size !== 'number') throw new Error(`addEmitter: size is one number; sizeEnd is the size at death. Got ${size}`);
+  const sizes = [size, sizeEnd];
+  if (!sizes.every((x) => Number.isFinite(x) && x >= 0)) {
+    throw new Error(`addEmitter: size and sizeEnd must be 0 or more, got ${size} and ${sizeEnd}`);
   }
   const dir = numbers(flat(direction), 3, 'direction');
   if (Math.hypot(...dir) === 0) throw new Error('addEmitter: direction must not be zero');
@@ -132,19 +134,31 @@ export function decalRecord({ texture, size, color = [1, 1, 1, 1] } = {}) {
  */
 export function textRecord(options = {}) {
   const {
-    font, text = '', size, color = [1, 1, 1, 1], align = 'left', anchor = [0.5, 0.5], lineHeight,
-    facing = 'camera', pixels = false, layer = 0, width = Infinity, lit = false,
+    font, text = '', size, color = [1, 1, 1, 1], align = 'left', pivot = [0.5, 0.5], lineHeight,
+    facing = 'camera', pixels = false, layer = 0, width = Infinity, lit = false, blend = 'alpha',
+    stroke = [0, 0, 0, 1], strokeWidth = 0,
   } = options;
+  if (options.anchor !== undefined) throw new Error('addText: anchor is now pivot, and [0, 0] is the block\'s top-left, as a sprite\'s is');
   if (!(width > 0)) throw new Error(`addText: width must be positive, got ${width}`);
   if (!(font?.metrics && typeof font.ensure === 'function')) throw new Error('addText: font must be one engine.loadFont returned');
   if (!(size > 0 && Number.isFinite(size))) throw new Error(`addText: size must be positive, got ${size}`);
   if (!(color?.length === 4 && [...color].every(Number.isFinite))) throw new Error(`addText: color must be 4 finite numbers, got ${color}`);
   if (!['camera', 'upright', 'plane'].includes(facing)) throw new Error(`addText: facing is 'camera', 'upright' or 'plane', got ${facing}`);
-  if (!(anchor?.length === 2 && anchor.every(Number.isFinite))) throw new Error(`addText: anchor must be [x, y], got ${anchor}`);
+  if (!(pivot?.length === 2 && [...pivot].every(Number.isFinite))) throw new Error(`addText: pivot must be [x, y], got ${pivot}`);
+  if (!['left', 'center', 'right'].includes(align)) throw new Error(`addText: align is 'left', 'center' or 'right', got ${align}`);
   if (!Number.isFinite(layer)) throw new Error(`addText: layer must be a finite number, got ${layer}`);
+  if (!BLENDS.includes(blend)) throw new Error(`addText: blend is ${BLEND_NAMES}, got ${blend}`);
+  if (!(stroke?.length === 4 && [...stroke].every(Number.isFinite))) throw new Error(`addText: stroke must be 4 finite numbers, got ${stroke}`);
+  // The outline is drawn in the distance field's reach past the edge, which
+  // is a few texels of the font's raster: so much of an em, and no more.
+  const reach = (SPREAD - 1) / (font.size ?? SPREAD - 1) * size;
+  if (!(strokeWidth >= 0 && strokeWidth <= reach)) {
+    throw new Error(`addText: strokeWidth must be 0 to ${+reach.toFixed(3)} for this font at this size, got ${strokeWidth}; load the font larger for a wider one`);
+  }
   font.ensure(String(text));
-  // In ems, as the layout works; `width` is given in the text's own units, as `size` is.
-  const { boxes, block } = layoutText(text, font.metrics, { align, lineHeight, anchor, width: width / size });
+  // In ems, as the layout works; `width` is given in the text's own units, as
+  // `size` is. The layout measures y up, so the pivot's top-left is its [0, 1].
+  const { boxes, block } = layoutText(text, font.metrics, { align, lineHeight, anchor: [pivot[0], 1 - pivot[1]], width: width / size });
   return {
     options: { ...options },
     font,
@@ -154,7 +168,12 @@ export function textRecord(options = {}) {
     facing,
     pixels: pixels === true,
     layer,
+    blend,
     lit: lit === true,
+    stroke: Float32Array.from(stroke),
+    strokeWidth,
+    /** Where the outline ends, in the glyph's distance field: 0.5 at its edge, less further out. */
+    strokeEdge: 0.5 - strokeWidth / size * (font.size ?? 0) / (2 * SPREAD),
     boxes,
     /** The whole block, [left, bottom, right, top] in ems, y up: what picking hits. */
     block,
@@ -162,7 +181,15 @@ export function textRecord(options = {}) {
 }
 
 const SPRITE_FACINGS = ['camera', 'upright', 'plane'];
-const SPRITE_BLENDS = ['alpha', 'additive', 'cutout'];
+/**
+ * How anything drawn in a scene meets what is under it: over it ('alpha'),
+ * adding light ('additive'), darkening it ('multiply': white changes nothing)
+ * or lightening it ('screen': black changes nothing). A sprite can also be a
+ * 'cutout': each pixel drawn fully or not at all.
+ */
+export const BLENDS = ['alpha', 'additive', 'multiply', 'screen'];
+const BLEND_NAMES = "'alpha', 'additive', 'multiply' or 'screen'";
+const SPRITE_BLENDS = [...BLENDS, 'cutout'];
 
 /**
  * A sprite's options, checked and filled in; see Scene.addSprite. `sizeGiven`
@@ -170,10 +197,11 @@ const SPRITE_BLENDS = ['alpha', 'additive', 'cutout'];
  * new texture re-derives a derived one.
  */
 export function spriteRecord({
-  texture, size, color = [1, 1, 1, 1], rect = [0, 0, 1, 1], pivot = [0.5, 0.5], rotation = 0,
+  texture, size, color = [1, 1, 1, 1], rect = [0, 0, 1, 1], pivot = [0.5, 0.5], angle = 0,
   facing = 'camera', blend = 'alpha', cutoff = 0.5, pixels = false, sizeGiven = size !== undefined,
-  layer = 0, animation = null, frame = 0, time = 0, lit = false,
+  layer = 0, animation = null, frame = 0, time = 0, lit = false, rotation,
 } = {}) {
+  if (rotation !== undefined) throw new Error('addSprite: rotation is now angle, in the same radians, as node.setAngle takes');
   if (!(texture?.view && texture.width > 0 && texture.height > 0)) {
     throw new Error('addSprite: texture must be one engine.loadTexture returned');
   }
@@ -183,14 +211,6 @@ export function spriteRecord({
     }
     return Float32Array.from(v);
   };
-  const derived = pixels ? [texture.width, texture.height] : [1, texture.height / texture.width];
-  const sized = numbers(sizeGiven ? size : derived, 2, 'size');
-  if (!(sized[0] > 0 && sized[1] > 0)) throw new Error('addSprite: size must be positive');
-  if (!SPRITE_FACINGS.includes(facing)) throw new Error(`addSprite: facing is 'camera', 'upright' or 'plane', got ${facing}`);
-  if (!SPRITE_BLENDS.includes(blend)) throw new Error(`addSprite: blend is 'alpha', 'additive' or 'cutout', got ${blend}`);
-  if (!(cutoff >= 0 && cutoff <= 1)) throw new Error(`addSprite: cutoff must be between 0 and 1, got ${cutoff}`);
-  if (!Number.isFinite(rotation)) throw new Error(`addSprite: rotation must be a finite number, got ${rotation}`);
-  if (!Number.isFinite(layer)) throw new Error(`addSprite: layer must be a finite number, got ${layer}`);
   let played = null;
   if (animation !== null) {
     const { frames, fps = 12, loop = true } = animation;
@@ -198,6 +218,18 @@ export function spriteRecord({
     if (!(fps > 0 && Number.isFinite(fps))) throw new Error(`addSprite: animation.fps must be positive, got ${fps}`);
     played = { frames: frames.map((f) => numbers(f, 4, 'an animation frame')), fps, loop: loop !== false };
   }
+  // With no size, the shape of what it shows -- its first frame or its rect,
+  // not the whole sheet: in pixels, or one unit wide at that aspect.
+  const shown = played?.frames[0] ?? numbers(rect, 4, 'rect');
+  const fw = texture.width * Math.abs(shown[2] - shown[0]), fh = texture.height * Math.abs(shown[3] - shown[1]);
+  const derived = pixels ? [fw, fh] : [1, fh / fw];
+  const sized = numbers(sizeGiven ? size : derived, 2, 'size');
+  if (!(sized[0] > 0 && sized[1] > 0)) throw new Error('addSprite: size must be positive');
+  if (!SPRITE_FACINGS.includes(facing)) throw new Error(`addSprite: facing is 'camera', 'upright' or 'plane', got ${facing}`);
+  if (!SPRITE_BLENDS.includes(blend)) throw new Error(`addSprite: blend is 'alpha', 'additive', 'multiply', 'screen' or 'cutout', got ${blend}`);
+  if (!(cutoff >= 0 && cutoff <= 1)) throw new Error(`addSprite: cutoff must be between 0 and 1, got ${cutoff}`);
+  if (!Number.isFinite(angle)) throw new Error(`addSprite: angle must be a finite number, got ${angle}`);
+  if (!Number.isFinite(layer)) throw new Error(`addSprite: layer must be a finite number, got ${layer}`);
   return {
     texture,
     size: sized,
@@ -205,7 +237,7 @@ export function spriteRecord({
     color: numbers(color, 4, 'color'),
     rect: numbers(rect, 4, 'rect'),
     pivot: numbers(pivot, 2, 'pivot'),
-    rotation,
+    angle,
     facing,
     blend,
     cutoff,
@@ -213,10 +245,62 @@ export function spriteRecord({
     layer,
     lit: lit === true,
     animation: played,
-    /** The frame shown, and how long the animation has run: see Scene.advanceAnimations. */
+    /** The frame shown, and how long the animation has run: see Scene._advanceAnimations. */
     frame: played === null ? 0 : Math.min(frame, played.frames.length - 1),
     time,
   };
+}
+
+/**
+ * Check what a light is given, naming the call: only the fields present, so
+ * setLight checks just its changes. `cone` is the inner and outer angle the
+ * light will have once the changes land.
+ */
+function checkLight(caller, { color, intensity, radius }, cone) {
+  if (color !== undefined && !(color?.length === 3 && [...color].every((v) => Number.isFinite(v) && v >= 0))) {
+    throw new Error(`${caller}: color must be 3 finite numbers, 0 or more, got ${color}`);
+  }
+  if (intensity !== undefined && !(intensity >= 0 && Number.isFinite(intensity))) {
+    throw new Error(`${caller}: intensity must be 0 or more, got ${intensity}`);
+  }
+  if (radius !== undefined && !(radius > 0 && Number.isFinite(radius))) throw new Error(`${caller}: radius must be positive, got ${radius}`);
+  if (cone && !(cone[0] >= 0 && cone[0] <= cone[1] && cone[1] <= Math.PI / 2)) {
+    throw new Error(`${caller}: angles need 0 <= innerAngle <= outerAngle <= PI/2, got ${cone[0]} and ${cone[1]}`);
+  }
+}
+
+/**
+ * A set call's check, its errors named for that call: the options are
+ * checked by the add call's code, whose errors say addX.
+ */
+function checked(caller, make) {
+  try {
+    return make();
+  } catch (error) {
+    error.message = error.message.replace(/^add[A-Za-z]+:/, `${caller}:`);
+    throw error;
+  }
+}
+
+/** The engine's own bookkeeping in a record, which no option names. */
+const BOOKKEEPING = new Set(['added', 'owed', 'seed', 'dirty', 'options', 'boxes', 'block', 'kind', 'sizeGiven', 'placed', 'strokeEdge']);
+
+/**
+ * A kind's options for a node, or null if it has none: a copy all the way
+ * down, so changing it changes nothing -- setX does that. A kind that keeps
+ * the options it was given (text, emitters) returns those, so each reads back
+ * as addX took it.
+ */
+function copyOf(records, node) {
+  const record = records.get(node.entity);
+  if (record === undefined) return null;
+  const source = record.options ?? record;
+  const copy = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (source === record && BOOKKEEPING.has(key)) continue;
+    copy[key] = ArrayBuffer.isView(value) ? value.slice() : Array.isArray(value) ? structuredClone(value) : value;
+  }
+  return copy;
 }
 
 /** A path's options, checked and filled in; see Scene.addPath. */
@@ -238,7 +322,7 @@ export function pathRecord({
   };
   if (!(strokeWidth >= 0 && Number.isFinite(strokeWidth))) throw new Error(`addPath: strokeWidth must be 0 or more, got ${strokeWidth}`);
   if (!Number.isFinite(layer)) throw new Error(`addPath: layer must be a finite number, got ${layer}`);
-  if (blend !== 'alpha' && blend !== 'additive') throw new Error(`addPath: blend is 'alpha' or 'additive', got ${blend}`);
+  if (!BLENDS.includes(blend)) throw new Error(`addPath: blend is ${BLEND_NAMES}, got ${blend}`);
   const bounds = [Infinity, Infinity, -Infinity, -Infinity];
   for (let i = 0; i < flat.length; i += 2) {
     bounds[0] = Math.min(bounds[0], flat[i]);
@@ -248,6 +332,7 @@ export function pathRecord({
   }
   return {
     kind: 'path',
+    options: { points: points.map((p) => [p[0], p[1]]), closed, color, stroke, strokeWidth, layer, blend, lit },
     points: flat,
     closed: closed !== false,
     color: numbers(color, 4, 'color'),
@@ -262,6 +347,11 @@ export function pathRecord({
 }
 
 /** A shape's options, checked and filled in; see Scene.addShape. */
+/** A shape's corner radius as drawn: its own, fitted inside half the shorter side. */
+export function shapeRadius(record) {
+  return Math.min(record.radius, record.size[0] / 2, record.size[1] / 2);
+}
+
 export function shapeRecord({
   shape = 'rect', size, radius = 0, color = [1, 1, 1, 1], stroke = [0, 0, 0, 1], strokeWidth = 0,
   pivot = [0.5, 0.5], layer = 0, blend = 'alpha', lit = false,
@@ -276,13 +366,15 @@ export function shapeRecord({
   if (!(radius >= 0 && Number.isFinite(radius))) throw new Error(`addShape: radius must be 0 or more, got ${radius}`);
   if (!(strokeWidth >= 0 && Number.isFinite(strokeWidth))) throw new Error(`addShape: strokeWidth must be 0 or more, got ${strokeWidth}`);
   if (!Number.isFinite(layer)) throw new Error(`addShape: layer must be a finite number, got ${layer}`);
-  if (blend !== 'alpha' && blend !== 'additive') throw new Error(`addShape: blend is 'alpha' or 'additive', got ${blend}`);
+  if (!BLENDS.includes(blend)) throw new Error(`addShape: blend is ${BLEND_NAMES}, got ${blend}`);
   return {
     kind: 'shape',
     shape,
     size: sized,
-    // Past half the shorter side a corner has nowhere to go.
-    radius: Math.min(radius, sized[0] / 2, sized[1] / 2),
+    // As asked: past half the shorter side a corner has nowhere to go, so it
+    // is fitted where it is drawn and picked (shapeRadius), and a shape that
+    // shrinks and grows back gets its corner back.
+    radius,
     color: numbers(color, 4, 'color'),
     stroke: numbers(stroke, 4, 'stroke'),
     strokeWidth,
@@ -294,9 +386,28 @@ export function shapeRecord({
 }
 
 /** A tilemap's options, checked and filled in; see Scene.addTilemap. */
+/** How many tiles a tilemap's tileset holds, by its grid. */
+function tileCount({ tileset, tileSize: [tw, th], margin, spacing }) {
+  const across = Math.floor((tileset.width - 2 * margin + spacing) / (tw + spacing));
+  const down = Math.floor((tileset.height - 2 * margin + spacing) / (th + spacing));
+  return across * down;
+}
+
+/** Every id a whole 32-bit number whose tile, flip bits aside, is 0 or in the tileset. */
+function checkTiles(caller, tiles, count) {
+  for (let i = 0; i < tiles.length; i++) {
+    const id = tiles[i];
+    if (!(Number.isInteger(id) && id >= 0 && id <= 0xffffffff && (id & 0x1fffffff) <= count)) {
+      throw new Error(`${caller}: tile ${id} is not in the tileset, which holds ${count} (ids start at 1; 0 is empty)`);
+    }
+    // Flip bits on no tile would be a second way to write empty.
+    if (id !== 0 && (id & 0x1fffffff) === 0) throw new Error(`${caller}: tile ${id} flips no tile; an empty tile is 0`);
+  }
+}
+
 export function tilemapRecord({
   tileset, tileSize, columns, rows, tiles = null, layer = 0, color = [1, 1, 1, 1], pivot = [0, 0], lit = false,
-  margin = 0, spacing = 0,
+  margin = 0, spacing = 0, blend = 'alpha',
 } = {}) {
   if (!(tileset?.view && tileset.width > 0 && tileset.height > 0)) {
     throw new Error('addTilemap: tileset must be one engine.loadTexture returned');
@@ -315,7 +426,9 @@ export function tilemapRecord({
   if (tiles !== null && tiles.length !== columns * rows) {
     throw new Error(`addTilemap: tiles holds ${tiles.length} ids; a ${columns} x ${rows} map needs ${columns * rows}`);
   }
+  if (tiles !== null) checkTiles('addTilemap', tiles, tileCount({ tileset, tileSize: [tw, th], margin, spacing }));
   if (!Number.isFinite(layer)) throw new Error(`addTilemap: layer must be a finite number, got ${layer}`);
+  if (!BLENDS.includes(blend)) throw new Error(`addTilemap: blend is ${BLEND_NAMES}, got ${blend}`);
   const numbers = (v, n, what) => {
     if (!(v?.length === n && [...v].every(Number.isFinite))) throw new Error(`addTilemap: ${what} must be ${n} finite numbers, got ${v}`);
     return Float32Array.from(v);
@@ -332,10 +445,34 @@ export function tilemapRecord({
     layer,
     color: numbers(color, 4, 'color'),
     pivot: numbers(pivot, 2, 'pivot'),
+    blend,
     lit: lit === true,
     /** [x0, y0, x1, y1] in tiles changed since a 2D view last uploaded them, or null. */
     dirty: null,
   };
+}
+
+/**
+ * How a 2D view reads node `entity`'s world transform: its scale along each
+ * axis, whether it is mirrored, and its turn, into `out` as [lx, ly, mirrored
+ * (1 or 0), angle]. A mirrored node's x axis points the flipped way, so its
+ * turn is read off the y axis, which the mirror leaves alone.
+ */
+export function frame2D(world, entity, out) {
+  const m = handleIndex(entity) * 16;
+  const mirrored = world[m] * world[m + 5] - world[m + 1] * world[m + 4] < 0;
+  out[0] = hypot3(world[m], world[m + 1], 0);
+  out[1] = hypot3(world[m + 4], world[m + 5], 0);
+  out[2] = mirrored ? 1 : 0;
+  out[3] = mirrored ? Math.atan2(-world[m + 4], world[m + 5]) : Math.atan2(world[m + 1], world[m]);
+  return out;
+}
+
+/** Whether a sprite's rect reaches past its image, so the image repeats. */
+export function repeats(record) {
+  const r = record.rect;
+  return record.animation === null
+    && (Math.min(r[0], r[2]) < 0 || Math.min(r[1], r[3]) < 0 || Math.max(r[0], r[2]) > 1 || Math.max(r[1], r[3]) > 1);
 }
 
 /** The part of its texture a sprite shows now: its animation's frame, or its rect. */
@@ -369,28 +506,30 @@ export function spriteSheet({ columns, rows = 1, count = columns * rows, first =
 }
 
 /**
- * A reflection probe's description, checked; see Scene.addReflectionProbe.
+ * A reflection probe's description, checked; see Scene.addProbe.
+ * Its box and eye are placed around `at`, its node's world position, and
+ * again whenever the node moves (Scene._placeProbes).
  */
-export function probeRecord({ min, max, position, blend = 0 } = {}) {
-  const three = (v, what) => {
-    if (!(v?.length === 3 && [...v].every(Number.isFinite))) {
-      throw new Error(`addReflectionProbe: ${what} must be three finite numbers, got ${v}`);
-    }
-    return Float32Array.from(v);
+export function probeRecord({ size, fade = 0, blend, min, max } = {}, at = [0, 0, 0]) {
+  if (blend !== undefined) throw new Error('addProbe: blend is now fade, with the same value');
+  if (min !== undefined || max !== undefined) {
+    throw new Error('addProbe: a probe is a node now -- give its box as size, [width, height, depth], centred on its position');
+  }
+  if (!(size?.length === 3 && [...size].every((v) => Number.isFinite(v) && v > 0))) {
+    throw new Error(`addProbe: size must be [width, height, depth], all positive, got ${size}`);
+  }
+  if (!(fade >= 0 && Number.isFinite(fade))) throw new Error(`addProbe: fade must be 0 or more, got ${fade}`);
+  const half = [0, 1, 2].map((a) => size[a] / 2);
+  return {
+    size: Float32Array.from(size),
+    min: Float32Array.from([0, 1, 2].map((a) => at[a] - half[a])),
+    max: Float32Array.from([0, 1, 2].map((a) => at[a] + half[a])),
+    position: Float32Array.from(at),
+    fade,
+    captured: false,
+    /** Where its node was when the box was last placed; null to place it again. */
+    placed: null,
   };
-  const lo = three(min, 'min');
-  const hi = three(max, 'max');
-  if (!(hi[0] > lo[0] && hi[1] > lo[1] && hi[2] > lo[2])) {
-    throw new Error('addReflectionProbe: max must be above min on every axis');
-  }
-  const at = position === undefined
-    ? Float32Array.from([0, 1, 2].map((a) => (lo[a] + hi[a]) / 2))
-    : three(position, 'position');
-  if (![0, 1, 2].every((a) => at[a] >= lo[a] && at[a] <= hi[a])) {
-    throw new Error('addReflectionProbe: position must be inside the box');
-  }
-  if (!(blend >= 0 && Number.isFinite(blend))) throw new Error(`addReflectionProbe: blend must be 0 or more, got ${blend}`);
-  return { min: lo, max: hi, position: at, blend, captured: false };
 }
 
 /** The largest finite f32: coverage with no upper bound. */
@@ -501,8 +640,8 @@ export class Scene {
     /** The entity each packed directional light belongs to, in the same order. */
     this.directionalEntity = [];
     this._directional = new Map();   // entity -> { color, intensity }, in the order added
-    /** Set by the engine. Drives ambient light and the skybox. */
-    this.environment = null;
+    // See the environment accessors: assigning one is a change a frame must see.
+    this._environment = null;
 
     // --- punctual lights ----------------------------------------------------
     // Packed exactly as the GPU wants them, so uploading is one memcpy rather
@@ -544,8 +683,8 @@ export class Scene {
      */
     this.shadowCasters = new Set();
     /**
-     * Reflection probes (render/probes.js): { min, max, position, blend,
-     * captured }. engine.captureReflectionProbes renders them; the revision
+     * Reflection probes (render/probes.js): { min, max, position, fade,
+     * captured }. engine.captureProbes renders them; the revision
      * tells the renderer the set changed.
      */
     this.reflectionProbes = [];
@@ -564,11 +703,20 @@ export class Scene {
      * rewrites that sprite alone.
      */
     this.spriteOrder = 0;
+    /**
+     * Sprites, text and shapes added and removed since a 2D view last looked:
+     * a view appends the one and leaves a hole for the other, where a change
+     * to spriteOrder has it rebuild its whole list. layout2D counts both, for
+     * picking's cached order.
+     */
+    this.added2D = new Set();
+    this.removed2D = new Set();
+    this.layout2D = 0;
     // Counts sprites and texts as they are added: order within a layer.
     this._added = 0;
     /** Sprites and texts whose own data changed since a 2D view last drew, by entity. */
     this.spritesChanged = new Set();
-    /** Whether the last advanceAnimations moved anything. */
+    /** Whether the last _advanceAnimations moved anything. */
     this.animating = false;
     // The particle clock, and until when on it a particle may still be alive.
     this._particleClock = 0;
@@ -713,7 +861,7 @@ export class Scene {
 
       // A light or camera on a node is the node's, exactly as in glTF: where
       // it is and which way it points are the node's transform. A directional
-      // light joins the others; whether it casts the shadow is `sun`'s call.
+      // light joins the others; whether it casts is its castShadow, on by default for directional lights.
       const light = node.light >= 0 ? asset.lights?.[node.light] : null;
       if (light) {
         this._attachLight(entity, light);
@@ -926,7 +1074,6 @@ export class Scene {
    */
   remove(node) {
     this.changes++;
-    this.spriteOrder++;
     // A stale handle names a slot something else may own by now. Acting on it
     // erased that other node's transform before failing to free the handle.
     if (!node.alive) return;
@@ -983,17 +1130,36 @@ export class Scene {
     // Lights on any doomed entity go too. Before the entities are freed, so
     // the handles are still the ones the map was built from.
     for (const entity of doomed) {
+      // A 2D view leaves a hole for a sprite, text or shape; the rest rebuild its list.
+      if (this.emitters.has(entity) || this.tilemaps.has(entity) || this.paths.has(entity)) this.spriteOrder++;
+      if (this.sprites.has(entity) || this.texts.has(entity) || this.shapes.has(entity)) {
+        if (!this.added2D.delete(entity)) this.removed2D.add(entity);
+        this.layout2D++;
+      }
       this.sprites.delete(entity);
       this.emitters.delete(entity);
       this.decals.delete(entity);
       this.texts.delete(entity);
       this.tilemaps.delete(entity);
       this.shapes.delete(entity);
+      const probe = this.reflectionProbes.findIndex((p) => p.entity === entity);
+      if (probe >= 0) {
+        this.reflectionProbes.splice(probe, 1);
+        this.probeRevision++;
+      }
       this.paths.delete(entity);
       const index = this._lightOf.get(entity);
       if (index !== undefined) this._removeLightAt(index);
       this._directional.delete(entity);
       this.shadowCasters.delete(entity);
+    }
+
+    // A scene no 2D view draws never has these read: past a point, a rebuild
+    // is cheaper to promise than the list is to keep.
+    if (this.removed2D.size > 4096 && this.removed2D.size > this.sprites.size) {
+      this.removed2D.clear();
+      this.added2D.clear();
+      this.spriteOrder++;
     }
 
     for (const entity of doomed) {
@@ -1058,8 +1224,10 @@ export class Scene {
    *                texture's own pixel size.
    *   color        multiplies the texture; linear, and may pass 1 to glow
    *   rect         [u0, v0, u1, v1], the part of the texture to show
-   *   pivot        [x, y] in the quad, the point placed at the node; its centre
-   *   rotation     radians, about the view direction
+   *   pivot        the point of the image placed at the node, 0..1 from its
+   *                top-left: [0.5, 0.5], its centre, by default; [0.5, 1] its
+   *                bottom middle, for something standing on the ground
+   *   angle        radians, about the view direction
    *   facing       'camera', turning every way; 'upright', turning about Y
    *                only, for trees and people seen from the side; or 'plane',
    *                not turning at all -- in the node's own x-y plane, a sign
@@ -1068,7 +1236,7 @@ export class Scene {
    *   layer        for a 2D view (Camera2D): higher draws over lower, and one
    *                layer draws in the order its sprites were added
    *   animation    { frames, fps = 12, loop = true }: frames are rects, as
-   *                spriteSheet makes them, shown in turn by advanceAnimations
+   *                spriteSheet makes them, shown in turn by scene.advance
    *
    * Through a Camera2D a unit is a pixel, and a sprite with no size is its
    * frame's own size in texels.
@@ -1077,13 +1245,27 @@ export class Scene {
    */
   addSprite({ texture, position = [0, 0, 0], parent = null, ...options } = {}) {
     this.changes++;
-    this.spriteOrder++;
     const record = spriteRecord({ texture, ...options });
     record.added = this._added++;
     const node = this.createNode({ parent });
     node.setPosition(...position);
+    this._added2D(node.entity);
     this.sprites.set(node.entity, record);
     return node;
+  }
+
+  /**
+   * The environment that lights the scene and draws its background.
+   * engine.createScene sets it; assign another at any time, and the next
+   * frame draws with it -- engine.run sees the change.
+   */
+  get environment() {
+    return this._environment;
+  }
+
+  set environment(environment) {
+    if (environment !== this._environment) this.changes++;
+    this._environment = environment;
   }
 
   /** Change a sprite's options; the same names addSprite takes. */
@@ -1093,17 +1275,58 @@ export class Scene {
     if (current === undefined) throw new Error('setSprite: this node has no sprite');
     // A new animation starts from its first frame.
     const restart = changes.animation !== undefined ? { frame: 0, time: 0 } : {};
-    const next = spriteRecord({ ...current, ...changes, ...restart, sizeGiven: changes.size !== undefined || current.sizeGiven });
+    const next = checked('setSprite', () => spriteRecord({ ...current, ...changes, ...restart, sizeGiven: changes.size !== undefined || current.sizeGiven }));
     next.added = current.added;
     this.sprites.set(node.entity, next);
-    if (next.layer !== current.layer || next.texture !== current.texture || next.blend !== current.blend) this.spriteOrder++;
+    // Repeating is a sampler, which a draw run binds.
+    if (next.layer !== current.layer || next.texture !== current.texture || next.blend !== current.blend
+      || repeats(next) !== repeats(current)) this.spriteOrder++;
     else this.spritesChanged.add(node.entity);
   }
 
   /** A sprite's options, or null. A copy: change it through setSprite. */
   spriteOf(node) {
-    const record = this.sprites.get(node.entity);
-    return record === undefined ? null : { ...record };
+    return copyOf(this.sprites, node);
+  }
+
+  // Every other kind's, the same way: its options or null, a copy.
+  /** A shape's options, or null. A copy: change it through setShape. */
+  shapeOf(node) { return copyOf(this.shapes, node); }
+  /** A path's options, or null. A copy: change it through setPath. */
+  pathOf(node) { return copyOf(this.paths, node); }
+  /** A text's options, or null. A copy: change it through setText. */
+  textOf(node) { return copyOf(this.texts, node); }
+  /** A tilemap's options, or null. A copy: change it through setTilemap, and its tiles through setTile. */
+  tilemapOf(node) { return copyOf(this.tilemaps, node); }
+  /** An emitter's options, or null. A copy: change it through setEmitter. */
+  emitterOf(node) { return copyOf(this.emitters, node); }
+  /** A decal's options, or null. A copy: change it through setDecal. */
+  decalOf(node) { return copyOf(this.decals, node); }
+
+  /** A reflection probe's options -- size, fade, and whether it is captured -- or null. */
+  probeOf(node) {
+    const probe = this.reflectionProbes.find((p) => p.entity === node.entity);
+    return probe === undefined ? null : { size: Float32Array.from(probe.size), fade: probe.fade, captured: probe.captured };
+  }
+
+  /** A light's options, as addLight takes them, or null. A copy: change it through setLight. */
+  lightOf(node) {
+    const entity = node.entity;
+    const castShadow = this.shadowCasters.has(entity);
+    const directional = this._directional.get(entity);
+    if (directional) return { type: 'directional', color: Float32Array.from(directional.color), intensity: directional.intensity, castShadow };
+    const index = this._lightOf.get(entity);
+    if (index === undefined) return null;
+    const o = index * LIGHT_FLOATS, light = this.lights;
+    const spot = light[o + 14] === LIGHT_SPOT;
+    return {
+      type: spot ? 'spot' : 'point',
+      color: Float32Array.from(light.subarray(o + 4, o + 7)),
+      intensity: light[o + 7],
+      radius: light[o + 3],
+      ...(spot ? { innerAngle: this._lightCone[index * 2], outerAngle: this._lightCone[index * 2 + 1] } : {}),
+      castShadow,
+    };
   }
 
   // ---------------------------------------------------------------- shapes
@@ -1130,11 +1353,11 @@ export class Scene {
    */
   addShape({ position = [0, 0, 0], parent = null, ...options } = {}) {
     this.changes++;
-    this.spriteOrder++;
     const record = shapeRecord(options);
     record.added = this._added++;
     const node = this.createNode({ parent });
     node.setPosition(...position);
+    this._added2D(node.entity);
     this.shapes.set(node.entity, record);
     return node;
   }
@@ -1144,7 +1367,7 @@ export class Scene {
     this.changes++;
     const current = this.shapes.get(node.entity);
     if (current === undefined) throw new Error('setShape: this node has no shape');
-    const next = shapeRecord({ ...current, ...changes });
+    const next = checked('setShape', () => shapeRecord({ ...current, ...changes }));
     next.added = current.added;
     this.shapes.set(node.entity, next);
     if (next.layer !== current.layer || next.blend !== current.blend) this.spriteOrder++;
@@ -1185,12 +1408,14 @@ export class Scene {
     this.changes++;
     const current = this.paths.get(node.entity);
     if (current === undefined) throw new Error('setPath: this node has no path');
-    const points = changes.points ?? Array.from({ length: current.points.length / 2 }, (_, i) => [current.points[i * 2], current.points[i * 2 + 1]]);
-    const next = pathRecord({ ...current, ...changes, points });
+    const next = checked('setPath', () => pathRecord({ ...current.options, ...changes }));
     next.added = current.added;
     this.paths.set(node.entity, next);
     // New points are new GPU data, so the list is rebuilt; a colour is not.
-    if (changes.points !== undefined || next.layer !== current.layer || next.blend !== current.blend) this.spriteOrder++;
+    // New points, or opening or closing it -- a long open path is drawn in
+    // pieces, a closed one whole -- change its share of a 2D view's list.
+    if (changes.points !== undefined || next.closed !== current.closed
+      || next.layer !== current.layer || next.blend !== current.blend) this.spriteOrder++;
     else this.spritesChanged.add(node.entity);
   }
 
@@ -1202,13 +1427,14 @@ export class Scene {
    * quads. Simulated on the GPU. Returns the Node.
    *
    *   const sparks = scene.addEmitter({
-   *     rate: 200, lifetime: [0.4, 0.8], size: [0.05, 0], speed: [2, 4], spread: 0.4,
+   *     rate: 200, lifetime: [0.4, 0.8], size: 0.05, sizeEnd: 0, speed: [2, 4], spread: 0.4,
    *     acceleration: [0, -9.81, 0], color: [4, 2, 0.5, 1],
    *   });
    *
    *   rate          particles a second; 0 for bursts only (scene.burst)
    *   lifetime      seconds: one value, or [min, max] for each particle to draw from
-   *   size          world units across: one value, or [at birth, at death]
+   *   size          world units across, at birth; sizeEnd is the size at death,
+   *                 the same unless given -- as color and colorEnd
    *   speed         at birth: one value, or [min, max]; 0 by default
    *   direction     in the node's space; its +Y by default
    *   spread        radians off the direction a particle may leave at: 0 is a
@@ -1223,7 +1449,7 @@ export class Scene {
    *                 are not drawn in) or 'alpha'
    *
    * Particles live in world space once born: a moving emitter leaves a trail.
-   * Advance them with scene.advanceParticles(dt) -- engine.run does.
+   * Advance them with scene.advance(dt) -- engine.run does.
    */
   addEmitter({ position = [0, 0, 0], parent = null, ...options } = {}) {
     this.changes++;
@@ -1241,7 +1467,7 @@ export class Scene {
     this.changes++;
     const current = this.emitters.get(node.entity);
     if (current === undefined) throw new Error('setEmitter: this node has no emitter');
-    const next = emitterRecord({ ...current.options, ...changes });
+    const next = checked('setEmitter', () => emitterRecord({ ...current.options, ...changes }));
     next.owed = current.owed;
     next.time = current.time;
     next.seed = current.seed;
@@ -1264,7 +1490,7 @@ export class Scene {
    * particles, and the time its particles have to be carried through. The
    * renderer settles both on the next frame.
    */
-  advanceParticles(dt) {
+  _advanceParticles(dt) {
     if (!(dt >= 0)) return;
     this._particleClock += dt;
     for (const record of this.emitters.values()) {
@@ -1292,17 +1518,19 @@ export class Scene {
    *   size        the font's em, in world units -- or in pixels, with pixels: true
    *   color       linear; may pass 1 to glow
    *   align       'left', 'center' or 'right', for more than one line
-   *   anchor      [x, y] in the block, 0..1, placed at the node; its centre
+   *   pivot       the point of the block placed at the node, 0..1 from its
+   *               top-left, as a sprite's is; [0.5, 0.5], its centre, by default
+   *   width       lines wrap between words to fit it, in the units of `size`
    *   lineHeight  in ems; the font's own by default
    *   facing      'camera' (by default), 'upright' or 'plane', as for sprites
    */
   addText({ position = [0, 0, 0], parent = null, ...options } = {}) {
     this.changes++;
-    this.spriteOrder++;
     const record = textRecord(options);
     record.added = this._added++;
     const node = this.createNode({ parent });
     node.setPosition(...position);
+    this._added2D(node.entity);
     this.texts.set(node.entity, record);
     return node;
   }
@@ -1312,11 +1540,21 @@ export class Scene {
     this.changes++;
     const current = this.texts.get(node.entity);
     if (current === undefined) throw new Error('setText: this node has no text');
-    // Its glyphs, and so its share of the list, may change in number.
-    this.spriteOrder++;
-    const next = textRecord({ ...current.options, ...changes });
+    const next = checked('setText', () => textRecord({ ...current.options, ...changes }));
     next.added = current.added;
     this.texts.set(node.entity, next);
+    // As many glyphs, of the same atlas, in the same place in the order: a 2D
+    // view rewrites them where they are, as a score that ticks over does.
+    // Otherwise its share of the list changes, and the list is made again.
+    if (next.boxes.length === current.boxes.length && next.font === current.font
+      && next.layer === current.layer && next.blend === current.blend) this.spritesChanged.add(node.entity);
+    else this.spriteOrder++;
+  }
+
+  /** A sprite, text or shape just added, for a 2D view to append. */
+  _added2D(entity) {
+    this.added2D.add(entity);
+    this.layout2D++;
   }
 
   // ---------------------------------------------------------------- decals
@@ -1327,7 +1565,7 @@ export class Scene {
    * placed, turned and parented like one. Returns the Node.
    *
    *   const scorch = scene.addDecal({ texture: burn, size: [2, 2, 0.5] });
-   *   scorch.setPosition(0, 0.01, 0).setRotationAxisAngle([1, 0, 0], -Math.PI / 2);
+   *   scorch.setPosition(0, 0.01, 0).setAxisAngle([1, 0, 0], -Math.PI / 2);
    *
    *   texture  from engine.loadTexture; its alpha is how much it covers
    *   size     the box: [width, height] across the image, and depth along
@@ -1352,7 +1590,7 @@ export class Scene {
     this.changes++;
     const current = this.decals.get(node.entity);
     if (current === undefined) throw new Error('setDecal: this node has no decal');
-    this.decals.set(node.entity, decalRecord({ ...current, ...changes }));
+    this.decals.set(node.entity, checked('setDecal', () => decalRecord({ ...current, ...changes })));
   }
 
   // -------------------------------------------------------------- tilemaps
@@ -1402,7 +1640,7 @@ export class Scene {
     this.changes++;
     const current = this.tilemaps.get(node.entity);
     if (current === undefined) throw new Error('setTilemap: this node has no tilemap');
-    const next = tilemapRecord({ ...current, ...changes });
+    const next = checked('setTilemap', () => tilemapRecord({ ...current, ...changes }));
     next.added = current.added;
     this.tilemaps.set(node.entity, next);
     // A new record is new GPU data, so the list is rebuilt: rare, and simple.
@@ -1411,7 +1649,7 @@ export class Scene {
 
   /** Set the tile at column x, row y: an id as addTilemap's `tiles` takes. */
   setTile(node, x, y, id) {
-    this.setTiles(node, x, y, 1, [id]);
+    this._setTiles('setTile', node, x, y, 1, [id]);
   }
 
   /**
@@ -1419,13 +1657,21 @@ export class Scene {
    * top-left at column x, row y.
    */
   setTiles(node, x, y, width, tiles) {
+    this._setTiles('setTiles', node, x, y, width, tiles);
+  }
+
+  /** setTile and setTiles, whose errors carry the name that was called. */
+  _setTiles(caller, node, x, y, width, tiles) {
     const map = this.tilemaps.get(node.entity);
-    if (map === undefined) throw new Error('setTiles: this node has no tilemap');
+    if (map === undefined) throw new Error(`${caller}: this node has no tilemap`);
     const height = tiles.length / width;
     if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(width) && width > 0 && Number.isInteger(height)
       && x >= 0 && y >= 0 && x + width <= map.columns && y + height <= map.rows)) {
-      throw new Error(`setTiles: a ${width}-wide block of ${tiles.length} at (${x}, ${y}) is not inside the ${map.columns} x ${map.rows} map`);
+      throw new Error(caller === 'setTile'
+        ? `setTile: (${x}, ${y}) is not on the ${map.columns} x ${map.rows} map`
+        : `setTiles: a ${width}-wide block of ${tiles.length} at (${x}, ${y}) is not inside the ${map.columns} x ${map.rows} map`);
     }
+    checkTiles(caller, tiles, tileCount(map));
     for (let row = 0; row < height; row++) {
       map.tiles.set(tiles.slice(row * width, (row + 1) * width), (y + row) * map.columns + x);
     }
@@ -1447,36 +1693,72 @@ export class Scene {
   // ----------------------------------------------------------- reflections
 
   /**
-   * A reflection probe: the scene seen from `position`, reflected by the
-   * surfaces inside the box from `min` to `max` (world space) in place of the
-   * sky. Nothing shows until it is captured -- engine.captureReflectionProbes.
+   * A reflection probe, as a node: the scene seen from the node, reflected by
+   * the surfaces inside a box around it in place of the sky. Nothing shows
+   * until it is captured -- engine.captureProbes. Returns the Node.
    *
-   *   const hall = scene.addReflectionProbe({ min: [-5, 0, -8], max: [5, 4, 8] });
+   *   const hall = scene.addProbe({ position: [0, 2, 0], size: [10, 4, 16] });
    *
-   * `position` is the box's centre unless given, and must be inside it.
-   * `blend` is how far in from the box's faces the probe fades in: 0, the
-   * default, is a hard edge; more hides the seam between neighbours.
+   *   size   the box, [width, height, depth] in world units, centred on the node
+   *   fade   how far in from the box's faces the probe fades in: 0, the default,
+   *          is a hard edge; more hides the seam between neighbours
+   *
+   * The box stays square to the world: turning or scaling the node does not
+   * turn or scale it. Moving the node moves it, and it shows nothing again
+   * until it is captured where it now is. Removed like any node.
    */
-  addReflectionProbe(options) {
+  addProbe({ position = [0, 0, 0], parent = null, ...options } = {}) {
     this.changes++;
+    const node = this.createNode({ parent });
+    node.setPosition(...position);
     const probe = probeRecord(options);
+    probe.entity = node.entity;
     this.reflectionProbes.push(probe);
     this.probeRevision++;
+    return node;
+  }
+
+  /** Change a probe's options; the same names addProbe takes. It must be captured again. */
+  setProbe(node, changes) {
+    const probe = this._probe('setProbe', node);
+    this.changes++;
+    const next = checked('setProbe', () => probeRecord({ size: probe.size, fade: probe.fade, ...changes }));
+    Object.assign(probe, { size: next.size, fade: next.fade, captured: false, placed: null });
+    this.probeRevision++;
+  }
+
+  /** The probe record behind a node, for the renderer's captures. */
+  _probe(caller, node) {
+    const probe = this.reflectionProbes.find((p) => p.entity === node.entity);
+    if (probe === undefined) throw new Error(`${caller}: this node is not a reflection probe`);
     return probe;
   }
 
-  removeReflectionProbe(probe) {
-    this.changes++;
-    const at = this.reflectionProbes.indexOf(probe);
-    if (at < 0) return;
-    this.reflectionProbes.splice(at, 1);
-    this.probeRevision++;
+  /**
+   * Each probe's box and eye, from where its node is now. A probe that moved
+   * shows nothing until captured again: what it saw was somewhere else.
+   */
+  _placeProbes() {
+    const world = this.transforms.world;
+    for (const probe of this.reflectionProbes) {
+      const m = handleIndex(probe.entity) * 16;
+      const x = world[m + 12], y = world[m + 13], z = world[m + 14];
+      if (probe.placed !== null && probe.placed[0] === x && probe.placed[1] === y && probe.placed[2] === z) continue;
+      probe.placed = [x, y, z];
+      probe.position.set(probe.placed);
+      for (let a = 0; a < 3; a++) {
+        probe.min[a] = probe.placed[a] - probe.size[a] / 2;
+        probe.max[a] = probe.placed[a] + probe.size[a] / 2;
+      }
+      probe.captured = false;
+      this.probeRevision++;
+    }
   }
 
   // ------------------------------------------------------------------ lights
 
   /**
-   * Add a point or spot light, as a node in the scene. Returns the Node.
+   * Add a light -- point, spot or directional -- as a node in the scene. Returns the Node.
    *
    *   const lamp = scene.addLight({ position: [0, 3, 0], color: [1, 0.7, 0.4], intensity: 20 });
    *   lamp.setPosition(2, 3, 0);                     // moves the light
@@ -1515,8 +1797,9 @@ export class Scene {
   } = {}) {
     this.changes++;
     if (type !== 'point' && type !== 'spot' && type !== 'directional') {
-      throw new Error(`Scene.addLight: type must be point, spot or directional, got ${type}`);
+      throw new Error(`addLight: type must be point, spot or directional, got ${type}`);
     }
+    checkLight('addLight', { color, intensity, radius }, type === 'spot' ? [innerAngle, outerAngle] : null);
     // Aim by rotating the node: -Z along the requested direction, upright.
     // [x, y] aims one across a 2D view.
     const rotation = direction ? quatLookAlong(quatCreate(), [direction[0], direction[1], direction[2] ?? 0]) : undefined;
@@ -1533,13 +1816,26 @@ export class Scene {
   }
 
   /**
-   * Change what a light IS -- colour, brightness, reach, cone -- without
-   * touching where it is. Partial: only the fields given change.
-   *
-   * Returns false if the entity is not a light, rather than throwing, so a
-   * caller that is not sure can ask by trying.
+   * Change what a light IS -- colour, brightness, reach, cone, shadows --
+   * without touching where it is: the same names addLight takes, only those
+   * given changing. Move or aim it through its node.
    */
-  setLight(entity, changes) {
+  setLight(node, changes) {
+    const current = this.lightOf(node);
+    if (current === null) throw new Error('setLight: this node is not a light');
+    for (const key of ['type', 'position', 'direction', 'parent']) {
+      if (key in changes) throw new Error(`setLight: ${key} can't change here; ${key === 'type' ? 'add a new light' : 'use the node'}`);
+    }
+    const coned = current.type === 'spot';
+    for (const key of current.type === 'directional' ? ['radius', 'innerAngle', 'outerAngle'] : coned ? [] : ['innerAngle', 'outerAngle']) {
+      if (key in changes) throw new Error(`setLight: a ${current.type} light has no ${key}`);
+    }
+    checkLight('setLight', changes, coned ? [changes.innerAngle ?? current.innerAngle, changes.outerAngle ?? current.outerAngle] : null);
+    this._setLight(node.entity, changes);
+  }
+
+  /** setLight by entity: false if it is not a light. An animated light's channels come through here. */
+  _setLight(entity, changes) {
     this.changes++;
     const directional = this._directional.get(entity);
     if (changes.castShadow !== undefined && (directional || this._lightOf.has(entity))) {
@@ -1723,7 +2019,9 @@ export class Scene {
    * one it is the same code on this thread. Identical results either way.
    */
   update(jobs = null) {
-    return jobs?.parallel ? this.transforms.updateParallel(jobs) : this.transforms.update();
+    const recomposed = jobs?.parallel ? this.transforms.updateParallel(jobs) : this.transforms.update();
+    if (this.reflectionProbes.length > 0) this._placeProbes();
+    return recomposed;
   }
 
   /**
@@ -1795,7 +2093,7 @@ export class Scene {
           changes.innerAngle = live.innerAngle;
           changes.outerAngle = live.outerAngle;
         }
-        for (const entity of entities) this.setLight(entity, changes);
+        for (const entity of entities) this._setLight(entity, changes);
       },
     };
   }
@@ -1843,8 +2141,18 @@ export class Scene {
   }
 
   /** The AnimationPlayer for an asset instance, or null if it has no clips. */
-  playerFor(node) {
+  _playerFor(node) {
     return this._players.get(node.entity) ?? null;
+  }
+
+  /**
+   * Move the scene on by `dt` seconds: its animations -- clips and sprite
+   * frames -- and its particles. engine.run calls it every frame; call it
+   * yourself when you drive renderFrame.
+   */
+  advance(dt) {
+    this._advanceAnimations(dt);
+    this._advanceParticles(dt);
   }
 
   /**
@@ -1859,12 +2167,13 @@ export class Scene {
    * animation is presentation: it belongs with the camera controller, not with
    * the physics the accumulator exists to keep deterministic.
    */
-  advanceAnimations(dt) {
+  _advanceAnimations(dt) {
     let playing = 0;
     for (const player of this._players.values()) {
       if (player.advance(dt, this.transforms)) playing++;
     }
     // Sprite animations: a frame at a time, at their own rate.
+    let sprites = 0;
     for (const [entity, sprite] of this.sprites) {
       const animation = sprite.animation;
       if (animation === null || !(dt > 0)) continue;
@@ -1873,15 +2182,17 @@ export class Scene {
       sprite.time += dt;
       const step = Math.floor(sprite.time * animation.fps);
       const frame = animation.loop ? step % count : Math.min(step, count - 1);
-      playing++;
+      sprites++;
       if (frame !== sprite.frame) {
         sprite.frame = frame;
         this.spritesChanged.add(entity);
         this.changes++;
       }
     }
+    // Only clips keep the loop drawing: a sprite's new frame counts as a
+    // change when it comes, so between frames a still scene can idle.
     this.animating = playing > 0;
-    return playing;
+    return playing + sprites;
   }
 
   /**
@@ -2149,21 +2460,28 @@ export class Scene {
 
   _pick2D(at) {
     this.update();
-    const items = [];
-    for (const kind of [this.sprites, this.texts, this.tilemaps, this.shapes, this.paths]) {
-      for (const [entity, record] of kind) items.push([entity, record]);
+    // The reverse of the order they draw in, kept until that order changes --
+    // picking on every pointer move sorted the whole scene each time. As
+    // entities, with the map each is in: a set call replaces its record.
+    if (this._picking?.order !== this.spriteOrder || this._picking.layout !== this.layout2D) {
+      const items = [];
+      for (const kind of [this.sprites, this.texts, this.tilemaps, this.shapes, this.paths]) {
+        for (const [entity, record] of kind) items.push([entity, kind, record.layer, record.added]);
+      }
+      items.sort((p, q) => q[2] - p[2] || q[3] - p[3]);
+      this._picking = { order: this.spriteOrder, layout: this.layout2D, items };
     }
-    // The reverse of the order they draw in.
-    items.sort(([, p], [, q]) => q.layer - p.layer || q.added - p.added);
     const world = this.transforms.world;
-    for (const [entity, record] of items) {
+    for (const [entity, kind] of this._picking.items) {
+      const record = kind.get(entity);
       // Into the node's own frame: the inverse of its 2D transform.
       const m = handleIndex(entity) * 16;
       const a = world[m], b = world[m + 1], c = world[m + 4], d = world[m + 5];
       const det = a * d - b * c;
       if (det === 0) continue;
       const dx = at[0] - world[m + 12], dy = at[1] - world[m + 13];
-      const hit = hit2D(record, (d * dx - c * dy) / det, (a * dy - b * dx) / det);
+      const hit = isSprite(record) ? hitSprite(record, world, entity, dx, dy)
+        : hit2D(record, (d * dx - c * dy) / det, (a * dy - b * dx) / det);
       if (hit !== null) return { node: new Node(this, entity), point: [at[0], at[1]], ...hit };
     }
     return null;
@@ -2198,7 +2516,7 @@ function hit2D(record, x, y) {
     const [w, h] = record.size;
     const px = x + (record.pivot[0] - 0.5) * w, py = y + (record.pivot[1] - 0.5) * h;
     if (record.shape === 'ellipse') return (px / (w / 2)) ** 2 + (py / (h / 2)) ** 2 <= 1 ? {} : null;
-    const r = record.radius;
+    const r = shapeRadius(record);
     const qx = Math.abs(px) - w / 2 + r, qy = Math.abs(py) - h / 2 + r;
     return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r <= 0 ? {} : null;
   }
@@ -2215,13 +2533,29 @@ function hit2D(record, x, y) {
     const s = record.size;
     return x >= left * s && x <= right * s && y >= -top * s && y <= -bottom * s ? {} : null;
   }
-  // A sprite: its quad, turned by its own rotation, its pivot at the node.
-  const cos = Math.cos(record.rotation), sin = Math.sin(record.rotation);
-  const ux = cos * x + sin * y, uy = cos * y - sin * x;
+  return null;
+}
+
+/** Whether a 2D record is a sprite: the one kind with neither a kind nor glyphs. */
+function isSprite(record) {
+  return record.kind === undefined && record.boxes === undefined;
+}
+
+const FRAME = new Float64Array(4);
+
+/**
+ * A sprite under the point (dx, dy) from its node, in world units: its quad as
+ * the 2D view draws it -- sized by the node's scale, then turned by the node's
+ * angle and its own together -- undone.
+ */
+function hitSprite(record, world, entity, dx, dy) {
+  const [lx, ly, mirrored, angle] = frame2D(world, entity, FRAME);
+  const turn = angle + record.angle;
+  const cos = Math.cos(turn), sin = Math.sin(turn);
   const rect = spriteRect(record);
-  const w = record.sizeGiven ? record.size[0] : record.texture.width * Math.abs(rect[2] - rect[0]);
-  const h = record.sizeGiven ? record.size[1] : record.texture.height * Math.abs(rect[3] - rect[1]);
-  const u = ux / w + record.pivot[0], v = uy / h + record.pivot[1];
+  const w = (record.sizeGiven ? record.size[0] : record.texture.width * Math.abs(rect[2] - rect[0])) * lx * (mirrored ? -1 : 1);
+  const h = (record.sizeGiven ? record.size[1] : record.texture.height * Math.abs(rect[3] - rect[1])) * ly;
+  const u = (cos * dx + sin * dy) / w + record.pivot[0], v = (cos * dy - sin * dx) / h + record.pivot[1];
   return u >= 0 && u <= 1 && v >= 0 && v <= 1 ? {} : null;
 }
 
@@ -2254,9 +2588,6 @@ export const DIRECTIONAL_FLOATS = 8;
 export const LIGHT_POINT = 0;
 export const LIGHT_SPOT = 1;
 
-/** The axis a spot shines along, in its own space: -Z, as in glTF. */
-
-/** A Camera for an imported glTF camera, before it is pointed at its node. */
 /** What an animated light is now, starting from what the file said. */
 function lightStateOf(spec) {
   return {

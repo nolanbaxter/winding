@@ -342,7 +342,7 @@ export class PostStack {
     this.knee = knee;
     this.filterRadius = filterRadius;
     this.strength = strength;
-    this.requestedLevels = Math.min(levels, MAX_BLOOM_LEVELS);
+    this.levels = levels;
     this.antialias = antialias !== false;
     this.grading = grading;
     this._gradingData = new Float32Array(20);
@@ -366,7 +366,8 @@ export class PostStack {
     this._bindGroups = new Map();
     this._frame = 0;
     this._slot = 0;
-    this.levels = 0;
+    /** How many levels the last frame drew: `levels`, clamped, and fewer on a small canvas. */
+    this.levelsDrawn = 0;
 
     this._downExecutors = [];
     this._upExecutors = [];
@@ -376,7 +377,7 @@ export class PostStack {
     }
     this._tonemapExecute = (pass) => {
       pass.setBindGroup(1, this._gradingGroup());
-      this._draw(pass, this.antialias ? this.tonemapLdrPipeline : this.tonemapPipeline, MAX_BLOOM_LEVELS * 2);
+      this._draw(pass, this._antialiasing ? this.tonemapLdrPipeline : this.tonemapPipeline, MAX_BLOOM_LEVELS * 2);
     };
     this._fxaaExecute = (pass) => this._draw(pass, this.fxaaPipeline, MAX_BLOOM_LEVELS * 2 + 1);
   }
@@ -439,23 +440,33 @@ export class PostStack {
       targets: [{ format: rhi.viewFormat }],
     };
 
-    const descriptors = [this.downDescriptor, this.upDescriptor, this.tonemapDescriptor];
-    if (this.antialias) descriptors.push(this.tonemapLdrDescriptor, this.fxaaDescriptor);
-    await pipelines.warm(descriptors);
+    await pipelines.warm([this.downDescriptor, this.upDescriptor, this.tonemapDescriptor]);
     this._pipelines = pipelines;
     this.downPipeline = pipelines.get(this.downDescriptor);
     this.upPipeline = pipelines.get(this.upDescriptor);
     this.tonemapPipeline = pipelines.get(this.tonemapDescriptor);
-    if (this.antialias) {
-      this.tonemapLdrPipeline = pipelines.get(this.tonemapLdrDescriptor);
-      this.fxaaPipeline = pipelines.get(this.fxaaDescriptor);
-    }
+    // Asked for at creation: ready for the first frame.
+    if (this.antialias) await this._fxaaReady();
+  }
+
+  /**
+   * Whether FXAA's pipelines are built -- starting them the first time it is
+   * asked, so antialias can be switched on at any time: frames draw without
+   * it until they are ready, and render() never compiles.
+   */
+  _fxaaReady() {
+    this._fxaaBuilding ??= this._pipelines.warm([this.tonemapLdrDescriptor, this.fxaaDescriptor]).then(() => {
+      this.tonemapLdrPipeline = this._pipelines.get(this.tonemapLdrDescriptor);
+      this.fxaaPipeline = this._pipelines.get(this.fxaaDescriptor);
+    });
+    return this._fxaaBuilding;
   }
 
   /** How many halvings the current resolution supports, capped by the option. */
   levelCountFor(width, height) {
     const possible = Math.floor(Math.log2(Math.max(1, Math.min(width, height)))) - 2;
-    return Math.max(1, Math.min(this.requestedLevels, possible));
+    // Kept to the chain there is room for, however it was set.
+    return Math.max(1, Math.min(Math.floor(this.levels) || 1, MAX_BLOOM_LEVELS, possible));
   }
 
   _writeParams(slot, texelWidth, texelHeight, { firstPass = 0, radius = 0, strength = 0, exposure = 1 } = {}) {
@@ -483,7 +494,7 @@ export class PostStack {
     this.rhi.queue.writeBuffer(this.gradingBuffer, 0, packGrading(this._gradingData, this.grading));
     this._evictBindGroups();
     const levels = this.levelCountFor(width, height);
-    this.levels = levels;
+    this.levelsDrawn = levels;
     this._offsets = [];
 
     // --- allocate the chain -------------------------------------------------
@@ -565,7 +576,10 @@ export class PostStack {
     });
 
     const black = { r: 0, g: 0, b: 0, a: 1 };
-    const ldr = this.antialias
+    // Antialiased once FXAA's pipelines exist; asked for before then, they start building.
+    if (this.antialias && this.fxaaPipeline === undefined) this._fxaaReady().catch((error) => console.error(error));
+    this._antialiasing = this.antialias && this.fxaaPipeline !== undefined;
+    const ldr = this._antialiasing
       ? graph.createTexture('ldr', {
         width, height, format: LDR_FORMAT,
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
@@ -579,7 +593,7 @@ export class PostStack {
     });
     this._sourceFor(tonemapSlot, sceneColor, bloomResult);
 
-    if (this.antialias) {
+    if (this._antialiasing) {
       const fxaaSlot = MAX_BLOOM_LEVELS * 2 + 1;
       this._offsets[fxaaSlot] = this._writeParams(fxaaSlot, 1 / width, 1 / height);
       graph.addPass({

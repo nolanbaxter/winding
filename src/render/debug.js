@@ -142,9 +142,9 @@ export class DebugLines {
     return this;
   }
 
-  /** Three great circles, one around each axis. */
+  /** Three great circles, one around each axis. A [x, y] center is at z 0. */
   sphere(center, radius, color = WHITE) {
-    const [cx, cy, cz] = center;
+    const [cx, cy, cz = 0] = center;
     for (let axis = 0; axis < 3; axis++) {
       const at = (a, b) => (axis === 0 ? [cx, cy + a, cz + b] : axis === 1 ? [cx + a, cy, cz + b] : [cx + a, cy + b, cz]);
       let [pu, pv] = [radius, 0];
@@ -169,9 +169,9 @@ export class DebugLines {
     return this;
   }
 
-  /** The world axes at a point: x red, y green, z blue, each `size` long. */
+  /** The world axes at a point: x red, y green, z blue, each `size` long. A [x, y] point is at z 0. */
   axes(origin, size = 1) {
-    const [x, y, z] = origin;
+    const [x, y, z = 0] = origin;
     this.line(origin, [x + size, y, z], [1, 0, 0]);
     this.line(origin, [x, y + size, z], [0, 1, 0]);
     this.line(origin, [x, y, z + size], [0, 0, 1]);

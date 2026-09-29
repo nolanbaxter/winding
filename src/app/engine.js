@@ -23,7 +23,7 @@ import { createDevice } from '../rhi/device.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { Environment } from '../render/ibl.js';
 import { parseHDR } from '../render/hdr.js';
-import { Renderer } from '../render/renderer.js';
+import { Renderer, RenderTarget } from '../render/renderer.js';
 import { GLTFTextures } from '../render/textures.js';
 import { createTexture2D, uploadImage, generateMipmaps } from '../rhi/texture.js';
 import { Font } from '../render/text.js';
@@ -162,7 +162,7 @@ export class Winding {
 
   constructor(rhi, renderer, environment, jobs, ownsEnvironment = true) {
     /** The RHI. Public: dropping a tier must never require a fork. */
-    this.rhi = rhi;
+    this.gpu = rhi;
     this.renderer = renderer;
     this.environment = environment;
     this.jobs = jobs;
@@ -216,7 +216,7 @@ export class Winding {
   createScene(options = {}) {
     this._assertAlive('createScene');
     const environment = options.environment ?? this.environment;
-    if (environment.rhi !== this.rhi) {
+    if (environment.rhi !== this.gpu) {
       throw new Error('createScene: that Environment belongs to another engine');
     }
     const scene = new Scene(options);
@@ -225,28 +225,19 @@ export class Winding {
   }
 
   /**
-   * Load a Radiance .hdr panorama and bake it into an Environment: ambient
-   * light, reflections and background. Hand it to createScene({ environment }).
-   *
-   *   const studio = await engine.loadEnvironment('studio.hdr');
-   *   const scene = engine.createScene({ environment: studio });
-   *
-   * `source` is a URL, an ArrayBuffer or a Uint8Array. Other options are the
-   * Environment's -- `size` to bake the cube smaller than the map, say. The
-   * environment is yours: destroy() it when no scene uses it any more.
-   */
-  /**
    * An image as a GPU texture, mipmapped: for sprites (scene.addSprite).
    *
    *   const pin = await engine.loadTexture('pin.png');
    *
    * `source` is a URL, a Blob, an ImageBitmap, or anything createImageBitmap
-   * takes. `srgb` for colour, which is almost every image; false for data.
+   * takes. `fetch` downloads a URL, as every loader's does: pass one to decide
+   * which URLs may be reached. `srgb` for colour, which is almost every image;
+   * false for data.
    * `pixelated` for pixel art: enlarged, each texel stays a hard square, as
    * CSS's image-rendering: pixelated draws it.
-   * Returns { texture, view, width, height, pixelated }; destroy the texture when done.
+   * Returns { texture, view, width, height, pixelated }; engine.unload() it when done.
    */
-  async loadTexture(source, { srgb = true, pixelated = false, label = 'texture' } = {}) {
+  async loadTexture(source, { srgb = true, pixelated = false, label = 'texture', fetch = globalThis.fetch } = {}) {
     this._assertAlive('loadTexture');
     let image = source;
     if (typeof source === 'string') {
@@ -261,12 +252,12 @@ export class Winding {
       ? image
       : await createImageBitmap(image, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
     this._assertAlive('loadTexture');
-    const texture = createTexture2D(this.rhi, {
+    const texture = createTexture2D(this.gpu, {
       label, width: bitmap.width, height: bitmap.height, srgb, mipmapped: true,
     });
-    uploadImage(this.rhi, texture, bitmap);
+    uploadImage(this.gpu, texture, bitmap);
     // Bled: a sprite is often enlarged, and its clear pixels must not fringe it.
-    generateMipmaps(this.rhi, texture, { bleed: true });
+    generateMipmaps(this.gpu, texture, { bleed: true });
     if (bitmap !== source) bitmap.close();
     return { texture, view: texture.createView(), width: texture.width, height: texture.height, pixelated: pixelated === true };
   }
@@ -286,7 +277,7 @@ export class Winding {
     if (px === null) throw new Error(`loadFont: the font needs a size in pixels, like '64px sans-serif'; got '${css}'`);
     await document.fonts?.load(css);
     this._assertAlive('loadFont');
-    return new Font(this.rhi, css, Number(px[1]));
+    return new Font(this.gpu, css, Number(px[1]));
   }
 
   /**
@@ -294,9 +285,10 @@ export class Winding {
    *
    *   engine.grading = { lut: await engine.loadLUT('film.cube') };
    *
-   * `source` is a URL or the file's text.
+   * `source` is a URL or the file's text. `fetch` downloads a URL, as every
+   * loader's does.
    */
-  async loadLUT(source) {
+  async loadLUT(source, { fetch = globalThis.fetch } = {}) {
     this._assertAlive('loadLUT');
     let text = source;
     if (!/LUT_3D_SIZE/i.test(source)) {
@@ -305,7 +297,7 @@ export class Winding {
       text = await response.text();
     }
     this._assertAlive('loadLUT');
-    return uploadLUT(this.rhi, parseCube(text));
+    return uploadLUT(this.gpu, parseCube(text));
   }
 
   /** Colour grading, read and set any time: { whiteBalance, contrast, saturation, lut }. See render/grading.js. */
@@ -317,6 +309,17 @@ export class Winding {
     this.renderer.post.grading = value ?? null;
   }
 
+  /**
+   * Load a Radiance .hdr panorama and bake it into an Environment: ambient
+   * light, reflections and background. Hand it to createScene({ environment }).
+   *
+   *   const studio = await engine.loadEnvironment('studio.hdr');
+   *   const scene = engine.createScene({ environment: studio });
+   *
+   * `source` is a URL, an ArrayBuffer or a Uint8Array. Other options are the
+   * Environment's -- `size` to bake the cube smaller than the map, say. The
+   * environment is yours: engine.unload() it when no scene uses it any more.
+   */
   async loadEnvironment(source, options = {}) {
     this._assertAlive('loadEnvironment');
     const { fetch: fetchImpl = globalThis.fetch, ...environmentOptions } = options;
@@ -329,8 +332,8 @@ export class Winding {
     } else if (source instanceof ArrayBuffer) {
       bytes = new Uint8Array(source);
     }
-    const map = parseHDR(bytes, { maxDimension: this.rhi.limits.maxTextureDimension2D });
-    return new Environment(this.rhi, { ...environmentOptions, map });
+    const map = parseHDR(bytes, { maxDimension: this.gpu.limits.maxTextureDimension2D });
+    return new Environment(this.gpu, { ...environmentOptions, map });
   }
 
   /**
@@ -364,7 +367,8 @@ export class Winding {
     // recovering app then handed to its new engine.
     if (typeof source === 'string') {
       baseURL = baseURL ?? new URL(source, globalThis.location?.href ?? 'http://localhost/');
-      const response = await fetch(source);
+      // Through options.fetch, as everything the load downloads is: the one rule every loader keeps.
+      const response = await (options.fetch ?? globalThis.fetch)(source);
       if (!response.ok) throw new Error(`load: ${source} returned ${response.status}`);
       bytes = new Uint8Array(await response.arrayBuffer());
       this._assertAlive('load');
@@ -376,7 +380,7 @@ export class Winding {
     // what it may fetch by `options.fetch`, when the app supplies one: a
     // .gltf names its own buffers and images, so loading one from a stranger
     // requests URLs the stranger chose.
-    const { limits } = this.rhi;
+    const { limits } = this.gpu;
     const fetchImpl = options.fetch ?? globalThis.fetch;
     // Images start as soon as the document is read: fetched and decoded
     // while its buffers download and its geometry builds, and each uploaded
@@ -389,7 +393,7 @@ export class Winding {
       model = await loadGLTF(bytes, {
         baseURL, fetchImpl, maxBytes: limits.maxBufferSize,
         onDocument: (json, ready) => {
-          textures = new GLTFTextures(this.rhi, json, []);
+          textures = new GLTFTextures(this.gpu, json, []);
           const spaces = imageColorSpaces(json);
           decoding = decodeImages(json, ready, {
             baseURL, fetchImpl, maxDimension: limits.maxTextureDimension2D,
@@ -495,18 +499,18 @@ export class Winding {
           };
           primitives.push(built);
 
-          built.vertexBuffer = createBuffer(this.rhi, {
+          built.vertexBuffer = createBuffer(this.gpu, {
             label: `${mesh.name}[${p}].vertices`,
             data: primitive.vertices,
             usage: GPUBufferUsage.VERTEX,
           });
-          built.indexBuffer = createBuffer(this.rhi, {
+          built.indexBuffer = createBuffer(this.gpu, {
             label: `${mesh.name}[${p}].indices`,
             data: primitive.indices,
             usage: GPUBufferUsage.INDEX,
           });
           if (primitive.jointIndices) {
-            built.skinBuffer = createBuffer(this.rhi, {
+            built.skinBuffer = createBuffer(this.gpu, {
               label: `${mesh.name}[${p}].skin`,
               data: new Uint8Array(packSkinVertices(
                 primitive.jointIndices, primitive.jointWeights, primitive.vertexCount,
@@ -549,9 +553,14 @@ export class Winding {
   }
 
   /**
-   * Free what load() made for an asset: its buffers, textures, material ids
-   * and morph deltas. Remove it from every scene first; this throws if any
-   * scene still draws it.
+   * Free what any load call made: a model from load(), a texture from
+   * loadTexture(), a font from loadFont(), a LUT from loadLUT(), an
+   * environment from loadEnvironment(). Freeing twice does nothing.
+   *
+   * A model's buffers, textures, material ids and morph deltas: remove it
+   * from every scene first, and this throws if any scene still draws it. A
+   * texture, font, LUT or environment is freed as it stands -- stop using it
+   * first, as nothing here can see what still reads it.
    *
    * load() allocates on every call, the same file included, and until this
    * existed nothing ever gave it back. An editor that re-imports on each save
@@ -559,6 +568,15 @@ export class Winding {
    */
   unload(asset) {
     if (asset.unloaded) return;
+    if (!Array.isArray(asset.meshes)) {
+      // Everything but a model: a font or an environment frees itself; a
+      // texture or a LUT is its GPU texture.
+      if (asset instanceof Font || asset instanceof Environment || asset instanceof RenderTarget) asset.destroy();
+      else if (typeof asset.texture?.destroy === 'function') asset.texture.destroy();
+      else throw new Error('unload: this is not something load, loadTexture, loadFont, loadLUT, loadEnvironment or createTarget returned');
+      asset.unloaded = true;
+      return;
+    }
     // Its ids and arena ranges index THIS engine's registry and morph store.
     // Unloading another engine's asset -- the one from before a device loss,
     // say -- freed live entries here, and the next load overwrote them.
@@ -605,14 +623,18 @@ export class Winding {
    * engine: nothing drawn into a detached canvas can be seen. (An engine that
    * is not running learns the same thing from its resize observer.)
    *
-   * `overlay: { scene, camera }` draws a second, 2D scene over every frame --
-   * a HUD -- through its Camera2D, or a plain one if none is given.
+   * `hud: { scene, camera }` draws a second, 2D scene over every frame
+   * through its Camera2D, or a plain one if none is given.
    */
-  run({ scene, camera, update, frame, overlay = null }) {
+  run(scene, camera, options = {}) {
     this._assertAlive('run');
+    if (!(scene instanceof Scene)) {
+      throw new Error('run: takes (scene, camera, { update, frame, hud }), the scene first, from createScene()');
+    }
+    const { update, frame } = options;
+    const hud = this._hud('run', options);
     if (this._running) throw new Error('run: already running; call stop() first');
     this._running = true;
-    const hud = this._overlay(overlay);
 
     const loop = (nowMs) => {
       // The device going away ends the loop for good, so tear the running
@@ -620,21 +642,20 @@ export class Winding {
       // every later run() threw 'already running' with no way back short of
       // destroy() -- a lost device wedged the engine rather than stopping it.
       if (!this._running) return;
-      if (this.rhi.destroyed) { this.destroy(); return; }
+      if (this.gpu.destroyed) { this.destroy(); return; }
       // A canvas that has left the document can never be seen again, so every
       // frame drawn into it is waste. This is what a live editor's reload
       // leaves behind: it rewrites the page in place (document.open/write), no
       // pagehide fires, and each old engine kept rendering and kept its GPU
       // device -- one more full loop per edit, until the adapter ran out.
-      if (this.rhi.canvas.isConnected === false) { this.destroy(); return; }
+      if (this.gpu.canvas.isConnected === false) { this.destroy(); return; }
       this._raf = requestAnimationFrame(loop);
 
       this.clock.begin(nowMs / 1000);
       // Before update(), so a callback that reads a bone's world position sees
       // this frame's pose rather than last frame's.
-      scene.advanceAnimations(this.clock.realDelta);
-      scene.advanceParticles(this.clock.realDelta);
-      hud?.scene.advanceAnimations(this.clock.realDelta);
+      scene.advance(this.clock.realDelta);
+      hud?.scene.advance(this.clock.realDelta);
       if (update) while (this.clock.step()) update(this.clock.fixedDt, this.clock.elapsed);
       else this.clock.accumulator = 0;   // nothing to simulate; do not let it grow
 
@@ -642,7 +663,7 @@ export class Winding {
       if (this.onDemand && this._idle(scene, camera, hud)) {
         this.skippedFrames++;
       } else {
-        this.renderFrame(scene, camera, { overlay: hud });
+        this.renderer.render(scene, camera, this.jobs, null, hud);
         this._remember(scene, camera, hud);
       }
 
@@ -676,18 +697,22 @@ export class Winding {
    * which a frame draws without; and debug lines, which are drawn per frame.
    * No shader here depends on time, so the same inputs give the same image.
    */
-  _idle(scene, camera, overlay = null) {
+  _idle(scene, camera, hud = null) {
     const last = this._drawn;
     if (last === null || last.scene !== scene || last.camera !== camera) return false;
-    if (last.overlay !== overlay || (overlay !== null && !this._overlayIdle(overlay, last))) return false;
+    if (last.hud !== hud || (hud !== null && !this._hudIdle(hud, last))) return false;
     if (scene.revision !== last.revision || scene.changes !== last.changes) return false;
     if (scene.transforms._anyDirty || scene.transforms.movedPending) return false;
     if (scene.changedMaterials.size > 0 || scene.animating || scene.particlesActive) return false;
-    if (this.rhi.width !== last.width || this.rhi.height !== last.height) return false;
+    if (this.gpu.width !== last.width || this.gpu.height !== last.height) return false;
     const renderer = this.renderer;
     if (renderer.debug.count > 0) return false;
     for (const set of renderer._variantSets.values()) if (!set.ready) return false;
-    camera.update(this.rhi.width / this.rhi.height);
+    // Antialiasing asked for and still building: the frame that has it is still to come.
+    if (renderer.post.antialias && renderer.post.fxaaPipeline === undefined) return false;
+    // With the size and pixel ratio, as a frame updates it: a Camera2D's view
+    // changes with the ratio alone, when the page is zoomed.
+    camera.update(this.gpu.width / this.gpu.height, this.gpu.width, this.gpu.height, this.gpu.pixelRatio);
     if (!sameFloats(camera.view, last.view) || !sameFloats(camera.projection, last.projection)) return false;
     if (!sameMorphs(scene.morphs, last.morphs)) return false;
     // A 2D view's background, ambient and snapping are not in its matrices.
@@ -696,31 +721,31 @@ export class Winding {
     return this._settings() === last.settings;
   }
 
-  /** Would the overlay draw what it last did? Its scene and camera, as _idle checks the main one's. */
-  _overlayIdle({ scene, camera }, last) {
-    if (scene.revision !== last.overlayRevision || scene.changes !== last.overlayChanges) return false;
+  /** Would the hud draw what it last did? Its scene and camera, as _idle checks the main one's. */
+  _hudIdle({ scene, camera }, last) {
+    if (scene.revision !== last.hudRevision || scene.changes !== last.hudChanges) return false;
     if (scene.transforms._anyDirty || scene.transforms.movedPending || scene.animating) return false;
-    camera.update(this.rhi.width / this.rhi.height, this.rhi.width, this.rhi.height, this.rhi.pixelRatio);
-    return sameFloats(camera.view, last.overlayView) && camera.pixelSnap === last.overlaySnap
-      && sameFloats(camera.ambient, last.overlayAmbient);
+    camera.update(this.gpu.width / this.gpu.height, this.gpu.width, this.gpu.height, this.gpu.pixelRatio);
+    return sameFloats(camera.view, last.hudView) && camera.pixelSnap === last.hudSnap
+      && sameFloats(camera.ambient, last.hudAmbient);
   }
 
-  _remember(scene, camera, overlay = null) {
-    const last = this._drawn ?? { view: new Float32Array(16), projection: new Float32Array(16), morphs: [], overlayView: new Float32Array(16) };
+  _remember(scene, camera, hud = null) {
+    const last = this._drawn ?? { view: new Float32Array(16), projection: new Float32Array(16), morphs: [], hudView: new Float32Array(16) };
     last.scene = scene;
     last.camera = camera;
-    last.overlay = overlay;
-    if (overlay !== null) {
-      last.overlayRevision = overlay.scene.revision;
-      last.overlayChanges = overlay.scene.changes;
-      last.overlayView.set(overlay.camera.view);
-      last.overlaySnap = overlay.camera.pixelSnap;
-      last.overlayAmbient = Float32Array.from(overlay.camera.ambient);
+    last.hud = hud;
+    if (hud !== null) {
+      last.hudRevision = hud.scene.revision;
+      last.hudChanges = hud.scene.changes;
+      last.hudView.set(hud.camera.view);
+      last.hudSnap = hud.camera.pixelSnap;
+      last.hudAmbient = Float32Array.from(hud.camera.ambient);
     }
     last.revision = scene.revision;
     last.changes = scene.changes;
-    last.width = this.rhi.width;
-    last.height = this.rhi.height;
+    last.width = this.gpu.width;
+    last.height = this.gpu.height;
     last.view.set(camera.view);
     last.projection.set(camera.projection);
     last.morphs = scene.morphs.map((m) => Float32Array.from(m.weights));
@@ -735,30 +760,62 @@ export class Winding {
   _settings() {
     const r = this.renderer, p = r.post;
     return settingsSignature([
-      r.exposure, r.fog, r.dof, r.drawSkybox, r.shadowDistance, r.lightDistance, r.ao, r.debug.depthTest,
-      p.threshold, p.knee, p.filterRadius, p.strength, p.requestedLevels, p.antialias, p.grading,
+      r.exposure, r.fog, r.dof, r.skybox, r.shadowDistance, r.lightDistance, r.ao, r.oit, r.debug.depthTest,
+      p.threshold, p.knee, p.filterRadius, p.strength, p.levels, p.antialias, p.grading,
+      // The shadow settings a frame reads; the rest are fixed at creation.
+      r.shadows.lambda, r.shadows.casterExtent, r.shadows.normalBias,
     ]);
   }
 
   /**
-   * One frame, synchronously. Use this when you own the loop. `overlay` is
-   * as run() takes it.
+   * One frame, synchronously. Use this when you own the loop. `hud` is
+   * as run() takes it; `target`, one from createTarget, takes the frame in
+   * place of the canvas.
    */
-  renderFrame(scene, camera, { overlay = null } = {}) {
+  renderFrame(scene, camera, options = {}) {
     this._assertAlive('renderFrame');
-    this.renderer.render(scene, camera, this.jobs, null, this._overlay(overlay));
+    const { target = null } = options;
+    if (target !== null && !(target instanceof RenderTarget && target.rhi === this.gpu)) {
+      throw new Error("renderFrame: target must be one this engine's createTarget made");
+    }
+    if (target?.unloaded) throw new Error('renderFrame: that target was unloaded');
+    this.renderer.render(scene, camera, this.jobs, null, this._hud('renderFrame', options), target);
+    // What was drawn into a target is shown by the scenes that use it, which
+    // run's idle check cannot see: the next frame is drawn.
+    if (target !== null) this._drawn = null;
   }
 
-  /** An overlay with its camera filled in: the one given, or a plain Camera2D, kept. */
-  _overlay(overlay) {
-    if (overlay === null) return null;
-    if (!(overlay.scene instanceof Scene)) throw new Error('overlay: { scene, camera } needs a scene from createScene()');
-    if (overlay.camera !== undefined && overlay.camera.is2D !== true) throw new Error('overlay: its camera must be a Camera2D');
-    if (overlay.camera !== undefined) return overlay;
-    this._overlayCamera ??= new Camera2D();
+  /**
+   * A texture to draw a scene into, with renderFrame's `target`: a sprite
+   * shows it as it would a loaded image. `size` is [width, height] in its own
+   * pixels; `pixelated` shows it enlarged with hard edges, as loadTexture's
+   * does -- for pixel art drawn small and shown large.
+   *
+   *   const map = await engine.createTarget({ size: [256, 256] });
+   *   hud.addSprite({ texture: map, position: [16, 16], pivot: [0, 0] });
+   *   engine.renderFrame(world, overhead, { target: map });   // whenever it changes
+   */
+  async createTarget({ size, pixelated = false, label = 'target' } = {}) {
+    this._assertAlive('createTarget');
+    const most = this.gpu.limits.maxTextureDimension2D;
+    const [width, height] = size ?? [];
+    if (!(Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0 && width <= most && height <= most)) {
+      throw new Error(`createTarget: size must be [width, height], whole pixels from 1 to ${most}, got ${size}`);
+    }
+    return this.renderer.createTarget(width, height, { pixelated: pixelated === true, label });
+  }
+
+  /** A run or renderFrame's hud with its camera filled in: the one given, or a plain Camera2D, kept. */
+  _hud(caller, { hud = null, overlay }) {
+    if (overlay !== undefined) throw new Error(`${caller}: overlay is now hud, with the same { scene, camera }`);
+    if (hud === null) return null;
+    if (!(hud.scene instanceof Scene)) throw new Error(`${caller}: hud needs { scene, camera }, the scene from createScene()`);
+    if (hud.camera !== undefined && hud.camera.is2D !== true) throw new Error(`${caller}: the hud's camera must be a Camera2D`);
+    if (hud.camera !== undefined) return hud;
+    this._hudCamera ??= new Camera2D();
     // The same object each time for the same scene, so run's idle check can compare it.
-    if (this._overlayFilled?.scene !== overlay.scene) this._overlayFilled = { scene: overlay.scene, camera: this._overlayCamera };
-    return this._overlayFilled;
+    if (this._hudFilled?.scene !== hud.scene) this._hudFilled = { scene: hud.scene, camera: this._hudCamera };
+    return this._hudFilled;
   }
 
   get stats() {
@@ -766,14 +823,18 @@ export class Winding {
   }
 
   /**
-   * Capture a scene's reflection probes (scene.addReflectionProbe): six
-   * renders of the scene from each, prefiltered. All of them, or a list.
+   * Capture a scene's reflection probes (scene.addProbe): six
+   * renders of the scene from each, prefiltered. All of them, or a list of
+   * their nodes.
    * Recapture after what they see has changed. Async: the first capture
    * builds the pipelines that read probes.
    */
-  async captureReflectionProbes(scene, probes) {
-    this._assertAlive('captureReflectionProbes');
-    await this.renderer.captureReflectionProbes(scene, probes);
+  async captureProbes(scene, probes) {
+    this._assertAlive('captureProbes');
+    // Where each probe's node is now, before any is captured from there.
+    scene.update();
+    const records = probes === undefined ? undefined : probes.map((node) => scene._probe('captureProbes', node));
+    await this.renderer.captureProbes(scene, records);
   }
 
   /** Lines for the next frame: line, box, sphere, axes. See render/debug.js. */
@@ -784,9 +845,8 @@ export class Winding {
   /**
    * Release everything this engine owns.
    *
-   * The environment is destroyed only if this engine made it. `create` accepts
-   * one to SHARE, and tearing down a borrowed environment's cubemaps breaks
-   * whichever engine is still using them.
+   * The environment is destroyed only if this engine made it -- its default
+   * sky. One from loadEnvironment is the caller's, freed with unload.
    */
   destroy() {
     if (this._destroyed) return;   // the loop may already have done it
@@ -795,7 +855,7 @@ export class Winding {
     this.jobs.destroy();
     this.renderer.destroy();
     if (this._ownsEnvironment) this.environment.destroy();
-    this.rhi.destroy();
+    this.gpu.destroy();
   }
 }
 

@@ -47,10 +47,14 @@ export class Node {
    * down, a positive angle turns clockwise, as CSS rotate() does.
    */
   setAngle(radians) {
-    return this.setRotationAxisAngle(Z_AXIS, radians);
+    return this.setAxisAngle(Z_AXIS, radians);
   }
 
-  setScale(x, y = x, z = x) {
+  /**
+   * One number scales every axis. Two scale x and y and leave z at 1, as
+   * setPosition(x, y) leaves z at 0: a 2D node, so setScale(-1, 1) mirrors it.
+   */
+  setScale(x, y = x, z = arguments.length === 2 ? 1 : x) {
     this.scene.transforms.setScale(this.entity, x, y, z);
     return this;
   }
@@ -67,22 +71,23 @@ export class Node {
    * the parent's space, like every other setter here.
    *
    *   key.setDirection(-0.4, -0.7, -0.3);
+   *
+   * z is 0 unless given, so setDirection(x, y) aims across a 2D view.
    */
-  /** z is 0 unless given, so setDirection(x, y) aims across a 2D view. */
   setDirection(x, y, z = 0) {
     quatLookAlong(scratchQuat, [x, y, z]);
     this.scene.transforms.setRotation(this.entity, scratchQuat);
     return this;
   }
 
-  setRotationAxisAngle(axis, radians) {
+  setAxisAngle(axis, radians) {
     quatSetAxisAngle(scratchQuat, axis, radians);
     this.scene.transforms.setRotation(this.entity, scratchQuat);
     return this;
   }
 
   /** Radians, YXZ order. Converted to a quaternion immediately and not stored. */
-  setRotationEuler(yaw, pitch, roll = 0) {
+  setEuler(yaw, pitch, roll = 0) {
     quatFromEuler(scratchQuat, yaw, pitch, roll);
     // Normalizing costs almost nothing here and guards against a caller's
     // accumulated angles drifting the result off the unit sphere.
@@ -99,7 +104,7 @@ export class Node {
 
   /** The player for this instance. Only the Node scene.add() returned has one. */
   get animation() {
-    return this.scene.playerFor(this);
+    return this.scene._playerFor(this);
   }
 
   /** Clip names this instance can play. */
@@ -125,7 +130,7 @@ export class Node {
    * Reading it straight after a setPosition returns the OLD value: the world
    * matrix has not been recomposed yet.
    */
-  getWorldPosition(out) {
+  worldPosition(out) {
     const o = this.scene.transforms.worldOffset(this.entity);
     out[0] = this.scene.transforms.world[o + 12];
     out[1] = this.scene.transforms.world[o + 13];
@@ -146,21 +151,7 @@ export class Node {
     return this.scene.morphWeights(this.entity);
   }
 
-  /**
-   * Change this light's colour, brightness, reach or cone. Partial: only the
-   * fields given change. Returns false if this node is not a light.
-   *
-   *   lamp.setLight({ intensity: 30 });
-   *   torch.setLight({ color: colorFromHex('#ffb060'), outerAngle: 0.4 });
-   *
-   * Position and aim are not here, because they are not properties of the
-   * light -- they are where its node is. Move the node.
-   */
-  setLight(changes) {
-    return this.scene.setLight(this.entity, changes);
-  }
-
-  /** Nodes created for this entity's children, in the order the asset declared them. */
+  /** Nodes for this node's children, in the order they were made. */
   children() {
     return this.scene.childrenOf(this);
   }

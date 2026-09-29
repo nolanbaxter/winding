@@ -89,18 +89,58 @@ const now = () => (globalThis.performance?.now?.() ?? Date.now());
 /** Shader features a pipeline set compiles in; see PROBES and DECALS in pbr.js. */
 export const FEATURE_PROBES = 1;
 export const FEATURE_DECALS = 2;
+/** Ambient occlusion: opaque surfaces write their ambient term to a second target. */
+export const FEATURE_AO = 4;
+/** Order-independent transparency: blended surfaces draw into two targets and a resolve. */
+export const FEATURE_OIT = 8;
 
 function featureConstants(features) {
   return { PROBES: features & FEATURE_PROBES ? 1 : 0, DECALS: features & FEATURE_DECALS ? 1 : 0 };
 }
 
+/**
+ * A texture a scene is drawn into (engine.createTarget, renderFrame's
+ * `target`), which a sprite shows like any loaded image: a minimap, a screen
+ * in a room, split screen, pixel art drawn small and shown large. It holds
+ * colour as the canvas does -- sRGB, sampled back as linear light, as a
+ * loaded image is -- and, for a 3D view, its own depth and occlusion pyramid.
+ */
+export class RenderTarget {
+  constructor(rhi, width, height, { pixelated = false, label = 'target' } = {}, hzb = null) {
+    this.rhi = rhi;
+    this.width = width;
+    this.height = height;
+    this.pixelated = pixelated;
+    this.label = label;
+    this.texture = rhi.device.createTexture({
+      label, size: [width, height], format: rhi.surfaceFormat, viewFormats: [rhi.viewFormat],
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+    });
+    /** Read as linear light, and written by the 3D view's tonemap, as the canvas's is. */
+    this.view = this.texture.createView({ format: rhi.viewFormat });
+    /** Written by a 2D view, which encodes sRGB itself. */
+    this.plainView = this.texture.createView({ format: rhi.surfaceFormat });
+    this._depth = rhi.device.createTexture({
+      label: `${label}-depth`, size: [width, height], format: DEPTH_FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.depthView = this._depth.createView();
+    this.hzb = hzb;
+  }
+
+  destroy() {
+    this.texture.destroy();
+    this._depth.destroy();
+    this.hzb?.destroy();
+  }
+}
+
 export class Renderer {
   static async create(rhi, {
     maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
-    shadowDistance = null, post, gpuTiming = false, oit = false, ao = false,
+    shadowDistance = null, post, gpuTiming = false, oit = false, ao = false, fog = null, dof = null,
   } = {}) {
     const renderer = new Renderer(rhi, {
-      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao,
+      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao, fog, dof,
     });
     await renderer._init();
     return renderer;
@@ -219,7 +259,7 @@ export class Renderer {
      * with. Each frame draws from the set its scene needs; see PROBES in
      * pbr.js for what carrying the lookup costs a scene without probes.
      */
-    this._variantSets = new Map([[0, { forward: new Map(), oit: new Map(), ready: true }]]);
+    this._variantSets = new Map([[0, { features: 0, forward: new Map(), oit: new Map(), ready: true }]]);
     this._pipelineByVariant = this._variantSets.get(0).forward;
     this._oitPipelineByVariant = this._variantSets.get(0).oit;
     /**
@@ -229,6 +269,9 @@ export class Renderer {
      * for interpenetrating ones; this is approximate everywhere and needs no
      * order. Different tools, so this is a choice rather than a replacement --
      * architectural glass wants the sorted path, smoke and foliage want this.
+     *
+     * Switch it at any time: the first frame that asks builds its pipelines
+     * (FEATURE_OIT), drawing sorted until they are ready.
      */
     this.oit = oit;
     /**
@@ -237,8 +280,14 @@ export class Renderer {
      * the scene's bounding radius, found each frame -- the reach of a contact
      * shadow has to be picked by someone, and this picks it relative to the
      * scene so that a helmet and a cathedral both get one in proportion.
+     *
+     * Set it or null it at any time: the first frame that asks builds its
+     * pipelines (FEATURE_AO), drawing without it until they are ready.
      */
     this.ao = ao ? { radius: ao.radius ?? null } : null;
+    /** What this frame draws with: the features of the set it drew from. */
+    this._frameAO = false;
+    this._frameOIT = false;
     this._frameBindGroups = new WeakMap();
     this._clusterRevision = 0;
 
@@ -373,12 +422,13 @@ export class Renderer {
       compileShader(this.rhi.device, pbrShader(0), 'pbr.wgsl'),
       compileShader(this.rhi.device, pbrShader(this.materials.extensionSlots), 'pbr-extended.wgsl'),
     ]);
-    if (this.oit) await this._initOit();
     this.shadows = await ShadowMaps.create(
       this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout,
     );
-    this.skybox = await SkyboxPass.create(this.rhi, this.pipelines, this.ao ? AMBIENT_FORMAT : null);
-    if (this.ao) this.aoPass = await AmbientOcclusion.create(this.rhi, this.pipelines);
+    this.skyboxPass = await SkyboxPass.create(this.rhi, this.pipelines, null);
+    // Asked for at creation: ready for the first frame, as they always were.
+    const asked = (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
+    if (asked !== 0) await this._enableFeatures(asked);
     /**
      * Whether the environment is drawn as the background.
      *
@@ -389,10 +439,10 @@ export class Renderer {
      * colours to black would turn the background off too, and take the
      * lighting with it.
      */
-    this.drawSkybox = true;
+    this.skybox = true;
     /**
      * Fog, or null for none: { visibility, height, scaleHeight, albedo } --
-     * see fogCoefficients in fog.js. A plain field like drawSkybox, checked
+     * see fogCoefficients in fog.js. A plain field like skybox, checked
      * each frame it is used.
      */
     this.fog = this._fogOption;
@@ -469,11 +519,31 @@ export class Renderer {
   async _enableFeatures(features) {
     const existing = this._variantSets.get(features);
     if (existing) return existing.building;
-    const set = { forward: new Map(), oit: new Map(), ready: false };
+    const set = { features, forward: new Map(), oit: new Map(), ready: false };
     this._variantSets.set(features, set);
-    set.building = this._ensureVariantSet([...this._variantSets.get(0).forward.keys()], features)
+    set.building = this._featureResources(features)
+      .then(() => this._ensureVariantSet([...this._variantSets.get(0).forward.keys()], features))
       .then(() => { set.ready = true; });
     return set.building;
+  }
+
+  /**
+   * The passes a feature adds beside its pipelines, made once, the first time
+   * any set asks: the occlusion pass and a sky that fills the ambient target
+   * for AO, the resolve for OIT.
+   */
+  async _featureResources(features) {
+    if (features & FEATURE_AO) {
+      this._aoBuilding ??= Promise.all([
+        AmbientOcclusion.create(this.rhi, this.pipelines),
+        SkyboxPass.create(this.rhi, this.pipelines, AMBIENT_FORMAT),
+      ]).then(([pass, sky]) => { this.aoPass = pass; this.skyboxPassAO = sky; });
+      await this._aoBuilding;
+    }
+    if (features & FEATURE_OIT) {
+      this._oitBuilding ??= this._initOit();
+      await this._oitBuilding;
+    }
   }
 
   /** The largest ready set within these features: every one, or a subset, or none. */
@@ -506,7 +576,7 @@ export class Renderer {
       // With ambient occlusion on, opaque and masked surfaces also write their
       // ambient term, for the occlusion pass to take its share back out.
       // Blended ones draw after it, in a pass with the one target.
-      const ambient = this.ao !== null && (variant & 3) !== ALPHA_BLEND && (variant & VARIANT_TRANSMISSIVE) === 0;
+      const ambient = (features & FEATURE_AO) !== 0 && (variant & 3) !== ALPHA_BLEND && (variant & VARIANT_TRANSMISSIVE) === 0;
       const descriptor = {
         label: `pbr:v${variant}:f${features}`,
         ...this._shaderFor(variant),
@@ -524,7 +594,7 @@ export class Renderer {
       pending.push(descriptor);
     }
     await this.pipelines.warm(pending);
-    if (this.oit) await this._ensureOitVariants(wanted, features);
+    if (features & FEATURE_OIT) await this._ensureOitVariants(wanted, features);
   }
 
   /**
@@ -611,9 +681,9 @@ export class Renderer {
    * Every probe the scene has unless given a list. A load-time cost: six
    * scene renders and a prefilter each.
    */
-  async captureReflectionProbes(scene, probes = scene.reflectionProbes) {
+  async captureProbes(scene, probes = scene.reflectionProbes) {
     const environment = scene.environment;
-    if (!environment) throw new Error('captureReflectionProbes: the scene has no environment');
+    if (!environment) throw new Error('captureProbes: the scene has no environment');
     if (probes.length === 0) return;
     // Built before any frame reads probes, so render() never has to compile.
     await this._enableFeatures(FEATURE_PROBES);
@@ -748,16 +818,20 @@ export class Renderer {
   /**
    * `target`: render into { width, height, colorView, depthView } instead of
    * the canvas -- linear HDR, before post, and with no reflection probes read,
-   * since a probe capture is what renders into one. See captureReflectionProbes.
+   * since a probe capture is what renders into one. See captureProbes.
+   * `output`: a RenderTarget to draw the finished frame into, in place of the
+   * canvas (engine.renderFrame's `target`).
    */
-  render(scene, camera, jobs = null, target = null, overlay = null) {
-    if (camera.is2D === true) return this._render2D(scene, camera, jobs, overlay);
+  render(scene, camera, jobs = null, target = null, overlay = null, output = null) {
+    if (camera.is2D === true) return this._render2D(scene, camera, jobs, overlay, output);
     const rhi = this.rhi;
     const environment = scene.environment;
     if (!environment) throw new Error('Renderer: the scene has no environment');
-    const width = target?.width ?? rhi.width;
-    const height = target?.height ?? rhi.height;
-    const depthView = target?.depthView ?? rhi.depthView();
+    const width = target?.width ?? output?.width ?? rhi.width;
+    const height = target?.height ?? output?.height ?? rhi.height;
+    const depthView = target?.depthView ?? output?.depthView ?? rhi.depthView();
+    // A target keeps its own pyramid: sized to it, and never rebuilt for the canvas's.
+    const hzb = output?.hzb ?? this.hzb;
 
     // This scene's probes, uploaded again when its set of them changed. None
     // while capturing: the probe being captured would be read half-written.
@@ -766,9 +840,14 @@ export class Renderer {
     // read. A set not built yet starts building, and this frame draws
     // without what it adds.
     const decalCount = this.decals.prepare(scene);
-    const features = (probes !== null && probes.count > 0 ? FEATURE_PROBES : 0) | (decalCount > 0 ? FEATURE_DECALS : 0);
+    const features = (probes !== null && probes.count > 0 ? FEATURE_PROBES : 0) | (decalCount > 0 ? FEATURE_DECALS : 0)
+      | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
     if (!this._variantSets.has(features)) this._enableFeatures(features).catch((error) => console.error(error));
     const variantSet = this._readySet(features);
+    // AO and OIT this frame are what the set drawn from has built in: asked for
+    // and not yet ready, the frame draws without them.
+    this._frameAO = (variantSet.features & FEATURE_AO) !== 0;
+    this._frameOIT = (variantSet.features & FEATURE_OIT) !== 0;
     this._pipelineByVariant = variantSet.forward;
     this._oitPipelineByVariant = variantSet.oit;
     if (this.decals.revision !== this._decalRevision) {
@@ -855,12 +934,12 @@ export class Renderer {
     // is exactly the point: a readback would cost a pipeline stall.
     // The pyramid is sized to the surface, so it is rebuilt on resize. Doing it
     // before the cull means the bind group always points at a live texture.
-    this.hzb.resize(width, height, depthView);
-    this.gpu.bindHzb(this.hzb.view);
+    hzb.resize(width, height, depthView);
+    this.gpu.bindHzb(hzb.view);
     // Weights first: draw data records where each instance's slice begins,
     // and the gather below is what decides those offsets.
     this.morph.update(scene);
-    this.gpu.update(scene, this.frustum, this.hzb, camera.viewProjection, writeDrawData,
+    this.gpu.update(scene, this.frustum, hzb, camera.viewProjection, writeDrawData,
       this.skinPalette.offsets, this.morph, camera.projection[5]);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
     p?.mark('draw data');
@@ -952,7 +1031,7 @@ export class Renderer {
     scene.refreshLights();
     // After the lights, whose colours the fog scatters.
     packFog(this._fogData, 0, this.fog, scene.directionals, scene.directionalCount, DIRECTIONAL_FLOATS);
-    this.skybox.update(camera, 1.0, this.fog === null ? null : this._fogData);
+    this._sky().update(camera, 1.0, this.fog === null ? null : this._fogData);
     // Materials a clip changed since the last frame. Uploaded here rather than
     // by the player, because the scene does not own the GPU.
     // A changed factor can change an alpha-shaped shadow, which no box says.
@@ -1021,7 +1100,7 @@ export class Renderer {
     // each cascade's blur up to the next one's (directionalVisibility in pbr.js).
     this.frameData[38] = camera.near;
     this.frameData[39] = this.shadows.localSize;
-    if (this.ao !== null) {
+    if (this._frameAO) {
       const radius = this.ao.radius ?? (this._hasSceneBounds
         ? 0.5 * Math.hypot(this._sceneMax[0] - this._sceneMin[0], this._sceneMax[1] - this._sceneMin[1],
           this._sceneMax[2] - this._sceneMin[2]) / 32
@@ -1063,7 +1142,7 @@ export class Renderer {
     const graph = this.graph;
     graph.begin();
 
-    const surface = target === null ? graph.importTexture('surface', rhi.currentColorView()) : null;
+    const surface = target === null ? graph.importTexture('surface', output?.view ?? rhi.currentColorView()) : null;
     // Imported but NOT external: the device owns the memory, and nothing reads
     // it after the frame, so the graph is free to derive `discard` for it.
     const depth = graph.importTexture('depth', depthView, { external: false });
@@ -1130,7 +1209,7 @@ export class Renderer {
     });
 
     // The opaque passes' ambient term, when ambient occlusion is on.
-    const ambient = this.ao === null ? null : graph.createTexture('ambient', {
+    const ambient = !this._frameAO ? null : graph.createTexture('ambient', {
       width,
       height,
       format: AMBIENT_FORMAT,
@@ -1153,10 +1232,10 @@ export class Renderer {
     // Built from the early depth and consumed later in the SAME frame, which
     // is the whole difference: the occlusion test is no longer a frame behind.
     const hzbLevels = [];
-    for (let level = 0; level < this.hzb.levelCount; level++) {
-      hzbLevels.push(graph.importTexture(`hzb${level}`, this.hzb.levelViews[level]));
+    for (let level = 0; level < hzb.levelCount; level++) {
+      hzbLevels.push(graph.importTexture(`hzb${level}`, hzb.levelViews[level]));
     }
-    this.hzb.addPasses(graph, depth, hzbLevels);
+    hzb.addPasses(graph, depth, hzbLevels);
 
     this.gpu.addCullPass(graph, {
       phase: 1,
@@ -1175,7 +1254,7 @@ export class Renderer {
     const sprites = this.sprites.prepare(scene, camera, environment, width, height, anyMoved);
     // Particles likewise; and during a probe capture they are seen, not moved.
     const emitters = this.particles.prepare(scene, camera, environment, target !== null);
-    this._blendInLate = !this.oit && ambient === null && !transmissive && sprites === 0 && emitters === 0;
+    this._blendInLate = !this._frameOIT && ambient === null && !transmissive && sprites === 0 && emitters === 0;
 
     // LATE. Whatever the fresh pyramid says is visible and was not drawn above,
     // then the blended geometry, which has to follow every opaque draw. No
@@ -1214,7 +1293,7 @@ export class Renderer {
       });
     }
 
-    if (!this.oit && !this._blendInLate) {
+    if (!this._frameOIT && !this._blendInLate) {
       graph.addPass({
         name: 'forward:blend',
         reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts],
@@ -1227,7 +1306,7 @@ export class Renderer {
     // OIT, when it is on. Blended geometry skipped the pass above, so it is
     // drawn here into its own two targets in whatever order it comes -- that
     // is the point -- and composited over the scene by the resolve.
-    if (this.oit) {
+    if (this._frameOIT) {
       const accum = graph.createTexture('oit-accum', {
         width,
         height,
@@ -1267,7 +1346,8 @@ export class Renderer {
       // Depth of field last in HDR, on everything drawn, before bloom and the tonemap.
       const lensed = this.dof ? this.dofPass.addPasses(graph, { sceneColor, depth, camera, width, height, dof: this.dof }) : sceneColor;
       this.post.addPasses(graph, { sceneColor: lensed, surface, width, height, exposure: this.exposure });
-      this.debug.addPass(graph, { surface, depth, viewProjection: camera.viewProjection });
+      // Debug lines are the canvas's.
+      if (output === null) this.debug.addPass(graph, { surface, depth, viewProjection: camera.viewProjection });
     }
 
     graph.compile();
@@ -1276,7 +1356,7 @@ export class Renderer {
 
     const encoder = rhi.device.createCommandEncoder({ label: 'frame' });
     graph.execute(encoder);
-    if (overlay !== null && target === null) this._drawOverlay(encoder, overlay, jobs);
+    if (overlay !== null && target === null) this._drawOverlay(encoder, overlay, jobs, output);
 
     // After the last pass is recorded and before the encoder is closed: this
     // only copies queries the GPU will have written by the time it runs.
@@ -1290,7 +1370,7 @@ export class Renderer {
     this.timing.total = tEnd - tFrame;
     p?.mark('encode');
     rhi.queue.submit([encoder.finish()]);
-    if (target === null) this.debug.clear();
+    if (target === null && output === null) this.debug.clear();
     // After the submit, never before: the command buffer above writes the
     // buffer this maps, and a buffer with a map pending cannot be written.
     this.gpuTiming.readback();
@@ -1303,41 +1383,62 @@ export class Renderer {
    * order, onto the canvas and nothing else -- none of the 3D passes run.
    * See render/view2d.js.
    */
-  _render2D(scene, camera, jobs, overlay) {
+  _render2D(scene, camera, jobs, overlay, output = null) {
     const rhi = this.rhi;
     const p = this.profiler;
     p?.frameStart();
-    this.stats.recomposed = this._prepare2D(this.view2d, scene, camera, jobs);
-    this.stats.sprites2D = this.view2d.count;
-    this.stats.sprites2DWritten = this.view2d.written;
-    this.stats.tiles2DWritten = this.view2d.tilesWritten;
+    const view = this._view2D(scene);
+    this.stats.recomposed = this._prepare2D(view, scene, camera, jobs, output);
+    this.stats.sprites2D = view.count;
+    this.stats.sprites2DWritten = view.written;
+    this.stats.tiles2DWritten = view.tilesWritten;
     this.stats.emitters = this.particles.prepare(scene, camera, null);
     p?.mark('2d');
     const graph = this.graph;
     graph.begin();
-    const surface = graph.importTexture('surface', rhi.currentColorView({ linear: false }));
+    const surface = graph.importTexture('surface', output?.plainView ?? rhi.currentColorView({ linear: false }));
     const particles = this.particles.addSimulation(graph);
-    this.view2d.addPass(graph, { surface, background: camera.background, particles });
-    this.debug.addPass(graph, { surface, depth: null, viewProjection: camera.viewProjection });
+    view.addPass(graph, { surface, background: camera.background, particles });
+    if (output === null) this.debug.addPass(graph, { surface, depth: null, viewProjection: camera.viewProjection });
     graph.compile();
     p?.mark('graph build');
     const encoder = rhi.device.createCommandEncoder({ label: 'frame-2d' });
     graph.execute(encoder);
-    if (overlay !== null) this._drawOverlay(encoder, overlay, jobs);
+    if (overlay !== null) this._drawOverlay(encoder, overlay, jobs, output);
     this.gpuTiming.resolve(encoder);
     p?.mark('encode');
     rhi.queue.submit([encoder.finish()]);
-    this.debug.clear();
+    if (output === null) this.debug.clear();
     this.gpuTiming.readback();
     p?.mark('submit');
     p?.frameEnd();
   }
 
-  /** A 2D scene's transforms and camera brought up to date, and its slots. Returns what scene.update does. */
-  _prepare2D(view, scene, camera, jobs) {
-    const { width, height } = this.rhi;
+  /**
+   * The 2D view that draws `scene`: one a scene, each keeping its own slots,
+   * so a game and the minimap drawn into a target don't rebuild each other's
+   * lists every frame. A dropped scene's goes with it.
+   */
+  _view2D(scene) {
+    this._views2D ??= new WeakMap();
+    let view = this._views2D.get(scene);
+    if (view === undefined) {
+      view = this.view2d._scene === null || this.view2d._scene === scene ? this.view2d : this.view2d.another(this.particles);
+      this._views2D.set(scene, view);
+    }
+    return view;
+  }
+
+  /**
+   * A 2D scene's transforms and camera brought up to date, and its slots, for
+   * the canvas or a target. Returns what scene.update does.
+   */
+  _prepare2D(view, scene, camera, jobs, output = null) {
+    const { width, height } = output ?? this.rhi;
+    // A target's pixels are its own: one to a unit at zoom 1.
+    const pixelRatio = output === null ? this.rhi.pixelRatio : 1;
     const recomposed = scene.update(jobs);
-    camera.update(width / height, width, height, this.rhi.pixelRatio);
+    camera.update(width / height, width, height, pixelRatio);
     const transforms = scene.transforms;
     const moved = transforms.movedPending ? transforms.moved : null;
     view.prepare(scene, camera, width, height, moved);
@@ -1353,16 +1454,21 @@ export class Renderer {
    * tonemap, bloom and antialiasing, so its colours land exactly and its text
    * stays crisp. Its own View2D, so a 2D game and its HUD each keep their slots.
    */
-  _drawOverlay(encoder, { scene, camera }, jobs) {
-    this._prepare2D(this.overlay2d, scene, camera, jobs);
-    this.stats.overlay2D = this.overlay2d.count;
-    this.stats.overlay2DWritten = this.overlay2d.written;
+  _drawOverlay(encoder, { scene, camera }, jobs, output = null) {
+    this._prepare2D(this.overlay2d, scene, camera, jobs, output);
+    this.stats.hudSprites = this.overlay2d.count;
+    this.stats.hudSpritesWritten = this.overlay2d.written;
     const pass = encoder.beginRenderPass({
       label: 'overlay',
-      colorAttachments: [{ view: this.rhi.currentColorView({ linear: false }), loadOp: 'load', storeOp: 'store' }],
+      colorAttachments: [{ view: output?.plainView ?? this.rhi.currentColorView({ linear: false }), loadOp: 'load', storeOp: 'store' }],
     });
     this.overlay2d._encode(pass);
     pass.end();
+  }
+
+  /** A target `width` x `height` to draw into: see RenderTarget. */
+  async createTarget(width, height, options) {
+    return new RenderTarget(this.rhi, width, height, options, await HierarchicalDepth.create(this.rhi, this.pipelines));
   }
 
   /**
@@ -1389,7 +1495,8 @@ export class Renderer {
     this.directionalBuffer.destroy();
     this.skinPalette.destroy();
     this.morph.destroy();
-    this.skybox.destroy();
+    this.skyboxPass.destroy();
+    this.skyboxPassAO?.destroy();
     this.opaqueCopy.destroy();
     this.debug.destroy();
     this.sprites.destroy();
@@ -1482,15 +1589,20 @@ export class Renderer {
    * The batch loop is identical in both; only which half of the indirect and
    * visible lists it reads differs, and that is one offset.
    */
+  /** The sky this frame draws: with AO, the one that also fills the ambient target. */
+  _sky() {
+    return this._frameAO ? this.skyboxPassAO : this.skyboxPass;
+  }
+
   _encodeForward(pass, phase) {
     const scene = this._frameScene;
     const environment = this._frameEnvironment;
 
-    if (phase === 0 && this.drawSkybox) {
+    if (phase === 0 && this.skybox) {
       // The skybox binds its own layout at group 0, so the frame group has to
       // be set AFTER it -- a bind group set at an index is overwritten
       // regardless of which pipeline layout put it there.
-      this.skybox.draw(pass, environment);
+      this._sky().draw(pass, environment);
     }
     pass.setBindGroup(GROUP_FRAME, this._frameBindGroup(environment));
     this.pipelineLayout.bindEmptyGroups(pass);

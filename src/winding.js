@@ -1,7 +1,7 @@
 // Winding -- a WebGPU renderer.
 //
 // Everything Tier 3 needs, in one import. Lower tiers are reachable from their
-// own modules, and `engine.rhi` / `engine.renderer` get you there without
+// own modules, and `engine.gpu` / `engine.renderer` get you there without
 // leaving this one. Never a wall, always a floor.
 
 export { Winding } from './app/engine.js';
@@ -17,7 +17,7 @@ export { Environment } from './render/ibl.js';
 export { parseHDR } from './render/hdr.js';
 
 // Math is part of the public surface, not an engine internal. Tier 3 already
-// demands it: getWorldPosition(out) wants a vec3, setRotationAxisAngle wants an
+// demands it: worldPosition(out) wants a vec3, setAxisAngle wants an
 // axis, camera.position and camera.target are vectors you write into.
 // Leaving it out of this barrel meant reaching past it into src/core/math.
 export * from './core/math/vec3.js';

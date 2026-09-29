@@ -177,7 +177,7 @@ test('a spot aims wherever its parent turns', () => {
   const torch = scene.addLight({ direction: [0, 0, -1], parent: head });
 
   // Quarter turn to the left about +Y: -Z swings round onto -X.
-  head.setRotationAxisAngle([0, 1, 0], Math.PI / 2);
+  head.setAxisAngle([0, 1, 0], Math.PI / 2);
   settle(scene);
 
   const o = slot(scene, torch);
@@ -199,7 +199,7 @@ test('setLight changes only what it is given, and only that light', () => {
   const first = scene.addLight({ position: [0, 0, 0], radius: 5, color: [1, 1, 1], intensity: 1 });
   const second = scene.addLight({ position: [9, 9, 9], radius: 5, color: [1, 1, 1], intensity: 1 });
 
-  assert.equal(scene.setLight(second.entity, { color: [0.1, 0.2, 0.3], intensity: 4 }), true);
+  scene.setLight(second, { color: [0.1, 0.2, 0.3], intensity: 4 });
 
   const o = slot(scene, second);
   assert.equal(scene.lights[o + 3], 5, 'radius untouched');
@@ -212,7 +212,7 @@ test('setLight changes only what it is given, and only that light', () => {
 test('setLight on something that is not a light says so', () => {
   const scene = new Scene({ capacity: 16 });
   const plain = scene.createNode();
-  assert.equal(scene.setLight(plain.entity, { intensity: 9 }), false);
+  assert.throws(() => scene.setLight(plain, { intensity: 9 }), /not a light/);
 });
 
 test('removing a light leaves every other light reachable by its handle', () => {

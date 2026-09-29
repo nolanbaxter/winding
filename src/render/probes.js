@@ -23,7 +23,7 @@ import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { sharedPipelines } from '../rhi/pipeline.js';
 import { grownCapacity } from '../core/grow.js';
 
-/** One probe for the shader: box min (w = blend), box max (w = layer), position. */
+/** One probe for the shader: box min (w = fade), box max (w = layer), position. */
 export const PROBE_FLOATS = 12;
 
 /**
@@ -40,7 +40,7 @@ export function packProbes(probes, layers) {
   captured.forEach((p, k) => {
     const o = k * PROBE_FLOATS;
     out.set(p.min, o);
-    out[o + 3] = p.blend;
+    out[o + 3] = p.fade;
     out.set(p.max, o + 4);
     out[o + 7] = layers.get(p);
     out.set(p.position, o + 8);

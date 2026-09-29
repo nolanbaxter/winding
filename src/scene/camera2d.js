@@ -17,27 +17,30 @@ import { mat4Create } from '../core/math/mat4.js';
 
 export class Camera2D {
   constructor({
-    position = [0, 0], zoom = 1, rotation = 0, anchor = [0, 0],
-    background = [0, 0, 0, 1], pixelSnap = false, ambient = [0, 0, 0],
+    position = [0, 0], zoom = 1, angle = 0, pivot = [0, 0],
+    background = [0, 0, 0, 1], pixelSnap = false, ambient = [0, 0, 0], anchor, rotation,
   } = {}) {
+    if (rotation !== undefined) throw new Error('Camera2D: rotation is now angle, in the same radians, as node.setAngle takes');
+    if (anchor !== undefined) throw new Error('Camera2D: anchor is now pivot -- the point of the view placed at position, as a sprite\'s pivot is');
     /**
-     * The world point at `anchor` of the view. With the default anchor that
-     * is the view's top-left, as a canvas's scroll is; with [0.5, 0.5] it is
-     * the centre, which is what a camera following something wants.
+     * The world point at `pivot` of the view. With the default pivot that is
+     * the view's top-left, as a canvas's scroll is; with [0.5, 0.5] it is the
+     * centre, which is what a camera following something wants.
      */
     this.position = Float32Array.from(position);
-    /** Where in the view `position` sits: [0, 0] top-left, [1, 1] bottom-right. */
-    this.anchor = Float32Array.from(anchor);
+    /** Where in the view `position` sits: [0, 0] top-left, [1, 1] bottom-right, as a sprite's pivot. */
+    this.pivot = Float32Array.from(pivot);
     /** Screen pixels per world unit. 2 draws everything twice as large. */
     this.zoom = zoom;
     /** Radians, turning the view clockwise about its centre. */
-    this.rotation = rotation;
+    this.angle = angle;
     /** What the view is cleared to: sRGB, 0..1, as a CSS colour. */
     this.background = Float32Array.from(background);
     /**
-     * Put every sprite's pivot on a whole screen pixel, and the view's own
-     * offset with it. Pixel art then never lands between pixels, where the
-     * nearest texel flickers as it moves. For an unrotated view.
+     * For pixel art: put every sprite's corner on a whole screen pixel, the
+     * view's own offset with it, and make a unit a whole number of screen
+     * pixels -- zoom times the pixel ratio, rounded. On a 1.5x screen a texel
+     * is then 2 pixels, not 1 and 2 by turns. For an unrotated view.
      */
     this.pixelSnap = pixelSnap;
     /**
@@ -70,13 +73,16 @@ export class Camera2D {
     this.width = width;
     this.height = height;
     this.pixelRatio = pixelRatio;
-    // Canvas pixels per world unit.
-    const z = this.zoom * pixelRatio;
-    const c = Math.cos(this.rotation), s = Math.sin(this.rotation);
-    // The world point at the centre of the view.
-    const cx = this.position[0] + (0.5 - this.anchor[0]) * width / z;
-    const cy = this.position[1] + (0.5 - this.anchor[1]) * height / z;
-    // screen = R(-rotation) (world - centre) zoom + size / 2: the view turns
+    // Canvas pixels per world unit: a whole number of them when snapping, so
+    // every texel of pixel art is the same size.
+    const z = this.pixelSnap ? Math.max(1, Math.round(this.zoom * pixelRatio)) : this.zoom * pixelRatio;
+    const c = Math.cos(this.angle), s = Math.sin(this.angle);
+    // The world point at the centre of the view: `position` is at the pivot,
+    // and the way from the pivot to the centre turns with the view.
+    const ox = (0.5 - this.pivot[0]) * width / z, oy = (0.5 - this.pivot[1]) * height / z;
+    const cx = this.position[0] + c * ox - s * oy;
+    const cy = this.position[1] + s * ox + c * oy;
+    // screen = R(-angle) (world - centre) zoom + size / 2: the view turns
     // clockwise, so the world on screen turns the other way.
     let tx = width / 2 - z * (c * cx + s * cy);
     let ty = height / 2 - z * (-s * cx + c * cy);

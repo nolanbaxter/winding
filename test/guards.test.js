@@ -404,6 +404,13 @@ test('debug lines: what each shape writes, growth, and a frame with none adds no
     assert.ok(Math.abs(r - 2) < 1e-5, 'every point on the sphere');
   }
 
+  // Two numbers are a point at z 0, for sphere and axes as for line.
+  debug.clear();
+  debug.sphere([1, 1], 2).axes([3, 4]);
+  const h32 = new Float32Array(debug._floats.buffer, 0, debug.count * 4);
+  for (let v = 0; v < debug.count; v++) assert.ok(Number.isFinite(h32[v * 4 + 2]), 'no NaN z');
+  assert.deepEqual([...h32.subarray(h32.length - 4, h32.length - 1)], [3, 4, 1], 'the z axis runs from z 0');
+
   // Past the first allocation, and the earlier lines survive the move.
   debug.clear();
   debug.line([7, 8, 9], [0, 0, 0], [0, 1, 0]);

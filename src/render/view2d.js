@@ -17,14 +17,17 @@
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer, storageCapacity } from '../rhi/buffer.js';
-import { clampSampler, pixelatedSampler } from '../rhi/texture.js';
+import { clampSampler, pixelatedSampler, spriteSampler } from '../rhi/texture.js';
 import { grownCapacity } from '../core/grow.js';
 import { handleIndex } from '../core/handle.js';
-import { spriteRect } from '../scene/scene.js';
+import { spriteRect, frame2D, shapeRadius, repeats, BLENDS } from '../scene/scene.js';
+import { BLEND_STATE } from './sprites.js';
 
-/** position, angle, flags; size, pivot; rect; colour; per kind; outline colour. */
-export const SPRITE2D_FLOATS = 24;
+/** position, angle, flags; size, pivot; rect; colour; per kind; per kind; a glyph's outline colour. */
+export const SPRITE2D_FLOATS = 28;
 const SPRITE2D_BYTES = SPRITE2D_FLOATS * 4;
+/** Slots between two changed spans that cost less to upload than a second call: 512 bytes' worth. */
+const MERGE_GAP = Math.floor(512 / SPRITE2D_BYTES);
 const FLAG_SDF = 1;
 const FLAG_CUTOUT = 2;
 const FLAG_TILEMAP = 4;
@@ -33,6 +36,14 @@ const FLAG_ELLIPSE = 16;
 const FLAG_PATH = 32;
 const FLAG_CLOSED = 64;
 const FLAG_LIT = 128;
+const FLAG_CHUNK = 256;
+/**
+ * Segments in each piece of a long open path. Each piece is its own quad, as
+ * tight as its segments, and tests only its own and its neighbours': a line
+ * across the screen covered the screen with one quad and tested every
+ * segment at every pixel of it.
+ */
+export const PATH_CHUNK = 16;
 
 const SHADER = /* wgsl */ `
 struct View {
@@ -49,7 +60,8 @@ struct Sprite {
   // shape's half width, half height, corner radius and outline width; a
   // path's first point, point count, line width and the node's scale.
   e     : vec4<f32>,
-  f     : vec4<f32>,   // a shape's or path's outline colour; a tilemap's margin and spacing
+  f     : vec4<f32>,   // a shape's or path's outline colour; a tilemap's margin and spacing; an image's rect
+  g     : vec4<f32>,   // a glyph's outline colour
 };
 
 @group(0) @binding(0) var<uniform> view : View;
@@ -63,7 +75,17 @@ struct Sprite {
 // A tilemap's ids, one texel a tile (scene.addTilemap).
 @group(1) @binding(2) var tiles : texture_2d<u32>;
 
-override ADDITIVE : bool = false;
+// How it meets what is under it (render/sprites.js, BLEND_STATE): 0 over it,
+// 1 adding light, 3 multiplying, 4 screening.
+override BLEND : u32 = 0u;
+
+// A colour, straight, as its blend state takes it: premultiplied but for plain
+// alpha, and adding no coverage when it adds light.
+fn blended(c : vec4<f32>) -> vec4<f32> {
+  if (BLEND == 1u) { return vec4<f32>(c.rgb * c.a, 0.0); }
+  if (BLEND >= 3u) { return vec4<f32>(c.rgb * c.a, c.a); }
+  return c;
+}
 
 struct Out {
   @builtin(position) clip : vec4<f32>,
@@ -73,6 +95,11 @@ struct Out {
   @location(3) @interpolate(flat) extra : vec4<f32>,
   @location(4) @interpolate(flat) f : vec4<f32>,   // as the slot's f
   @location(5) world : vec2<f32>,
+  // Where in its quad, 0..1, and the quad's size in screen pixels: a sprite's
+  // distance to its own edge, for smoothing it.
+  @location(6) edge : vec2<f32>,
+  @location(7) @interpolate(flat) span : vec2<f32>,
+  @location(8) @interpolate(flat) g : vec4<f32>,   // as the slot's g
 };
 
 @vertex
@@ -84,17 +111,26 @@ fn vs(@builtin(vertex_index) index : u32, @builtin(instance_index) slot : u32) -
   let s = sprites[slot];
   let shape = (u32(s.a.w) & ${FLAG_SHAPE}u) != 0u;
   let path = (u32(s.a.w) & ${FLAG_PATH}u) != 0u;
+  // A plain sprite: not a glyph (its edge is in its distance field), a
+  // tilemap, or a cutout (hard-edged on purpose).
+  let sprite = (u32(s.a.w) & ${FLAG_SDF | FLAG_TILEMAP | FLAG_CUTOUT | FLAG_SHAPE | FLAG_PATH}u) == 0u;
+  let span = abs(s.b.xy) * length(view.view[0].xy);
   var corner = corners[index];
-  // A shape's or path's quad reaches a screen pixel past its edge, for the edge's smoothing.
-  if (shape || path) { corner += (corner * 2.0 - 1.0) / max(abs(s.b.xy) * length(view.view[0].xy), vec2<f32>(1e-5)); }
+  // The quad reaches a screen pixel past its edge, for the edge's smoothing.
+  if (shape || path || sprite) { corner += (corner * 2.0 - 1.0) / max(span, vec2<f32>(1e-5)); }
   // y points down, so this turns clockwise on screen, as CSS rotate() does.
   let c = cos(s.a.z);
   let n = sin(s.a.z);
   let local = (corner - s.b.zw) * s.b.xy;
   let turned = vec2<f32>(c * local.x - n * local.y, n * local.x + c * local.y);
-  var pivot = (view.view * vec4<f32>(s.a.xy, 0.0, 1.0)).xy;
-  if (view.viewport.z > 0.5) { pivot = round(pivot); }
-  let screen = pivot + (view.view * vec4<f32>(turned, 0.0, 0.0)).xy;
+  // From the quad's first corner, which snapping puts on a whole pixel: so a
+  // sprite a whole number of pixels across has every edge on one, and every
+  // pixel samples the middle of a texel, whatever its pivot.
+  let first = -s.b.zw * s.b.xy;
+  let along = corner * s.b.xy;
+  var origin = (view.view * vec4<f32>(s.a.xy + vec2<f32>(c * first.x - n * first.y, n * first.x + c * first.y), 0.0, 1.0)).xy;
+  if (view.viewport.z > 0.5) { origin = round(origin); }
+  let screen = origin + (view.view * vec4<f32>(c * along.x - n * along.y, n * along.x + c * along.y, 0.0, 0.0)).xy;
   var out : Out;
   out.clip = vec4<f32>(screen.x / view.viewport.x * 2.0 - 1.0, 1.0 - screen.y / view.viewport.y * 2.0, 0.0, 1.0);
   // A shape's uv is where it is from its centre, in its own units.
@@ -104,6 +140,9 @@ fn vs(@builtin(vertex_index) index : u32, @builtin(instance_index) slot : u32) -
   out.extra = s.e;
   out.f = s.f;
   out.world = s.a.xy + turned;
+  out.edge = corner;
+  out.g = s.g;
+  out.span = select(vec2<f32>(0.0), span, sprite);
   return out;
 }
 
@@ -174,6 +213,22 @@ fn shapeCover(v : Out) -> vec4<f32> {
 // centred on it, so round at every join and end.
 // ponytail: every segment, every pixel of its box -- fine for hundreds of
 // points; triangulate on the CPU for outlines of thousands.
+// The squared distance from p to segment a-b.
+fn toSegment(p : vec2<f32>, a : vec2<f32>, b : vec2<f32>) -> f32 {
+  let e = b - a;
+  let w = p - a;
+  let d = w - e * clamp(dot(w, e) / max(dot(e, e), 1e-12), 0.0, 1.0);
+  return dot(d, d);
+}
+
+// The nearest of segments first..last-1 of the packed points (segment i runs
+// from point i to i + 1), squared.
+fn nearestOf(p : vec2<f32>, first : u32, last : u32) -> f32 {
+  var nearest = 1e30;
+  for (var i = first; i < last; i++) { nearest = min(nearest, toSegment(p, points[i], points[i + 1u])); }
+  return nearest;
+}
+
 fn pathCover(v : Out) -> vec4<f32> {
   let p = v.uv;
   let start = u32(v.extra.x);
@@ -184,10 +239,9 @@ fn pathCover(v : Out) -> vec4<f32> {
   for (var i = 0u; i < select(count - 1u, count, closed); i++) {
     let a = points[start + i];
     let b = points[start + (i + 1u) % count];
+    nearest = min(nearest, toSegment(p, a, b));
     let e = b - a;
     let w = p - a;
-    let t = clamp(dot(w, e) / max(dot(e, e), 1e-12), 0.0, 1.0);
-    nearest = min(nearest, length(w - e * t));
     let side = e.x * w.y - e.y * w.x;
     if (a.y <= p.y) {
       if (b.y > p.y && side > 0.0) { winding += 1; }
@@ -195,11 +249,23 @@ fn pathCover(v : Out) -> vec4<f32> {
       winding -= 1;
     }
   }
+  if ((v.flags & ${FLAG_CHUNK}u) != 0u) {
+    // A piece of a long open path (PATH_CHUNK): a pixel nearer a neighbour's
+    // segments is the neighbour's to draw -- the one before, on a tie -- so
+    // no pixel of a see-through line is blended twice where two pieces meet.
+    let pathFirst = u32(v.color.x);
+    let pathLast = pathFirst + u32(v.color.y) - 1u;
+    let before = nearestOf(p, max(start, pathFirst + ${PATH_CHUNK}u) - ${PATH_CHUNK}u, start);
+    let after = nearestOf(p, start + count - 1u, min(start + count - 1u + ${PATH_CHUNK}u, pathLast));
+    if (before <= nearest || after < nearest) { discard; }
+  }
+  // One square root, not one a segment.
+  nearest = sqrt(nearest);
   // A screen pixel, in the path's own units: the view's scale and the node's.
   let pixel = 1.0 / (length(view.view[0].xy) * v.extra.w);
   let fill = select(0.0, clamp(0.5 - select(nearest, -nearest, winding != 0) / pixel, 0.0, 1.0), closed);
   let line = select(0.0, clamp(0.5 - (nearest - v.extra.z * 0.5) / pixel, 0.0, 1.0), v.extra.z > 0.0);
-  let fa = v.color.a * fill;
+  let fa = select(v.color.a, 0.0, (v.flags & ${FLAG_CHUNK}u) != 0u) * fill;
   let sa = v.f.a * line;
   return vec4<f32>(v.f.rgb * sa + v.color.rgb * fa * (1.0 - sa), sa + fa * (1.0 - sa));
 }
@@ -211,26 +277,43 @@ fn fsShape(v : Out) -> @location(0) vec4<f32> {
   if ((v.flags & ${FLAG_PATH}u) != 0u) { cover = pathCover(v); } else { cover = shapeCover(v); }
   if (cover.a <= 0.0) { discard; }
   let colour = lit(cover.rgb / cover.a, v.flags, v.world);
-  if (ADDITIVE) { return vec4<f32>(colour * cover.a, 0.0); }
-  return vec4<f32>(colour, cover.a);
+  return blended(vec4<f32>(colour, cover.a));
 }
 
 @fragment
 fn fs(v : Out) -> @location(0) vec4<f32> {
-  let texel = textureSample(image, imageSampler, v.uv);
+  // Half a texel inside its rect (f: its corners), so filtering never reaches
+  // the next frame of a sheet or the next glyph of an atlas.
+  let half = 0.5 / vec2<f32>(textureDimensions(image));
+  let texel = textureSample(image, imageSampler, clamp(v.uv, v.f.xy + half, max(v.f.zw - half, v.f.xy + half)));
   // A glyph's alpha is a distance field (render/text.js): its edge is at 0.5,
   // one screen pixel wide at any size.
-  let edge = clamp((texel.a - 0.5) / max(fwidth(texel.a), 1e-5) + 0.5, 0.0, 1.0);
+  // How far the field moves across a pixel. Out here, not in a branch: a
+  // derivative needs every pixel around it to be running this line.
+  let perPixel = max(fwidth(texel.a), 1e-5);
+  let edge = clamp((texel.a - 0.5) / perPixel + 0.5, 0.0, 1.0);
   // A colour texture is sampled as linear light; back to the sRGB it was
   // authored in, which is what this view blends.
-  var colour = select(vec4<f32>(encode(texel.rgb), texel.a), vec4<f32>(1.0, 1.0, 1.0, edge), (v.flags & ${FLAG_SDF}u) != 0u) * v.color;
+  var colour = vec4<f32>(encode(texel.rgb), texel.a) * v.color;
+  if ((v.flags & ${FLAG_SDF}u) != 0u) {
+    // A glyph's outline runs from its edge out to where the field reaches
+    // extra.y, 0.5 without one: the fill over it, premultiplied.
+    let outer = clamp((texel.a - v.extra.y) / perPixel + 0.5, 0.0, 1.0);
+    let ring = max(outer - edge, 0.0);
+    let a = v.color.a * edge + v.g.a * ring;
+    colour = vec4<f32>((v.color.rgb * v.color.a * edge + v.g.rgb * v.g.a * ring) / max(a, 1e-6), a);
+  }
   if ((v.flags & ${FLAG_CUTOUT}u) != 0u) {
     if (colour.a < v.extra.x) { discard; }
     colour.a = 1.0;
   }
-  colour = vec4<f32>(lit(colour.rgb, v.flags, v.world), colour.a);
-  if (ADDITIVE) { return vec4<f32>(colour.rgb * colour.a, 0.0); }
-  return colour;
+  // A plain sprite's edge, smoothed over a screen pixel as a shape's is: a
+  // turned sprite is not jagged, and one on whole pixels is unchanged.
+  if (v.span.x > 0.0) {
+    let inside = min(v.edge, 1.0 - v.edge) * v.span;
+    colour.a *= clamp(min(inside.x, inside.y) + 0.5, 0.0, 1.0);
+  }
+  return blended(vec4<f32>(lit(colour.rgb, v.flags, v.world), colour.a));
 }
 
 // A tilemap: uv counts tiles, and each pixel looks up the tile it is in.
@@ -259,9 +342,20 @@ fn fsTilemap(v : Out) -> @location(0) vec4<f32> {
   let sampled = textureSampleLevel(image, imageSampler, texel / vec2<f32>(textureDimensions(image)), 0.0);
   if (number == 0u || any(cell < vec2<i32>(0)) || any(cell >= map)) { discard; }
   let colour = vec4<f32>(encode(sampled.rgb), sampled.a) * v.color;
-  return vec4<f32>(lit(colour.rgb, v.flags, v.world), colour.a);
+  return blended(vec4<f32>(lit(colour.rgb, v.flags, v.world), colour.a));
 }
 `;
+
+/**
+ * The pipeline an item draws with, by what it is -- an image (a sprite or a
+ * glyph), a shape or path, or a tilemap -- and its blend: 'alpha', 'shape',
+ * 'tilemapAdditive' and so on. A cutout is alpha-blended, its edge discarded.
+ */
+function pipelineFor(kind, blend) {
+  const mode = blend === 'cutout' ? 'alpha' : blend;
+  if (kind === 'image') return mode;
+  return mode === 'alpha' ? kind : kind + mode[0].toUpperCase() + mode.slice(1);
+}
 
 /**
  * The order sprites and glyphs draw in, and what each is: by layer, then by
@@ -286,55 +380,65 @@ export function order2D(scene) {
   const points = new Float32Array(pointCount * 2);
   let packed = 0;
   for (const item of items) {
-    // An emitter's particles are drawn from its own pool (render/particles.js):
-    // a run of no slots, holding its place in the order.
-    if (item.emitter) {
-      runs.push({ texture: null, blend: 'emitter', first: entries.length, count: 0, tilemap: null, emitter: item.entity });
-      continue;
-    }
-    const kind = item.source.kind;
-    const tilemap = kind === 'tilemap' ? item.source : null;
-    const boxes = item.text ? item.source.boxes : [null];
-    // Shapes and paths read no image, and draw together.
-    const drawn = kind === 'shape' || kind === 'path';
-    const texture = item.text ? item.source.font.texture : tilemap ? tilemap.tileset : drawn ? null : item.source.texture;
-    const additive = !item.text && item.source.blend === 'additive';
-    const blend = tilemap ? 'tilemap' : drawn ? (additive ? 'shapeAdditive' : 'shape') : additive ? 'additive' : 'alpha';
     const first = packed;
-    if (kind === 'path') {
+    if (item.source.kind === 'path') {
       points.set(item.source.points, packed * 2);
       packed += item.source.points.length / 2;
     }
-    for (const box of boxes) {
-      const last = runs[runs.length - 1];
-      // Each tilemap has its own tiles to bind, so is a run of its own.
-      if (last && last.texture === texture && last.blend === blend && tilemap === null) last.count++;
-      else runs.push({ texture, blend, first: entries.length, count: 1, tilemap });
-      entries.push([item.source, box, item.entity, first]);
-    }
+    place(item, entries, runs, first);
   }
-  return { entries, runs, points };
+  return { entries, runs, points, lastLayer: items.length > 0 ? items[items.length - 1].layer : -Infinity };
+}
+
+/**
+ * One item's entries and its place in the runs, after everything before it:
+ * a slot a glyph, or one for anything else, and `first` its first point if
+ * it is a path. An emitter's particles are drawn from its own pool
+ * (render/particles.js): a run of no slots, holding its place in the order.
+ */
+function place(item, entries, runs, first) {
+  if (item.emitter) {
+    runs.push({ texture: null, blend: 'emitter', first: entries.length, count: 0, tilemap: null, emitter: item.entity });
+    return;
+  }
+  const kind = item.source.kind;
+  const tilemap = kind === 'tilemap' ? item.source : null;
+  const boxes = item.text ? item.source.boxes : [null];
+  // A long open path goes in pieces: see PATH_CHUNK.
+  const segments = kind === 'path' && !item.source.closed ? item.source.points.length / 2 - 1 : 0;
+  const pieces = segments > PATH_CHUNK ? Math.ceil(segments / PATH_CHUNK) : 0;
+  // Shapes and paths read no image, and draw together.
+  const drawn = kind === 'shape' || kind === 'path';
+  const texture = item.text ? item.source.font.texture : tilemap ? tilemap.tileset : drawn ? null : item.source.texture;
+  const blend = pipelineFor(tilemap ? 'tilemap' : drawn ? 'shape' : 'image', item.source.blend);
+  const repeat = !item.text && kind === undefined && repeats(item.source);
+  const add = (box, piece) => {
+    const last = runs[runs.length - 1];
+    // Each tilemap has its own tiles to bind, so is a run of its own.
+    if (last && last.texture === texture && last.blend === blend && last.repeat === repeat && tilemap === null) last.count++;
+    else runs.push({ texture, blend, first: entries.length, count: 1, tilemap, repeat, font: item.text ? item.source.font : null });
+    entries.push([item.source, box, item.entity, first, piece]);
+  };
+  if (pieces > 0) for (let piece = 0; piece < pieces; piece++) add(null, piece);
+  else for (const box of boxes) add(box, -1);
 }
 
 /**
  * One sprite's or glyph's slot, at float offset `o`: placed, turned and
  * scaled by its node, as a canvas transform would. A negative scale on the
  * node mirrors it -- the usual way to turn a character round. `firstPoint` is
- * where a path's points start in the packed list order2D makes.
+ * where a path's points start in the packed list order2D makes, and `piece`
+ * which piece of a long open one this slot draws (PATH_CHUNK), or -1.
  */
-export function write2D(out, o, world, entity, source, box, firstPoint = 0) {
+export function write2D(out, o, world, entity, source, box, firstPoint = 0, piece = -1) {
   const m = handleIndex(entity) * 16;
   const glyph = box !== null;
   const tilemap = source.kind === 'tilemap';
   const shape = source.kind === 'shape';
   const path = source.kind === 'path';
-  const lx = Math.hypot(world[m], world[m + 1]);
-  const ly = Math.hypot(world[m + 4], world[m + 5]);
-  const mirrored = world[m] * world[m + 5] - world[m + 1] * world[m + 4] < 0;
-  // A mirrored node's x axis points the flipped way, so its turn is read off
-  // the y axis, which the mirror leaves alone.
-  const angle = (mirrored ? Math.atan2(-world[m + 4], world[m + 5]) : Math.atan2(world[m + 1], world[m]))
-    + (glyph || tilemap || shape || path ? 0 : source.rotation);
+  const [lx, ly, flipped, turn] = frame2D(world, entity, FRAME);
+  const mirrored = flipped === 1;
+  const angle = turn + (glyph || tilemap || shape || path ? 0 : source.angle);
   let width, height, pivotX, pivotY, rect;
   if (shape) {
     width = source.size[0];
@@ -346,7 +450,18 @@ export function write2D(out, o, world, entity, source, box, firstPoint = 0) {
     // The quad covers its points and half its line, and its uv is the node's
     // own units, which the points are in.
     const half = source.strokeWidth / 2;
-    const [x0, y0, x1, y1] = source.bounds;
+    let [x0, y0, x1, y1] = source.bounds;
+    if (piece >= 0) {
+      // A piece's own points' bounds.
+      const p = source.points;
+      const end = Math.min((piece + 1) * PATH_CHUNK, p.length / 2 - 1);
+      x0 = y0 = Infinity;
+      x1 = y1 = -Infinity;
+      for (let i = piece * PATH_CHUNK; i <= end; i++) {
+        x0 = Math.min(x0, p[i * 2]); x1 = Math.max(x1, p[i * 2]);
+        y0 = Math.min(y0, p[i * 2 + 1]); y1 = Math.max(y1, p[i * 2 + 1]);
+      }
+    }
     rect = [x0 - half, y0 - half, x1 + half, y1 + half];
     width = Math.max(rect[2] - rect[0], 1e-3);
     height = Math.max(rect[3] - rect[1], 1e-3);
@@ -380,7 +495,7 @@ export function write2D(out, o, world, entity, source, box, firstPoint = 0) {
   out[o + 2] = angle;
   out[o + 3] = (glyph ? FLAG_SDF : 0) | (tilemap ? FLAG_TILEMAP : 0) | (!glyph && source.blend === 'cutout' ? FLAG_CUTOUT : 0)
     | (shape ? FLAG_SHAPE | (source.shape === 'ellipse' ? FLAG_ELLIPSE : 0) : 0)
-    | (path ? FLAG_PATH | (source.closed ? FLAG_CLOSED : 0) : 0) | (source.lit ? FLAG_LIT : 0);
+    | (path ? FLAG_PATH | (source.closed ? FLAG_CLOSED : 0) : 0) | (source.lit ? FLAG_LIT : 0) | (piece >= 0 ? FLAG_CHUNK : 0);
   out[o + 4] = width * lx * (mirrored ? -1 : 1);
   out[o + 5] = height * ly;
   out[o + 6] = pivotX;
@@ -395,15 +510,21 @@ export function write2D(out, o, world, entity, source, box, firstPoint = 0) {
     const s = Math.min(lx, ly);
     out[o + 16] = Math.abs(out[o + 4]) / 2;
     out[o + 17] = out[o + 5] / 2;
-    out[o + 18] = source.radius * s;
+    out[o + 18] = shapeRadius(source) * s;
     out[o + 19] = source.strokeWidth * s;
   } else if (path) {
     // In the node's own units, as its points are; the pixel size in them
     // takes the node's scale, the lesser axis's.
-    out[o + 16] = firstPoint;
-    out[o + 17] = source.points.length / 2;
+    const pointCount = source.points.length / 2;
+    out[o + 16] = firstPoint + (piece >= 0 ? piece * PATH_CHUNK : 0);
+    out[o + 17] = piece >= 0 ? Math.min(PATH_CHUNK + 1, pointCount - piece * PATH_CHUNK) : pointCount;
     out[o + 18] = source.strokeWidth;
     out[o + 19] = Math.min(lx, ly);
+    // A piece has no fill: its colour slot holds where its whole path's points are.
+    if (piece >= 0) {
+      out[o + 12] = firstPoint;
+      out[o + 13] = pointCount;
+    }
   } else if (tilemap) {
     const [tw, th] = source.tileSize;
     out[o + 16] = tw;
@@ -413,14 +534,32 @@ export function write2D(out, o, world, entity, source, box, firstPoint = 0) {
     out[o + 19] = 0;
   } else {
     out[o + 16] = glyph ? 0 : source.cutoff;
-    out[o + 17] = out[o + 18] = out[o + 19] = 0;
+    out[o + 17] = glyph ? source.strokeEdge : 0;
+    out[o + 18] = out[o + 19] = 0;
   }
-  // The outline's colour; a tilemap's margin and spacing.
+  // The outline's colour; a tilemap's margin and spacing; a sprite's or glyph's rect, low corner first.
   for (let c = 0; c < 4; c++) out[o + 20 + c] = shape || path ? source.stroke[c] : 0;
+  for (let c = 0; c < 4; c++) out[o + 24 + c] = glyph ? source.stroke[c] : 0;
+  if (!(shape || path || tilemap)) {
+    out[o + 20] = Math.min(rect[0], rect[2]);
+    out[o + 21] = Math.min(rect[1], rect[3]);
+    out[o + 22] = Math.max(rect[0], rect[2]);
+    out[o + 23] = Math.max(rect[1], rect[3]);
+  }
   if (tilemap) {
     out[o + 20] = source.margin;
     out[o + 21] = source.spacing;
   }
+}
+
+const FRAME = new Float64Array(4);
+
+/** A 2D entry's record as the scene holds it now: a set call replaces the one order2D saw. */
+function live(scene, entity, source, box) {
+  const kind = box !== null ? scene.texts
+    : source.kind === 'shape' ? scene.shapes : source.kind === 'path' ? scene.paths
+      : source.kind === 'tilemap' ? scene.tilemaps : scene.sprites;
+  return kind.get(entity) ?? source;
 }
 
 export class View2D {
@@ -454,33 +593,29 @@ export class View2D {
       ],
     });
     const layout = createPipelineLayout(device, { 0: viewLayout, 1: imageLayout }, 'view2d');
-    const descriptor = (blend) => ({
-      label: `view2d:${blend}`,
-      layout,
-      shader,
-      targets: [{
-        format: rhi.surfaceFormat,
-        blend: blend === 'additive'
-          ? { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' } }
-          : { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } },
-      }],
-      primitive: { topology: 'triangle-list', cullMode: 'none' },
-      depth: null,
-      constants: { ADDITIVE: blend === 'additive' ? 1 : 0 },
-    });
-    const descriptors = {
-      alpha: descriptor('alpha'),
-      additive: descriptor('additive'),
-      tilemap: {
-        ...descriptor('alpha'), label: 'view2d:tilemap', fragmentEntry: 'fsTilemap', constants: {},
-        layout: createPipelineLayout(device, { 0: viewLayout, 1: tilemapLayout }, 'view2d-tilemap'),
-      },
+    const kinds = {
+      image: { layout, fragmentEntry: 'fs' },
+      shape: { layout: createPipelineLayout(device, { 0: viewLayout }, 'view2d-shape'), fragmentEntry: 'fsShape' },
+      tilemap: { layout: createPipelineLayout(device, { 0: viewLayout, 1: tilemapLayout }, 'view2d-tilemap'), fragmentEntry: 'fsTilemap' },
     };
-    const shapeLayout = createPipelineLayout(device, { 0: viewLayout }, 'view2d-shape');
-    descriptors.shape = { ...descriptor('alpha'), label: 'view2d:shape', fragmentEntry: 'fsShape', layout: shapeLayout };
-    descriptors.shapeAdditive = { ...descriptor('additive'), label: 'view2d:shape-additive', fragmentEntry: 'fsShape', layout: shapeLayout };
-    await pipelines.warm(Object.values(descriptors));
+    // Every kind in every blend. Only the plain ones are built up front; the
+    // rest, the first frame that draws one.
+    const descriptors = {};
+    for (const [kind, { layout: kindLayout, fragmentEntry }] of Object.entries(kinds)) {
+      for (const blend of BLENDS) {
+        descriptors[pipelineFor(kind, blend)] = {
+          label: `view2d:${kind}:${blend}`,
+          layout: kindLayout,
+          shader,
+          fragmentEntry,
+          targets: [{ format: rhi.surfaceFormat, blend: BLEND_STATE[blend] }],
+          primitive: { topology: 'triangle-list', cullMode: 'none' },
+          depth: null,
+          constants: { BLEND: { alpha: 0, additive: 1, multiply: 3, screen: 4 }[blend] },
+        };
+      }
+    }
+    await pipelines.warm([descriptors.alpha, descriptors.shape, descriptors.tilemap]);
     const view = new View2D(rhi, pipelines, descriptors, viewLayout, imageLayout, tilemapLayout);
     view.particles = particles;
     return view;
@@ -517,6 +652,13 @@ export class View2D {
     this._execute = (pass) => this._encode(pass);
   }
 
+  /** Another view drawing with the same pipelines: one a scene, so each keeps its own slots. */
+  another(particles = null) {
+    const view = new View2D(this.rhi, this.pipelines, this._descriptors, this._viewLayout, this._imageLayout, this._tilemapLayout);
+    view.particles = particles;
+    return view;
+  }
+
   /**
    * Bring the slots up to date with the scene: rebuilt when the order may
    * have changed, otherwise only what moved or changed. \`moved\` is the
@@ -524,14 +666,21 @@ export class View2D {
    */
   prepare(scene, camera, width, height, moved) {
     const world = scene.transforms.world;
-    const rebuild = scene !== this._scene || scene.spriteOrder !== this._order;
+    // A font's atlas grows when any scene needs new glyphs, which moves every
+    // glyph's rect and replaces its texture: this view's too.
+    // Holes from removals are compacted away once they are a quarter of it.
+    const rebuild = scene !== this._scene || scene.spriteOrder !== this._order
+      || this._runs.some((run) => run.font !== null && run.font !== undefined && run.font.texture !== run.texture)
+      || (this._holes > 64 && this._holes * 4 > this.count) || !this._appendable(scene);
     if (rebuild) {
-      const { entries, runs, points } = order2D(scene);
+      const { entries, runs, points, lastLayer } = order2D(scene);
+      this._holes = 0;
+      this._lastLayer = lastLayer;
       this._grow(entries.length);
       this._upload('points', points);
       this._slots.clear();
-      entries.forEach(([source, box, entity, firstPoint], slot) => {
-        write2D(this._data, slot * SPRITE2D_FLOATS, world, entity, source, box, firstPoint);
+      entries.forEach(([source, box, entity, firstPoint, piece], slot) => {
+        write2D(this._data, slot * SPRITE2D_FLOATS, world, entity, source, box, firstPoint, piece);
         const span = this._slots.get(entity);
         if (span) span[1]++; else this._slots.set(entity, [slot, 1]);
       });
@@ -543,27 +692,29 @@ export class View2D {
       this.written = entries.length;
       if (entries.length > 0) this.rhi.queue.writeBuffer(this._buffer, 0, this._data, 0, entries.length * SPRITE2D_FLOATS);
     } else {
-      let lo = Infinity, hi = -1;
-      const rewrite = (entity) => {
+      const spans = (this._dirty ??= []);
+      spans.length = 0;
+      // A removed item's slots are left empty: drawn as nothing until the next rebuild.
+      for (const entity of scene.removed2D) {
         const span = this._slots.get(entity);
-        if (span === undefined) return;
+        if (span === undefined) continue;
         for (let slot = span[0]; slot < span[0] + span[1]; slot++) {
-          const [source, box, , firstPoint] = this._entries[slot];
-          write2D(this._data, slot * SPRITE2D_FLOATS, world, entity, source, box, firstPoint);
+          this._data[slot * SPRITE2D_FLOATS + 4] = this._data[slot * SPRITE2D_FLOATS + 5] = 0;
         }
-        lo = Math.min(lo, span[0]);
-        hi = Math.max(hi, span[0] + span[1] - 1);
-      };
-      for (const entity of scene.spritesChanged) rewrite(entity);
+        spans.push(span[0], span[0] + span[1] - 1);
+        this._holes += span[1];
+        this._slots.delete(entity);
+      }
+      if (this._pending.length > 0) this._append(world, spans);
+      for (const entity of scene.spritesChanged) this._rewrite(scene, world, entity, spans);
       if (moved !== null) {
-        for (const entity of this._slots.keys()) if (moved[handleIndex(entity)] === 1) rewrite(entity);
+        for (const entity of this._slots.keys()) if (moved[handleIndex(entity)] === 1) this._rewrite(scene, world, entity, spans);
       }
-      this.written = hi >= lo ? hi - lo + 1 : 0;
-      if (this.written > 0) {
-        this.rhi.queue.writeBuffer(this._buffer, lo * SPRITE2D_BYTES, this._data, lo * SPRITE2D_FLOATS, this.written * SPRITE2D_FLOATS);
-      }
+      this.written = this._uploadSpans(spans);
     }
     scene.spritesChanged.clear();
+    scene.added2D.clear();
+    scene.removed2D.clear();
     this._uploadTiles(scene, rebuild);
     // The lights, where their nodes are now: a few floats each, so every frame.
     if (scene.lightCount > 0) scene.refreshLights();
@@ -578,6 +729,98 @@ export class View2D {
     u.set(camera.ambient, 20);
     this.rhi.queue.writeBuffer(this._uniform, 0, u);
     return this.count;
+  }
+
+  /**
+   * Whether what was added since the last frame goes at the end of the list:
+   * all of it on the last item's layer or higher, as a newly added thing is
+   * last in its layer. Keeps those items, in order, for _append.
+   */
+  _appendable(scene) {
+    this._pending ??= [];
+    this._pending.length = 0;
+    if (scene.added2D.size === 0) return true;
+    for (const entity of scene.added2D) {
+      const sprite = scene.sprites.get(entity);
+      const text = scene.texts.get(entity);
+      const source = sprite ?? text ?? scene.shapes.get(entity);
+      if (source !== undefined) this._pending.push({ entity, source, layer: source.layer, added: source.added, text: text !== undefined });
+    }
+    this._pending.sort((p, q) => p.added - q.added);
+    let floor = this._lastLayer ?? -Infinity;
+    for (const item of this._pending) {
+      if (item.layer < floor) return false;
+      floor = item.layer;
+    }
+    return true;
+  }
+
+  /** The items _appendable kept, onto the end of the list and its runs. */
+  _append(world, spans) {
+    const start = this._entries.length;
+    for (const item of this._pending) place(item, this._entries, this._runs, 0);
+    const count = this._entries.length;
+    const buffer = this._buffer;
+    this._grow(count);
+    for (let slot = start; slot < count; slot++) {
+      const [source, box, entity] = this._entries[slot];
+      write2D(this._data, slot * SPRITE2D_FLOATS, world, entity, source, box, 0);
+      const span = this._slots.get(entity);
+      if (span) span[1]++; else this._slots.set(entity, [slot, 1]);
+    }
+    // A new buffer has none of the old slots in it.
+    if (this._buffer !== buffer) spans.push(0, count - 1); else spans.push(start, count - 1);
+    this.count = count;
+    this._lastLayer = this._pending[this._pending.length - 1].layer;
+  }
+
+  /** Rewrite `entity`'s slots from its record as it is now, and note them in `spans`: [first, last, ...]. */
+  _rewrite(scene, world, entity, spans) {
+    const span = this._slots.get(entity);
+    if (span === undefined) return;
+    for (let slot = span[0]; slot < span[0] + span[1]; slot++) {
+      const entry = this._entries[slot];
+      entry[0] = live(scene, entity, entry[0], entry[1]);
+      // A text rewritten in place (setText) has new glyphs, as many as before.
+      if (entry[1] !== null) entry[1] = entry[0].boxes[slot - span[0]];
+      write2D(this._data, slot * SPRITE2D_FLOATS, world, entity, entry[0], entry[1], entry[3], entry[4]);
+    }
+    spans.push(span[0], span[0] + span[1] - 1);
+  }
+
+  /**
+   * Upload the slots in `spans`, [first, last, ...], in as few calls as pays:
+   * spans a few slots apart go as one, the gap with them, which costs less
+   * than another call (as in render/gpudriven.js); spans far apart go
+   * separately, so two movers at either end of a long list are two slots, not
+   * the whole list. Returns how many slots went.
+   */
+  _uploadSpans(spans) {
+    if (spans.length === 0) return 0;
+    // Changed nodes come in any order; moved ones in slot order.
+    let sorted = true;
+    for (let k = 2; k < spans.length; k += 2) if (spans[k] < spans[k - 2]) { sorted = false; break; }
+    const order = [];
+    for (let k = 0; k < spans.length; k += 2) order.push(k);
+    if (!sorted) order.sort((a, b) => spans[a] - spans[b]);
+    let written = 0;
+    let first = spans[order[0]], last = spans[order[0] + 1];
+    const send = () => {
+      const count = last - first + 1;
+      this.rhi.queue.writeBuffer(this._buffer, first * SPRITE2D_BYTES, this._data, first * SPRITE2D_FLOATS, count * SPRITE2D_FLOATS);
+      written += count;
+    };
+    for (let i = 1; i < order.length; i++) {
+      const k = order[i];
+      if (spans[k] - last - 1 <= MERGE_GAP) last = Math.max(last, spans[k + 1]);
+      else {
+        send();
+        first = spans[k];
+        last = spans[k + 1];
+      }
+    }
+    send();
+    return written;
   }
 
   /** `data` into the storage buffer named `name`, grown to fit; never empty, so always bindable. */
@@ -638,7 +881,10 @@ export class View2D {
 
   _grow(count) {
     if (count * SPRITE2D_FLOATS > this._data.length) {
-      this._data = new Float32Array(grownCapacity(this._data.length / SPRITE2D_FLOATS, count) * SPRITE2D_FLOATS);
+      // Kept: an append writes only its own slots.
+      const data = new Float32Array(grownCapacity(this._data.length / SPRITE2D_FLOATS, count) * SPRITE2D_FLOATS);
+      data.set(this._data);
+      this._data = data;
     }
     const bytes = Math.max(count, 1) * SPRITE2D_BYTES;
     if (bytes > this._capacity) {
@@ -677,7 +923,7 @@ export class View2D {
     });
     pass.setBindGroup(0, this._group);
     let bound = null;
-    for (const { texture, blend, first, count, tilemap, emitter } of this._runs) {
+    for (const { texture, blend, first, count, tilemap, emitter, repeat } of this._runs) {
       if (emitter !== undefined) {
         // Particles bring their own pipeline and bind groups; ours go back after.
         if (this.particles === null) continue;
@@ -708,18 +954,17 @@ export class View2D {
         pass.draw(6, count, 0, first);
         continue;
       }
-      let imageGroup = this._imageGroups.get(texture);
-      if (!imageGroup) {
-        imageGroup = this.rhi.device.createBindGroup({
-          label: 'view2d-image', layout: this._imageLayout,
-          entries: [
-            { binding: 0, resource: texture.view },
-            { binding: 1, resource: texture.pixelated ? pixelatedSampler(this.rhi) : clampSampler(this.rhi) },
-          ],
-        });
-        this._imageGroups.set(texture, imageGroup);
-      }
-      pass.setBindGroup(1, imageGroup);
+      // One group per texture and sampler: clamped, or repeating.
+      let groups = this._imageGroups.get(texture);
+      if (!groups) this._imageGroups.set(texture, groups = []);
+      groups[repeat ? 1 : 0] ??= this.rhi.device.createBindGroup({
+        label: 'view2d-image', layout: this._imageLayout,
+        entries: [
+          { binding: 0, resource: texture.view },
+          { binding: 1, resource: spriteSampler(this.rhi, texture.pixelated, repeat) },
+        ],
+      });
+      pass.setBindGroup(1, groups[repeat ? 1 : 0]);
       pass.draw(6, count, 0, first);
     }
   }

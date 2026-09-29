@@ -387,6 +387,11 @@ test('camera rays agree with the projection they have to match', () => {
   camera.rayFromScreen(50, 0, 100, 100, origin, direction);
   close(direction[1], -direction[2], EPS, 'top edge sits at 45 degrees');
   assert.ok(direction[1] > 0, 'screen y=0 is UP in world space');
+
+  // The size passed sets the aspect, whatever the camera last drew at: on a
+  // 200 x 100 canvas the right edge is twice as far out as the top.
+  camera.rayFromScreen(200, 50, 200, 100, origin, direction);
+  close(direction[0], -2 * direction[2], EPS, 'right edge at the canvas\'s own aspect');
 });
 
 test('picking through the camera finds the box under the cursor', () => {
@@ -1024,12 +1029,12 @@ test('orthographic rays are parallel, and start under the cursor', () => {
 
   // The right edge: aspect 2, half height 10, so 20 across -- and the ray
   // still points straight down the view axis rather than fanning outward.
-  camera.rayFromScreen(100, 50, 100, 100, origin, direction);
+  camera.rayFromScreen(200, 50, 200, 100, origin, direction);
   vecClose(direction, [0, 0, -1], EPS, 'straight ahead');
   vecClose(origin, [20, 0, 10], EPS, 'moved across, not tilted');
 
   // Top-left corner: screen y=0 is up.
-  camera.rayFromScreen(0, 0, 100, 100, origin, direction);
+  camera.rayFromScreen(0, 0, 200, 100, origin, direction);
   vecClose(origin, [-20, 10, 10], EPS, 'corner');
 });
 
@@ -1039,7 +1044,7 @@ test('orthographic rays agree with the projection', () => {
   const camera = orthoCamera();
   const origin = vec3Create();
   const direction = vec3Create();
-  camera.rayFromScreen(30, 80, 100, 100, origin, direction);
+  camera.rayFromScreen(60, 80, 200, 100, origin, direction);
   for (const t of [1, 10, 40]) {
     const point = [0, 1, 2].map((i) => origin[i] + direction[i] * t);
     vecClose(toNdc(camera.viewProjection, point).slice(0, 2), [-0.4, -0.6], 1e-5, `t=${t}`);
@@ -1052,7 +1057,7 @@ test('picking through an orthographic camera finds an off-centre box', () => {
   // only what is directly beneath the pixel.
   const { scene, nodes } = pickScene([[15, 0, -5]]);
   const camera = orthoCamera();
-  const hit = scene.pick(camera, 87.5, 50, 100, 100);      // x = 0.75 * 20 = 15
+  const hit = scene.pick(camera, 175, 50, 200, 100);       // x = 0.75 * 20 = 15
   assert.ok(hit, 'the box under the cursor');
   assert.equal(hit.node.entity, nodes[0]);
   assert.equal(scene.pick(camera, 50, 50, 100, 100), null, 'nothing at the centre');

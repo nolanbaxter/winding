@@ -170,7 +170,7 @@ await atest('the warmup is measured attached, then forgotten', async () => {
 function runnableEngine() {
   const engine = fakeEngine();
   let n = 0;
-  engine.rhi = { device: { queue: { onSubmittedWorkDone: async () => {} } } };
+  engine.gpu = { device: { queue: { onSubmittedWorkDone: async () => {} } } };
   engine.renderFrame = () => {
     engine.onFrame?.(n++);
     const p = engine.renderer.profiler;

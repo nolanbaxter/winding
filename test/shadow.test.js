@@ -523,7 +523,7 @@ test('only casting lights on screen get views, and their records say which', () 
   assert.equal(maps.localCount, 7);
   assert.ok(maps.localData.subarray(0, 16).some((v) => v !== 0), 'the first light\'s views survived the growth after them');
 
-  point.setLight({ castShadow: false });
+  scene.setLight(point, { castShadow: false });
   maps.updateLocal(scene, forwardCamera());
   assert.deepEqual(shadowFields(scene, point), [0, 0]);
   assert.deepEqual(shadowFields(scene, spot), [1, 1], 'the spot moves up to layer 0');
@@ -591,10 +591,10 @@ test("a light is drawn again when its layers held another light's maps", () => {
   const quiet = { all: false, boxes: new BoxList() };
   maps.updateLocal(scene, camera, quiet);
   assert.equal(maps.localDrawn, 7);
-  point.setLight({ castShadow: false });
+  scene.setLight(point, { castShadow: false });
   maps.updateLocal(scene, camera, quiet);
   assert.equal(maps.localDrawn, 1, 'the spot moved to layer 0');
-  point.setLight({ castShadow: true });
+  scene.setLight(point, { castShadow: true });
   maps.updateLocal(scene, camera, quiet);
   assert.equal(maps.localDrawn, 7, 'both redrawn: the cube overwrote layer 0, and the spot is on 6 again');
   maps.updateLocal(scene, camera, quiet);
@@ -706,8 +706,8 @@ test('every casting directional light gets cascades of its own, in slot order', 
   for (let k = 0; k < maps.cascadeCount * 16; k++) close(maps.matrices[k], alone.matrices[k], 1e-6, `matrix float ${k}`);
 
   // None casting: nothing to fit, and every lookup reads lit.
-  a.setLight({ castShadow: false });
-  b.setLight({ castShadow: false });
+  scene.setLight(a, { castShadow: false });
+  scene.setLight(b, { castShadow: false });
   maps.update(camera, scene);
   assert.equal(maps.shadowedCount, 0);
   assert.equal(maps.activeCascades, 0);

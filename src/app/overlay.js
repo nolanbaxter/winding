@@ -29,10 +29,10 @@ export class StatsOverlay {
     if (this._accum < this.interval) return;
     this._accum = 0;
 
-    const { rhi, renderer, stats } = this.engine;
+    const { gpu, renderer, stats } = this.engine;
     this.element.textContent = [
       `${this.engine.fps.toFixed(0)} fps`,
-      `${rhi.width}x${rhi.height}`,
+      `${gpu.width}x${gpu.height}`,
       // No visible count: culling happens on the GPU and the answer lives only
       // in the indirect argument buffer. Reading it back would stall the frame.
       `${stats.renderables} objects`,

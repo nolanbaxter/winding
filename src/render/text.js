@@ -16,8 +16,12 @@
 
 import { createTexture } from '../rhi/texture.js';
 
-/** Texels the distance field reaches past a glyph's edge; see the header. */
-export const SPREAD = 4;
+/**
+ * Texels the distance field reaches past a glyph's edge; see the header. An
+ * outline (addText's stroke) is drawn in that reach, so it is at most
+ * SPREAD - 1 texels of the raster: 7/64 of an em for a 64px font.
+ */
+export const SPREAD = 8;
 
 // ------------------------------------------------------------- pure parts
 
@@ -94,38 +98,106 @@ export function distanceField(coverage, width, height, spread = SPREAD) {
   return out;
 }
 
+// What a reader sees as one character: a letter and its accents, a flag, an
+// emoji and its modifiers. Code points where the browser has no segmenter.
+const segmenter = typeof Intl?.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+
+// Below U+0300 every code point is a character of its own: no combining
+// marks, emoji or CJK, so no segmenting to do -- most text, and much faster.
+const SIMPLE = /^[\u0000-\u02ff]*$/;
+
+/** A string's characters as a reader counts them: see segmenter above. */
+export function graphemes(text) {
+  if (segmenter === null || SIMPLE.test(text)) return [...text];
+  const out = [];
+  for (const { segment } of segmenter.segment(text)) out.push(segment);
+  return out;
+}
+
+// Chinese and Japanese are written without spaces, and a line may break
+// between any two of their characters -- but not before closing punctuation
+// or after opening, as CSS's line breaking holds (kinsoku).
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u3000-\u303f\uff00-\uffef]/u;
+const NO_BREAK_BEFORE = new Set([...'、。，．：；？！）」』】〕〉》〗〙〛ーぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ々ゝゞヽヾ…‥・']);
+const NO_BREAK_AFTER = new Set([...'（「『【〔〈《〖〘〚']);
+
+/** A word cut where a line may break inside it: between CJK characters. Graphemes each. */
+function pieces(word) {
+  const chars = graphemes(word);
+  if (SIMPLE.test(word) || !chars.some((ch) => CJK.test(ch))) return [chars];
+  const out = [[chars[0]]];
+  for (let i = 1; i < chars.length; i++) {
+    const before = chars[i - 1], ch = chars[i];
+    const breaks = (CJK.test(before) || CJK.test(ch)) && !NO_BREAK_BEFORE.has(ch) && !NO_BREAK_AFTER.has(before);
+    if (breaks) out.push([ch]); else out[out.length - 1].push(ch);
+  }
+  return out;
+}
+
 /**
  * Lay a string out in em units: each glyph's box relative to the block, with
  * the block's anchor point at the origin and y up. `metrics` gives each
- * character's advance and ink box, and the font's ascent and descent; see
- * Font.metrics.
+ * character's advance and ink box, the font's ascent and descent, and
+ * `kern(a, b)`, how much closer b sits after a; see Font.metrics.
  *   align       'left', 'center' or 'right', each line within the block
  *   lineHeight  in ems; the font's own ascent plus descent by default
  *   anchor      [x, y] in the block, 0..1: the point placed at the node
  *   width       in ems: lines wrap between words to fit it, as CSS wraps
- *               text in a box, and the block is that wide, so align and
- *               anchor work within it. A word wider than it overflows.
+ *               text in a box, and between Chinese and Japanese characters,
+ *               and the block is that wide, so align and anchor work within
+ *               it. A word wider than it overflows.
+ * Characters are graphemes -- what a reader counts as one: a letter and its
+ * accents, an emoji and its modifiers -- each one glyph.
  * Returns { boxes, block }: boxes as [{ char, x, y, width, height }] -- the
  * ink box's lower left, and size -- for characters with ink, and block as
  * [left, bottom, right, top], the whole block.
  */
 export function layoutText(text, metrics, { align = 'left', lineHeight, anchor = [0.5, 0.5], width = Infinity } = {}) {
-  const measure = (line) => [...line].reduce((w, ch) => w + (metrics.glyphs.get(ch)?.advance ?? 0), 0);
+  const advance = (ch) => metrics.glyphs.get(ch)?.advance ?? 0;
+  const kern = (a, b) => (a === null || metrics.kern === undefined ? 0 : metrics.kern(a, b));
+  /** Characters' width, kerned: how far the pen moves over them. */
+  const measure = (chars) => {
+    let w = 0;
+    let before = null;
+    for (const ch of chars) {
+      if (!metrics.glyphs.has(ch)) continue;
+      w += kern(before, ch) + advance(ch);
+      before = ch;
+    }
+    return w;
+  };
+  const space = advance(' ');
+  // Lines as lists of characters. Each line's width is kept as it grows, a
+  // piece at a time -- measuring the whole line again for every word made a
+  // long unwrapped line quadratic -- and measured exactly, kerning across
+  // the joins, once it is done.
   const lines = [];
   for (const paragraph of String(text).split('\n')) {
     let line = null;
+    let wide = 0;
     for (const word of paragraph.split(' ')) {
-      const longer = line === null ? word : `${line} ${word}`;
-      if (line === null || measure(longer) <= width) line = longer;
-      else {
-        lines.push(line);
-        line = word;
-      }
+      pieces(word).forEach((piece, k) => {
+        // A word's first piece follows a space; the rest join it directly.
+        const gap = k === 0 ? space : 0;
+        const w = measure(piece);
+        if (line === null) {
+          line = [...piece];
+          wide = w;
+        } else if (wide + gap + w <= width) {
+          if (k === 0) line.push(' ');
+          line.push(...piece);
+          wide += gap + w;
+        } else {
+          lines.push(line);
+          line = [...piece];
+          wide = w;
+        }
+      });
     }
-    lines.push(line);
+    lines.push(line ?? []);
   }
-  const step = lineHeight ?? metrics.ascent + metrics.descent;
   const widths = lines.map(measure);
+  const step = lineHeight ?? metrics.ascent + metrics.descent;
   const blockWidth = Number.isFinite(width) ? width : Math.max(0, ...widths);
   const blockHeight = metrics.ascent + metrics.descent + step * (lines.length - 1);
   const shift = { left: 0, center: 0.5, right: 1 }[align];
@@ -135,9 +207,12 @@ export function layoutText(text, metrics, { align = 'left', lineHeight, anchor =
     let pen = (blockWidth - widths[row]) * shift;
     // The top of the block is y = 0 before the anchor moves it; baselines run down.
     const baseline = -metrics.ascent - row * step;
+    let before = null;
     for (const ch of line) {
       const g = metrics.glyphs.get(ch);
       if (g === undefined) continue;
+      pen += kern(before, ch);
+      before = ch;
       if (g.width > 0 && g.height > 0) {
         boxes.push({ char: ch, x: pen + g.left, y: baseline - g.descent, width: g.width, height: g.height });
       }
@@ -172,10 +247,29 @@ export class Font {
     this._context.font = css;
     const probe = this._context.measureText('Hg');
     /** In ems. glyphs: char -> { advance, left, width, height, descent } in ems, and its atlas rect. */
+    const pairs = new Map();
     this.metrics = {
       ascent: probe.fontBoundingBoxAscent / size,
       descent: probe.fontBoundingBoxDescent / size,
       glyphs: new Map(),
+      /**
+       * How much further along b sits after a than its advance alone puts it,
+       * in ems: negative where the font pulls a pair together, as "AV". The
+       * browser's own kerning, read off a measurement of the pair, once.
+       */
+      kern: (a, b) => {
+        const key = `${a}\u0000${b}`;
+        let k = pairs.get(key);
+        if (k === undefined) {
+          const context = this._context;
+          context.font = this.css;
+          k = (context.measureText(a + b).width - context.measureText(a).width - context.measureText(b).width) / size;
+          // Below what a pixel would show at any sane size: not a kern, rounding.
+          if (Math.abs(k) < 1e-3) k = 0;
+          pairs.set(key, k);
+        }
+        return k;
+      },
     };
     this._atlasSize = 512;
     this._shelf = { x: 0, y: 0, height: 0 };
@@ -201,9 +295,9 @@ export class Font {
     this.texture = { texture, view: texture.createView(), width: atlasSize, height: atlasSize, sdf: true };
   }
 
-  /** Rasterise any characters of `text` not yet in the atlas. */
+  /** Rasterise any characters (graphemes) of `text` not yet in the atlas. */
   ensure(text) {
-    for (const ch of new Set(text)) {
+    for (const ch of new Set(graphemes(text))) {
       if (ch === '\n' || this.metrics.glyphs.has(ch)) continue;
       this._add(ch);
     }

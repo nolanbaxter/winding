@@ -394,10 +394,10 @@ test('two instances of one asset animate independently', () => {
 
   a.play('slide');
   b.play('slide');
-  scene.advanceAnimations(0.5);
-  scene.advanceAnimations(0.5);        // a and b are now both at t = 1.0
+  scene.advance(0.5);
+  scene.advance(0.5);        // a and b are now both at t = 1.0
   b.animation.time = 0;
-  scene.advanceAnimations(0);
+  scene.advance(0);
 
   scene.update();
   const x = (node) => scene.transforms.world[scene.transforms.worldOffset(node.entity) + 12];
@@ -414,17 +414,17 @@ test('an asset with no clips registers no player', () => {
   assert.equal(node.animation, null);
   assert.deepEqual(node.animations, []);
   node.play('slide');                  // must not throw
-  assert.equal(scene.advanceAnimations(0.1), 0);
+  assert.equal(scene._advanceAnimations(0.1), 0);
 });
 
 test('removing an instance removes its player', () => {
   const scene = new Scene({ capacity: 32 });
   const node = scene.add(animatedAsset());
   node.play('slide');
-  assert.equal(scene.advanceAnimations(0.1), 1);
+  assert.equal(scene._advanceAnimations(0.1), 1);
 
   scene.remove(node);
-  assert.equal(scene.advanceAnimations(0.1), 0, 'a removed instance must not still be sampled');
+  assert.equal(scene._advanceAnimations(0.1), 0, 'a removed instance must not still be sampled');
 });
 
 test('animation marks transforms dirty, so composition picks it up', () => {
@@ -434,7 +434,7 @@ test('animation marks transforms dirty, so composition picks it up', () => {
   scene.update();                      // settle
 
   node.play('slide');
-  scene.advanceAnimations(1);
+  scene.advance(1);
   assert.equal(scene.update(), 1, 'the animated node must recompose');
 });
 
@@ -555,7 +555,7 @@ test('the player drives weights through a whole scene', () => {
   });
 
   assert.ok(node.play(0, { loop: false }), 'the clip is there');
-  scene.advanceAnimations(0.25);
+  scene.advance(0.25);
   close(node.weights[0], 0.25, EPS, 'target 0 after a quarter second');
   close(node.weights[1], 0.75, EPS, 'target 1 after a quarter second');
 });
@@ -823,7 +823,8 @@ test('setWeight blends clips by a parameter, and zero keeps a clip playing', () 
   ]);
   const t = rigRecorder();
   player.play('walk');
-  player.play('run', { add: true, weight: 0 });
+  assert.throws(() => player.play('run', { add: true }), /^Error: play: add is now join/);
+  player.play('run', { join: true, weight: 0 });
   player.advance(0.1, t);
   close(t.x(ARM), 0, EPS, 'run weighted out');
 
@@ -851,7 +852,7 @@ test('synced clips share a cycle at the weighted average length', () => {
   player.advance(0.25, t);
   close(player.tracks[0].time, 0.25);
 
-  player.play('run', { sync: true, add: true });
+  player.play('run', { sync: true, join: true });
   close(player.tracks[1].time, 0.125, EPS, 'the run joins a quarter of the way through its cycle');
 
   player.setWeight('walk', 0.75);
@@ -910,8 +911,8 @@ test('through scene.add, a mask finds the asset\'s nodes by name', () => {
   node.animation.layer('upper', { mask: 'root' });
   assert.throws(() => node.animation.layer('lower', { mask: 'legs' }), /no node is named "legs"/);
   node.play('slide', { layer: 'upper', fade: 1, loop: false });
-  scene.advanceAnimations(1);
-  scene.advanceAnimations(1);
+  scene.advance(1);
+  scene.advance(1);
   scene.update();
   close(scene.transforms.world[scene.transforms.worldOffset(node.entity) + 12], 10);
   node.stop({ layer: 'upper', fade: 0.5 });
@@ -964,7 +965,7 @@ test('a clip drives a light\'s intensity and colour on its node', () => {
   )]);
   const root = scene.add(asset);
   root.play('flicker', { loop: false });
-  scene.advanceAnimations(0.5);
+  scene.advance(0.5);
   const light = LIGHT(scene);
   close(light[7], 15, EPS, 'intensity');
   assert.deepEqual([...light.subarray(4, 7)], [1, 0.5, 0.5]);
@@ -975,7 +976,7 @@ test('a light the file gave no range re-derives its reach as its intensity moves
   const scene = new Scene({ capacity: 32 });
   const root = scene.add(propsAsset([clipOf('up', propertyChannel('light', 0, 'intensity', [0, 1], [10, 40]))], { range: null }));
   root.play('up', { loop: false });
-  scene.advanceAnimations(1);
+  scene.advance(1);
   close(LIGHT(scene)[3], unboundedLightRadius(40, [1, 1, 1]), 1e-4);
 });
 
@@ -987,9 +988,9 @@ test('a light value the importer would refuse is not written', () => {
     propertyChannel('light', 0, 'innerAngle', [0, 1], [0.1, 0.9]),
   )]));
   root.play('bad', { loop: false });
-  scene.advanceAnimations(0.5);
+  scene.advance(0.5);
   close(LIGHT(scene)[7], 2.5, EPS, 'still positive at the midpoint');
-  scene.advanceAnimations(0.5);
+  scene.advance(0.5);
   close(LIGHT(scene)[7], 2.5, EPS, 'held at the last it would accept');
   close(scene._lightCone[0], 0.1, 1e-6, 'inner never reached the outer, so it stayed');
 });
@@ -1001,10 +1002,10 @@ test('a clip drives a camera\'s field of view, but never to one the importer wou
     clipOf('flip', propertyChannel('camera', 0, 'fovY', [0, 1], [4, 4])),
   ]));
   root.play('zoom', { loop: false });
-  scene.advanceAnimations(1);
+  scene.advance(1);
   close(scene.cameras[0].fovY, 0.4);
   root.play('flip');
-  scene.advanceAnimations(0.1);
+  scene.advance(0.1);
   close(scene.cameras[0].fovY, 0.4, EPS, 'past pi is not a field of view');
 });
 
@@ -1016,7 +1017,7 @@ test('a clip changes an asset\'s material and queues it for upload', () => {
   )]);
   const root = scene.add(asset);
   root.play('pulse', { loop: false });
-  scene.advanceAnimations(1);
+  scene.advance(1);
   const [record] = asset.materials;
   assert.deepEqual([...record.baseColorFactor], [0, 0.5, 1, 0.5]);
   assert.deepEqual([...record.emissive], [3, 3, 3], 'emissive is factor times strength');
@@ -1036,7 +1037,7 @@ test('a clip scrolls and turns a texture through its transform', () => {
   asset.materials[0].uvTransforms = Float32Array.from({ length: 30 }, (_, i) => (i % 6 === 0 || i % 6 === 4 ? 1 : 0));
   const root = scene.add(asset);
   root.play('belt', { loop: false });
-  scene.advanceAnimations(0.5);
+  scene.advance(0.5);
   const t = asset.materials[0].uvTransforms;
   [1, 0, 0.5, 0, 1, 0].forEach((v, i) => close(t[i], v, 1e-6, `base colour moved half along u, value ${i}`));
   const [c, s] = [Math.cos(Math.PI / 4), Math.sin(Math.PI / 4)];
@@ -1054,22 +1055,22 @@ test('property channels cross-fade and add like any other', () => {
     clipOf('nudge', propertyChannel('camera', 0, 'fovY', [0, 1], [0.5, 0.6])),
   ]));
   root.play('dim');
-  scene.advanceAnimations(0.1);
+  scene.advance(0.1);
   root.play('wide', { fade: 1 });
-  scene.advanceAnimations(0.5);
+  scene.advance(0.5);
   close(scene.cameras[0].fovY, 0.6, 1e-6, 'halfway through the fade');
 
   // An upper layer fading in starts from the loaded 0.8, not from zero.
   const fresh = scene.add(propsAsset([clipOf('wide', propertyChannel('camera', 0, 'fovY', [0, 1], [1.0, 1.0]))]));
   fresh.animation.layer('upper');
   fresh.play('wide', { layer: 'upper', fade: 1 });
-  scene.advanceAnimations(0.25);
+  scene.advance(0.25);
   close(scene.cameras[1].fovY, 0.85, 1e-6, 'a quarter of the way from the loaded value');
   scene.remove(fresh);
 
   root.animation.layer('nudge', { additive: true });
   root.play('nudge', { layer: 'nudge', loop: false });
-  scene.advanceAnimations(0.5);
+  scene.advance(0.5);
   close(scene.cameras[0].fovY, 1.0 + 0.05, 1e-6, 'the change from 0.5 to 0.55 on top');
 });
 
@@ -1091,7 +1092,7 @@ test('one weight by pointer blends alone, not as a share of the whole list', () 
   assert.deepEqual([...weights], [0, 1], 'the lone pointer writes only its own weight');
 
   player.play('both');
-  player.play('second', { add: true });
+  player.play('second', { join: true });
   player.advance(0.1, recorder());
   close(weights[0], 0.2, EPS, 'only one clip drives the first weight, so it has all of it');
   close(weights[1], 0.6, EPS, 'two drive the second, evenly');
@@ -1156,7 +1157,7 @@ test('a walk moves the character, and the hips stay over it', () => {
   const w = walker([forward()]);
   w.player.rootMotion();
   w.model.play('walk');
-  for (let i = 0; i < 3; i++) w.scene.advanceAnimations(0.25);
+  for (let i = 0; i < 3; i++) w.scene.advance(0.25);
   vecClose3(w.body(), [0, 0, 1.5], 'the body walked 1.5');
   vecClose3(w.hips(), [0, 1.375, 0], 'the hips kept their height and stayed over it');
 });
@@ -1165,10 +1166,10 @@ test('a loop is a step forward, not a jump back', () => {
   const w = walker([forward()]);
   w.player.rootMotion();
   w.model.play('walk');
-  w.scene.advanceAnimations(0.75);
-  w.scene.advanceAnimations(0.5);      // across the wrap
+  w.scene.advance(0.75);
+  w.scene.advance(0.5);      // across the wrap
   vecClose3(w.body(), [0, 0, 2.5], 'two per second, through the loop');
-  w.scene.advanceAnimations(2.25);     // several whole cycles in one step
+  w.scene.advance(2.25);     // several whole cycles in one step
   vecClose3(w.body(), [0, 0, 7], 'and through several');
 });
 
@@ -1176,8 +1177,8 @@ test('played backwards, the character walks backwards', () => {
   const w = walker([forward()]);
   w.player.rootMotion();
   w.model.play('walk', { speed: -1 });
-  w.scene.advanceAnimations(0.5);
-  w.scene.advanceAnimations(0.75);
+  w.scene.advance(0.5);
+  w.scene.advance(0.75);
   vecClose3(w.body(), [0, 0, -2.5]);
 });
 
@@ -1185,8 +1186,8 @@ test('a clip that stops moves the character exactly to its end', () => {
   const w = walker([forward()]);
   w.player.rootMotion();
   w.model.play('walk', { loop: false });
-  w.scene.advanceAnimations(0.75);
-  w.scene.advanceAnimations(5);
+  w.scene.advance(0.75);
+  w.scene.advance(5);
   vecClose3(w.body(), [0, 0, 2]);
 });
 
@@ -1196,7 +1197,7 @@ test('motion follows the character\'s own facing and scale', () => {
   w.model.setScale(2, 2, 2);
   w.player.rootMotion();
   w.model.play('walk');
-  w.scene.advanceAnimations(0.5);
+  w.scene.advance(0.5);
   vecClose3(w.body(), [2, 0, 0], 'half a second at two, doubled, along +X');
 });
 
@@ -1209,7 +1210,7 @@ test('a Z-up rig still walks across the ground, not into the sky', () => {
   }], { zUp: true });
   w.player.rootMotion();
   w.model.play('walk');
-  w.scene.advanceAnimations(0.5);
+  w.scene.advance(0.5);
   vecClose3(w.body(), [0, 0, -1], 'forward along -Z, level');
   vecClose3(w.hips(), [0, 0, 1.25], 'the hips keep their height, in their own axes');
 });
@@ -1223,7 +1224,7 @@ test('a turn turns the character, and the hips face the way they rested', () => 
   // Named: a clip that only turns moves no node, so there is none to find.
   w.player.rootMotion({ node: 'hips' });
   w.model.play('turn', { loop: false });
-  w.scene.advanceAnimations(0.5);
+  w.scene.advance(0.5);
   const body = w.scene.transforms.rotation.subarray(handleIndex(w.model.entity) * 4, handleIndex(w.model.entity) * 4 + 4);
   vecClose4([...body], turn(Math.PI / 4), 'an eighth of a turn');
   vecClose4(w.hipsRotation(), [0, 0, 0, 1], 'the hips hand the turn over');
@@ -1234,8 +1235,8 @@ test('blended clips move the character at their weighted pace', () => {
   const w = walker([forward('walk', 2), forward('run', 4)]);
   w.player.rootMotion();
   w.model.play('walk', { sync: true });
-  w.model.play('run', { sync: true, add: true, weight: 1 });
-  w.scene.advanceAnimations(0.5);
+  w.model.play('run', { sync: true, join: true, weight: 1 });
+  w.scene.advance(0.5);
   vecClose3(w.body(), [0, 0, 1.5], 'three a second, the average');
 });
 
@@ -1243,7 +1244,7 @@ test('with apply: false, the motion is reported and the character left alone', (
   const w = walker([forward()]);
   w.player.rootMotion({ apply: false });
   w.model.play('walk');
-  w.scene.advanceAnimations(0.5);
+  w.scene.advance(0.5);
   vecClose3(w.body(), [0, 0, 0]);
   vecClose3([...w.player.motion.position], [0, 0, 1]);
   vecClose3(w.hips(), [0, 1.25, 0], 'the hips still stay in place: the controller moves the body');
@@ -1253,7 +1254,7 @@ test('vertical: true hands the height over too', () => {
   const w = walker([forward()]);
   w.player.rootMotion({ vertical: true });
   w.model.play('walk');
-  w.scene.advanceAnimations(0.5);
+  w.scene.advance(0.5);
   vecClose3(w.body(), [0, 0.25, 1]);
   vecClose3(w.hips(), [0, 1, 0]);
 });
@@ -1262,9 +1263,9 @@ test('turned off, the hips walk away again', () => {
   const w = walker([forward()]);
   w.player.rootMotion();
   w.model.play('walk');
-  w.scene.advanceAnimations(0.5);
+  w.scene.advance(0.5);
   w.player.rootMotion(null);
-  w.scene.advanceAnimations(0.25);
+  w.scene.advance(0.25);
   vecClose3(w.body(), [0, 0, 1], 'no further motion');
   vecClose3([...w.player.motion.position], [0, 0, 0], 'and none reported');
   vecClose3(w.hips(), [0, 1.375, 1.5], 'the clip drives the hips directly');
@@ -1296,8 +1297,8 @@ test('on a Z-up rig, a turn about the rig\'s up axis is a turn about the world\'
   }], { zUp: true });
   w.player.rootMotion({ node: 'hips' });
   w.model.play('turn', { loop: false });
-  w.scene.advanceAnimations(0.25);
-  w.scene.advanceAnimations(0.25);
+  w.scene.advance(0.25);
+  w.scene.advance(0.25);
   close(w.player.motion.yaw, Math.PI / 8, 1e-5, 'the second eighth of the quarter turn');
   vecClose4(w.hipsRotation(), [0, 0, 0, 1], 'the hips face the way they rested');
 });
@@ -1311,8 +1312,8 @@ test('a looping turn keeps turning through the wrap', () => {
   }]);
   w.player.rootMotion({ node: 'hips' });
   w.model.play('circle');
-  w.scene.advanceAnimations(0.75);
-  w.scene.advanceAnimations(0.5);
+  w.scene.advance(0.75);
+  w.scene.advance(0.5);
   close(w.player.motion.yaw, Math.PI / 4, 1e-5, 'half a second of a quarter turn a second, across the wrap');
 });
 
@@ -1320,9 +1321,9 @@ test('synced clips move the character through their shared wrap', () => {
   const w = walker([forward('walk', 2), forward('run', 4)]);
   w.player.rootMotion();
   w.model.play('walk', { sync: true });
-  w.model.play('run', { sync: true, add: true, weight: 1 });
-  w.scene.advanceAnimations(0.75);
-  w.scene.advanceAnimations(0.5);
+  w.model.play('run', { sync: true, join: true, weight: 1 });
+  w.scene.advance(0.75);
+  w.scene.advance(0.5);
   vecClose3(w.body(), [0, 0, 3.75], 'three a second for 1.25 s');
 });
 
@@ -1330,10 +1331,10 @@ test('a clip that has finished adds no more motion to a blend', () => {
   const w = walker([forward('walk', 2), forward('run', 4)]);
   w.player.rootMotion();
   w.model.play('walk', { loop: false });
-  w.scene.advanceAnimations(1.5);
+  w.scene.advance(1.5);
   vecClose3(w.body(), [0, 0, 2], 'the walk ran out at 2');
-  w.model.play('run', { add: true });
-  w.scene.advanceAnimations(0.5);
+  w.model.play('run', { join: true });
+  w.scene.advance(0.5);
   // The run moves 2 in that half second; the finished walk moves nothing and
   // has an equal weight, so the character moves 1.
   vecClose3(w.body(), [0, 0, 3]);
@@ -1351,7 +1352,7 @@ test('an asset with several roots moves by its wrapper, facing included', () => 
   model.setRotation([0, Math.SQRT1_2, 0, Math.SQRT1_2]);
   model.animation.rootMotion();
   model.play('walk');
-  scene.advanceAnimations(0.5);
+  scene.advance(0.5);
   const i = handleIndex(model.entity);
   vecClose3([...scene.transforms.position.subarray(i * 3, i * 3 + 3)], [1, 0, 0], 'forward is the wrapper\'s +X');
 });
@@ -1362,7 +1363,7 @@ test('the instance\'s own node is never the one found, even when a clip moves it
   const w = walker([clip]);
   w.player.rootMotion();
   w.model.play('walk');
-  w.scene.advanceAnimations(0.5);
+  w.scene.advance(0.5);
   assert.equal(w.player.motion.position[2].toFixed(5), '1.00000', 'the hips carry it');
 });
 

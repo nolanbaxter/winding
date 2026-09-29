@@ -97,7 +97,7 @@ export class Benchmark {
    */
   async run(scene, camera, { frames = 300, warmup = 30, update = null } = {}) {
     const engine = this.engine;
-    const queue = engine.rhi.device.queue;
+    const queue = engine.gpu.device.queue;
 
     // Attached for the warmup too, so everything that only happens the first
     // time something is measured -- GPU timing's query set and staging

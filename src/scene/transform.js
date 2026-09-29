@@ -30,6 +30,11 @@ import { JOB_COMPOSE_TRANSFORMS } from '../core/jobs.js';
 
 export const NO_PARENT = -1;
 
+/** assertFinite for three loose numbers, without an array per call in someone's loop. */
+function finite3(what, x, y, z) {
+  if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z))) throw new Error(`${what}: non-finite in (${x}, ${y}, ${z})`);
+}
+
 export class TransformStore {
   constructor(capacity) {
     this.capacity = capacity;
@@ -232,28 +237,29 @@ export class TransformStore {
   }
 
   setPosition(entity, x, y, z) {
+    // Checked HERE rather than in the composition loop: this is where a bad
+    // value enters, and the loop runs per node per frame. Before the write, so
+    // a caught throw leaves the node where it was.
+    if (DEBUG) finite3('setPosition', x, y, z);
     const o = handleIndex(entity) * 3;
     this.position[o] = x; this.position[o + 1] = y; this.position[o + 2] = z;
-    // Checked HERE rather than in the composition loop: this is where a bad
-    // value enters, and the loop runs per node per frame.
-    if (DEBUG) assertFinite(this.position, 'setPosition', o, 3);
     this.dirty[handleIndex(entity)] = 1;
     this._anyDirty = true;
   }
 
   setScale(entity, x, y, z) {
+    if (DEBUG) finite3('setScale', x, y, z);
     const o = handleIndex(entity) * 3;
     this.scale[o] = x; this.scale[o + 1] = y; this.scale[o + 2] = z;
-    if (DEBUG) assertFinite(this.scale, 'setScale', o, 3);
     this.dirty[handleIndex(entity)] = 1;
     this._anyDirty = true;
   }
 
   setRotation(entity, q) {
+    if (DEBUG) assertFinite(q, 'setRotation', 0, 4);
     const o = handleIndex(entity) * 4;
     this.rotation[o] = q[0]; this.rotation[o + 1] = q[1];
     this.rotation[o + 2] = q[2]; this.rotation[o + 3] = q[3];
-    if (DEBUG) assertFinite(this.rotation, 'setRotation', o, 4);
     this.dirty[handleIndex(entity)] = 1;
     this._anyDirty = true;
   }

@@ -327,6 +327,20 @@ export function pixelatedSampler(rhi) {
   }));
 }
 
+/**
+ * What a sprite samples its image with: pixelated or smooth, and repeating
+ * when its rect reaches past the image (scene.js, repeats), so a rect of
+ * [0, 0, 8, 1] shows it eight times across.
+ */
+export function spriteSampler(rhi, pixelated, repeat) {
+  if (!repeat) return pixelated ? pixelatedSampler(rhi) : clampSampler(rhi);
+  return cached(rhi, pixelated ? 'pixelated-repeat' : 'repeat', () => rhi.device.createSampler({
+    label: pixelated ? 'pixelated-repeat' : 'repeat',
+    magFilter: pixelated ? 'nearest' : 'linear', minFilter: 'linear', mipmapFilter: 'linear',
+    addressModeU: 'repeat', addressModeV: 'repeat',
+  }));
+}
+
 /** Clamped, non-anisotropic. For cubemaps and full-screen work. */
 export function clampSampler(rhi) {
   return cached(rhi, 'clamp', () => rhi.device.createSampler({

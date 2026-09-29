@@ -39,7 +39,7 @@ import { OIT_RESOLVE_SHADER } from '../src/render/shaders/oit.js';
 import { HZB_SHADER } from '../src/render/hzb.js';
 import { CLUSTER_SHADER } from '../src/render/clustered.js';
 import { POST_SHADER } from '../src/render/post.js';
-import { Renderer } from '../src/render/renderer.js';
+import { Renderer, FEATURE_OIT } from '../src/render/renderer.js';
 import {
   DrawList, opaqueSortKey, transparentSortKey,
   transparentDepthBucket,
@@ -1078,26 +1078,28 @@ test('fog scatters each directional light isotropically, times its albedo', () =
   assert.deepEqual([...out.subarray(2, 14)], new Array(12).fill(0), 'no fog: zeros, and extinction 0 turns it off');
 });
 
-test('a reflection probe is checked, centred by default, and packed smallest box first', () => {
-  const room = probeRecord({ min: [-5, 0, -5], max: [5, 4, 5] });
-  assert.deepEqual([...room.position], [0, 2, 0], 'the box centre');
-  assert.equal(room.blend, 0);
+test('a reflection probe is checked, boxed around its node, and packed smallest box first', () => {
+  const room = probeRecord({ size: [10, 4, 10] }, [0, 2, 0]);
+  assert.deepEqual([...room.min, ...room.max], [-5, 0, -5, 5, 4, 5], 'the box around where it is');
+  assert.deepEqual([...room.position], [0, 2, 0], 'seen from its centre');
+  assert.equal(room.fade, 0);
   for (const [options, why] of [
-    [{ min: [0, 0, 0], max: [1, 1] }, /max must be three/],
-    [{ min: [0, 0, 0], max: [1, 0, 1] }, /above min on every axis/],
-    [{ min: [0, 0, 0], max: [1, 1, 1], position: [2, 0, 0] }, /inside the box/],
-    [{ min: [0, 0, 0], max: [1, 1, 1], blend: -1 }, /blend/],
+    [{ size: [1, 1] }, /size must be/],
+    [{ size: [1, 0, 1] }, /all positive/],
+    [{ min: [0, 0, 0], max: [1, 1, 1] }, /a node now/],
+    [{ size: [1, 1, 1], fade: -1 }, /fade must be 0 or more/],
+    [{ size: [1, 1, 1], blend: 0.5 }, /addProbe: blend is now fade/],
   ]) assert.throws(() => probeRecord(options), why);
 
-  const closet = probeRecord({ min: [0, 0, 0], max: [1, 2, 1], blend: 0.25 });
-  const hall = probeRecord({ min: [-20, 0, -20], max: [20, 5, 20] });
-  const pending = probeRecord({ min: [0, 0, 0], max: [1, 1, 1] });
+  const closet = probeRecord({ size: [1, 2, 1], fade: 0.25 }, [0.5, 1, 0.5]);
+  const hall = probeRecord({ size: [40, 5, 40] }, [0, 2.5, 0]);
+  const pending = probeRecord({ size: [1, 1, 1] }, [0.5, 0.5, 0.5]);
   room.captured = closet.captured = hall.captured = true;
   const layers = new Map([[room, 0], [closet, 1], [hall, 2], [pending, 3]]);
   const { data, count } = packProbes([hall, room, pending, closet], layers);
   assert.equal(count, 3, 'a probe never captured has nothing to show');
   assert.deepEqual([0, 1, 2].map((k) => data[k * PROBE_FLOATS + 7]), [1, 0, 2], 'closet, room, hall');
-  assert.equal(data[3], 0.25, 'blend in min.w');
+  assert.equal(data[3], 0.25, 'fade in min.w');
 });
 
 test('each probe face camera is right-handed, so the copy into the cube is one mirror across u', () => {
@@ -1167,6 +1169,28 @@ test('text wraps between words to a width, as CSS wraps it in a box', () => {
   assert.deepEqual(lineOf(layoutText('ab\nab', metrics, { anchor: [0, 1], width: 9 })), [1, 1, 2, 2], 'a newline still breaks');
 });
 
+test('text kerns pairs, breaks Chinese and Japanese between characters, and counts graphemes', () => {
+  const glyph = (advance) => ({ advance, left: 0, width: advance, height: 1, descent: 0 });
+  const glyphs = new Map([['A', glyph(1)], ['V', glyph(1)], [' ', { advance: 0.25, left: 0, width: 0, height: 0, descent: 0 }]]);
+  // A V pulled together by a fifth of an em, as the font would.
+  const metrics = { ascent: 0.8, descent: 0.2, glyphs, kern: (a, b) => (a === 'A' && b === 'V' ? -0.2 : 0) };
+  const kerned = layoutText('AVA', metrics, { anchor: [0, 0] });
+  assert.deepEqual(kerned.boxes.map((g) => +g.x.toFixed(6)), [0, 0.8, 1.8], 'V sits closer to A; A after V does not');
+  assert.equal(+kerned.block[2].toFixed(6), 2.8, 'and the line is measured kerned');
+
+  // Written without spaces: a line may break between any two characters,
+  // but not before a closing mark.
+  for (const ch of '漢字仮名。') glyphs.set(ch, glyph(1));
+  const lineOf = (layout) => layout.boxes.map((g) => Math.round(-g.y));
+  assert.deepEqual(lineOf(layoutText('漢字仮名', metrics, { anchor: [0, 1], width: 2 })), [1, 1, 2, 2], 'two a line');
+  assert.deepEqual(lineOf(layoutText('漢字仮。', metrics, { anchor: [0, 1], width: 2 })), [1, 1, 2, 2], 'the full stop stays with its character');
+
+  // A letter and its accent, an emoji and its modifier: one glyph each.
+  glyphs.set('e\u0301', glyph(1));   // e + combining acute
+  glyphs.set('👍🏽', glyph(1));
+  assert.deepEqual(layoutText('e\u0301👍🏽', metrics).boxes.map((g) => g.char), ['e\u0301', '👍🏽']);
+});
+
 test('a text takes a loadFont font, rasterises what it uses, and names a bad option', () => {
   const asked = [];
   const font = { metrics: { ascent: 0.8, descent: 0.2, glyphs: new Map() }, ensure: (t) => asked.push(t) };
@@ -1175,7 +1199,7 @@ test('a text takes a loadFont font, rasterises what it uses, and names a bad opt
   assert.deepEqual([record.facing, record.pixels, [...record.color].join()], ['camera', false, '1,1,1,1']);
   for (const [options, why] of [
     [{ text: 'x', size: 1 }, /font must be/], [{ font, text: 'x' }, /size must be positive/],
-    [{ font, text: 'x', size: 1, facing: 'down' }, /facing/], [{ font, text: 'x', size: 1, anchor: [0] }, /anchor/],
+    [{ font, text: 'x', size: 1, facing: 'down' }, /facing/], [{ font, text: 'x', size: 1, pivot: [0] }, /pivot/], [{ font, text: 'x', size: 1, anchor: [0, 0] }, /anchor is now pivot/],
   ]) assert.throws(() => textRecord(options), why);
 });
 
@@ -1674,9 +1698,10 @@ await (async () => {
   // still compiling has to be waited on, and only warm() knows which.
   const handed = [];
   const renderer = Object.assign(Object.create(Renderer.prototype), {
-    _variantSets: new Map([[0, { forward: new Map(), oit: new Map(), ready: true }]]),
+    // The set with OIT built in: its forward pipelines and its OIT copies.
+    _variantSets: new Map([[FEATURE_OIT, { features: FEATURE_OIT, forward: new Map(), oit: new Map(), ready: true }]]),
     pipelines: { warm: async (descs) => handed.push(descs.length) },
-    oit: true, pipelineLayout: {}, shader: {},
+    pipelineLayout: {}, shader: {},
   });
   const BLEND = 2;
   await renderer.ensureVariants([BLEND]);
@@ -1777,6 +1802,8 @@ test('flat pixels decode by Radiance\'s own formula, top row first', () => {
   // 2x1: (128, 64, 0 | 129) and a zero exponent, which is black.
   const { width, height, data } = parseHDR(hdrFile('-Y 1 +X 2', [128, 64, 0, 129, 200, 200, 200, 0]));
   assert.equal(width, 2); assert.equal(height, 1);
+  const file = hdrFile('-Y 1 +X 2', [128, 64, 0, 129, 200, 200, 200, 0]);
+  assert.deepEqual(parseHDR(file.slice().buffer).data, data, 'an ArrayBuffer decodes the same');
   close(data[0], rgbeValue(128, 129), 1e-12);
   close(data[1], rgbeValue(64, 129), 1e-12);
   close(data[2], rgbeValue(0, 129), 1e-12);

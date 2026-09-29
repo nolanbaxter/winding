@@ -130,7 +130,7 @@ export async function run(canvas, onDone) {
       engine.renderFrame(scene, camera);
     }
     // Errors are raised while the queue drains, which has not happened yet.
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
   });
 
   await step('a benchmark times every CPU phase and GPU pass, and leaves nothing on', async () => {
@@ -194,7 +194,7 @@ export async function run(canvas, onDone) {
     cam.position.set([0, 2, 8]);
     engine.renderFrame(lightScene, cam);
 
-    const device = engine.rhi.device;
+    const device = engine.gpu.device;
     const read = async (buffer, bytes) => {
       const staging = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const encoder = device.createCommandEncoder();
@@ -326,7 +326,7 @@ export async function run(canvas, onDone) {
     }
 
     for (let i = 0; i < 5; i++) engine.renderFrame(scene, camera);
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
 
     if (scene.renderableCount <= startRenderables) throw new Error('nothing was added');
     if (gpu.capacity < scene.renderableCount) {
@@ -361,7 +361,7 @@ export async function run(canvas, onDone) {
     const rigged = await engine.load(buildRiggedGLB());
     const riggedNode = scene.add(rigged);
     engine.renderFrame(scene, camera);
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
 
     const palette = engine.renderer.skinPalette;
     if (palette.jointCount !== 2) {
@@ -394,7 +394,7 @@ export async function run(canvas, onDone) {
     const skin = scene.skins[scene.renderableSkin[riggedIndex]];
     scene.transforms.setPosition(skin.joints[1], 0, 12, 0);
     engine.renderFrame(scene, camera);
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
 
     const afterTop = scene.worldMax[riggedIndex * 3 + 1];
     if (!(afterTop > beforeTop + 5)) {
@@ -433,9 +433,9 @@ export async function run(canvas, onDone) {
     morphNode.weights[0] = 0.5;      // top edge up by 10 * 0.5
     morphNode.weights[1] = 0.25;     // right edge out by 4 * 0.25
     engine.renderFrame(scene, camera);
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
 
-    const device = engine.rhi.device;
+    const device = engine.gpu.device;
     const store = engine.renderer.morph;
     const primitive = morphed.meshes[0].primitives[0];
 
@@ -571,7 +571,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const skin = scene.skins[scene.renderableSkin[index]];
     scene.transforms.setPosition(skin.joints[1], 0, 12, 0);
     engine.renderFrame(scene, camera);
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
 
     const posedTop = scene.worldMax[index * 3 + 1];
     const restingFront = scene.worldMax[index * 3 + 2];
@@ -582,7 +582,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     // Now the weight, on an axis the skeleton did not touch.
     bothNode.weights[0] = 1;
     engine.renderFrame(scene, camera);
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
 
     const morphedFront = scene.worldMax[index * 3 + 2];
     if (Math.abs(morphedFront - restingFront - 3) > 0.01) {
@@ -659,8 +659,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       }
       probe.renderFrame(scene, cam);
       // Once per frame, before anything else awaits -- see rhi.readPixels.
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       const read = ([x, y]) => {
         const i = (Math.floor(y * height) * width + Math.floor(x * width)) * 4;
         return [pixels[i], pixels[i + 1], pixels[i + 2]];
@@ -938,15 +938,15 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] })));
         if (withBlocker) {
           scene.add(await probe.load(buildFeatureGLB({ ...blocker, nodeScale: [0.25, 0.25, 1] })))
-            .setPosition(0, 0, 0.8).setRotationAxisAngle([0, 1, 0], Math.PI);
+            .setPosition(0, 0, 0.8).setAxisAngle([0, 1, 0], Math.PI);
         }
         const cam = new Camera({ fovY: 0.9, near: 0.05 });
         cam.position.set([2.5, 0.3, 2.5]);
         cam.target.set([0, 0, 0]);
-        for (let i = 0; i < 3; i++) { probe.renderFrame(scene, cam); await probe.rhi.device.queue.onSubmittedWorkDone(); }
+        for (let i = 0; i < 3; i++) { probe.renderFrame(scene, cam); await probe.gpu.device.queue.onSubmittedWorkDone(); }
         probe.renderFrame(scene, cam);
-        const pixels = await probe.rhi.readPixels();
-        const { width, height } = probe.rhi;
+        const pixels = await probe.gpu.readPixels();
+        const { width, height } = probe.gpu;
         const i = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
         return [pixels[i], pixels[i + 1], pixels[i + 2]];
       };
@@ -987,8 +987,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         cam.position.set([0, 0, 2]);
         cam.target.set([0, 0, 0]);
         probe.renderFrame(scene, cam);
-        const pixels = await probe.rhi.readPixels();
-        const { width, height } = probe.rhi;
+        const pixels = await probe.gpu.readPixels();
+        const { width, height } = probe.gpu;
         const i = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
         return [pixels[i], pixels[i + 1], pixels[i + 2]];
       };
@@ -1037,13 +1037,13 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     cam.target.set([0, 0, 0]);
     const shot = async (castRight, castLeft) => {
       const scene = engine.createScene();
-      scene.add(ground).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
-      scene.add(block).setRotationAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
+      scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
+      scene.add(block).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
       scene.addLight({ type: 'directional', direction: [1, -1, 0], intensity: 5, castShadow: castRight });  // shadow at +x
       scene.addLight({ type: 'directional', direction: [-1, -1, 0], intensity: 5, castShadow: castLeft }); // shadow at -x
       engine.renderFrame(scene, cam);
-      const pixels = await engine.rhi.readPixels();
-      const { width, height } = engine.rhi;
+      const pixels = await engine.gpu.readPixels();
+      const { width, height } = engine.gpu;
       const at = ([x, y, z]) => {
         const m = cam.viewProjection;
         const w = m[3] * x + m[7] * y + m[11] * z + m[15];
@@ -1085,13 +1085,13 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     cam.target.set([0, 0, 0]);
     const brightness = async (light) => {
       const scene = engine.createScene();
-      scene.add(ground).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
+      scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
       // Facing down, so the light sees its back: the shadow pass culls fronts.
-      scene.add(block).setRotationAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
+      scene.add(block).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
       scene.addLight({ position: [0, 3, 0], intensity: 40, radius: 12, ...light });
       engine.renderFrame(scene, cam);
-      const pixels = await engine.rhi.readPixels();
-      const { width, height } = engine.rhi;
+      const pixels = await engine.gpu.readPixels();
+      const { width, height } = engine.gpu;
       const at = (fx) => {
         const i = (Math.floor(height / 2) * width + Math.floor(fx * width)) * 4;
         return 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
@@ -1131,16 +1131,16 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     cam.position.set([0, 6, 0.01]);
     cam.target.set([0, 0, 0]);
     const scene = engine.createScene();
-    scene.add(ground).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
-    const blocker = scene.add(block).setRotationAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
+    scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(5, 5, 1);
+    const blocker = scene.add(block).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
     const far = scene.add(block).setPosition(40, 0, 0);
     scene.addLight({ type: 'point', position: [0, 3, 0], intensity: 40, radius: 8, castShadow: true });
     const frame = async () => {
       engine.renderFrame(scene, cam);
-      const pixels = await engine.rhi.readPixels();
+      const pixels = await engine.gpu.readPixels();
       return { pixels, drawn: engine.renderer.stats.shadowViewsDrawn };
     };
-    const { width, height } = engine.rhi;
+    const { width, height } = engine.gpu;
     const lum = (pixels, fx) => {
       const i = (Math.floor(height / 2) * width + Math.floor(fx * width)) * 4;
       return 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
@@ -1178,7 +1178,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         else data[o] = 1;
       }
     }
-    const environment = new Environment(engine.rhi, { map: { width, height, data } });
+    const environment = new Environment(engine.gpu, { map: { width, height, data } });
     if (environment.environment.width !== width / 4) {
       throw new Error(`a ${width}-wide map baked a ${environment.environment.width} cube, expected ${width / 4}`);
     }
@@ -1188,8 +1188,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.position.set([0, 0, 0]);
       cam.target.set(target);
       engine.renderFrame(scene, cam);
-      const pixels = await engine.rhi.readPixels();
-      const { width: w, height: h } = engine.rhi;
+      const pixels = await engine.gpu.readPixels();
+      const { width: w, height: h } = engine.gpu;
       const i = (Math.floor(h / 2) * w + Math.floor(w / 2)) * 4;
       return [pixels[i], pixels[i + 1], pixels[i + 2]];
     };
@@ -1219,17 +1219,17 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       canvas.style.height = '240px';
       document.body.appendChild(canvas);
       const probe = await Winding.create(canvas, { ao });
-      probe.rhi.resize(320, 240);
+      probe.gpu.resize(320, 240);
       const scene = probe.createScene();
       const quad = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], roughnessFactor: 1 }));
-      scene.add(quad).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
+      scene.add(quad).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
       scene.add(quad).setScale(4, 2, 1).setPosition(0, 3.2, -1.2);
       const cam = new Camera({ fovY: 1.0, near: 0.1 });
       cam.position.set([0, 1.2, 4]);
       cam.target.set([0, 0, -1]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       const values = points.map(([x, y, z]) => {
         const m = cam.viewProjection;
         const w = m[3] * x + m[7] * y + m[11] * z + m[15];
@@ -1256,6 +1256,59 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   });
 
 
+  await step('antialiasing, ambient occlusion and OIT switch on and off at runtime', async () => {
+    // An engine made with all three off. Asked for later, each builds in the
+    // background; a frame after that has it, and a frame after switching it
+    // off does not. The tilted quad's edge shows the antialiasing.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 }, exposure: 4,
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    probe.gpu.device.pushErrorScope('validation');
+    probe.gpu.resize(320, 240);
+    const scene = probe.createScene();
+    scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
+      .setAxisAngle([0, 0, 1], 0.3).setScale(0.5, 0.5, 1);
+    scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.4, 1, 0.5], alphaMode: 'BLEND' })))
+      .setPosition(0.6, 0, 0.5).setScale(0.3, 0.3, 1);
+    const cam = new Camera({ fovY: 1.0, near: 0.1 });
+    cam.position.set([0, 0, 3]);
+    cam.target.set([0, 0, 0]);
+    const r = probe.renderer;
+    const look = async () => {
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels();
+      let between = 0;
+      for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 1] > 25 && pixels[i + 1] < 230) between++;
+      return { aa: r.post._antialiasing, ao: r._frameAO, oit: r._frameOIT, between };
+    };
+    const off = await look();
+    r.post.antialias = true;
+    r.ao = { radius: 0.2 };
+    r.oit = true;
+    const asked = await look();   // asks: builds start, this frame draws without them
+    await Promise.all([r.post._fxaaBuilding, ...[...r._variantSets.values()].map((set) => set.building)]);
+    const on = await look();
+    r.post.antialias = false;
+    r.ao = null;
+    r.oit = false;
+    const offAgain = await look();
+    const error = await probe.gpu.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+    const show = (s) => `aa ${s.aa}, ao ${s.ao}, oit ${s.oit}, ${s.between} px between`;
+    const report = `made off: ${show(off)}; the frame that asked: ${show(asked)}; once built: ${show(on)}; off again: ${show(offAgain)}`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const is = (s, v) => s.aa === v && s.ao === v && s.oit === v;
+    if (!(is(off, false) && is(on, true) && is(offAgain, false) && on.between > 50 && offAgain.between < on.between / 4)) throw new Error(report);
+    return report;
+  });
+
   await step('antialiasing softens a hard edge, and off leaves it hard', async () => {
     // A flat quad turned a little against a flat sky, unlit so the edge is
     // one colour meeting another. Without antialiasing every pixel along it
@@ -1274,15 +1327,15 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         exposure: 4,
         environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
       });
-      probe.rhi.resize(320, 240);
+      probe.gpu.resize(320, 240);
       const scene = probe.createScene();
       scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
-        .setRotationAxisAngle([0, 0, 1], 0.3).setScale(0.5, 0.5, 1);
+        .setAxisAngle([0, 0, 1], 0.3).setScale(0.5, 0.5, 1);
       const cam = new Camera({ fovY: 1.0, near: 0.1 });
       cam.position.set([0, 0, 3]);
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
+      const pixels = await probe.gpu.readPixels();
       let between = 0;
       for (let i = 0; i < pixels.length; i += 4) {
         const g = pixels[i + 1];
@@ -1311,7 +1364,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       post: { strength: 0 },
       antialias: false,
     });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const { planckianXY } = await import('../src/render/grading.js');
     // A tungsten light's colour in linear sRGB, from its chromaticity, brightest channel 0.5.
     const [x, y] = planckianXY(3200);
@@ -1328,8 +1381,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.position.set([0, 0, 2]);
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       const i = ((height >> 1) * width + (width >> 1)) * 4;
       return [pixels[i], pixels[i + 1], pixels[i + 2]];
     };
@@ -1343,7 +1396,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const invert = await probe.loadLUT(cube((r, g, b) => [1 - r, 1 - g, 1 - b]));
     const same = await shot(orange, { lut: identity });
     const inverted = await shot(orange, { lut: invert });
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
     const show = (p) => `rgb(${p.join(',')})`;
@@ -1368,7 +1421,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       post: { strength: 0 },
       antialias: false,
     });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const quad = await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], materialExtensions: { KHR_materials_unlit: {} } }));
     const { lensCoefficients } = await import('../src/render/dof.js');
     // The quad's right edge along the middle row, the quad 5 m away.
@@ -1380,8 +1433,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.position.set([0, 0, 5]);
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       let between = 0;
       for (let x = 0; x < width; x++) {
         const v = pixels[((height >> 1) * width + x) * 4];
@@ -1395,8 +1448,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const near = { fStop: 0.2, focusDistance: 0.5 };
     const blurred = await edge(near);
     // What the lens says the quad's disc is, focused at 0.5: scale (1 - 0.5 / 5).
-    const disc = lensCoefficients(near, 1, probe.rhi.height).scale * (1 - 0.5 / 5);
-    const error = await probe.rhi.device.popErrorScope();
+    const disc = lensCoefficients(near, 1, probe.gpu.height).scale * (1 - 0.5 / 5);
+    const error = await probe.gpu.device.popErrorScope();
     probe.renderer.dof = null;
     probe.destroy();
     canvas.remove();
@@ -1418,7 +1471,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       post: { strength: 0 },
       antialias: false,
     });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const font = await probe.loadFont('128px sans-serif');
     const red = [1, 0, 0, 1];
     const shot = async (build, { from = [0, 0, 3] } = {}) => {
@@ -1428,8 +1481,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.position.set(from);
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       let lit = 0;
       let partial = 0;
       for (let i = 0; i < pixels.length; i += 4) {
@@ -1444,15 +1497,15 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     // Its edges along the middle row: every pixel between dark and full.
     const ramp = big.row.filter((v) => v > 30 && v <= 200).length;
     const flat = await shot((s) => s.addText({ font, text: 'I', size: 1, color: red, facing: 'plane' })
-      .setRotationAxisAngle([0, 1, 0], Math.PI / 2));
+      .setAxisAngle([0, 1, 0], Math.PI / 2));
     const facing = await shot((s) => s.addText({ font, text: 'I', size: 1, color: red })
-      .setRotationAxisAngle([0, 1, 0], Math.PI / 2));
+      .setAxisAngle([0, 1, 0], Math.PI / 2));
     // Enough glyphs at 128 px to overflow a 512 atlas, then the I again.
     const before = big.lit;
     font.ensure('ABCDEFGHJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789');
     const atlas = font.texture.width;
     const after = (await shot((s) => s.addText({ font, text: 'I', size: 3, color: red }))).lit;
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     font.destroy();
     probe.destroy();
     canvas.remove();
@@ -1478,19 +1531,19 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
       post: { strength: 0 },
     });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     // Red on the left of the image, clear on the right.
     const image = await probe.loadTexture(twoToneImageURI('#ff0000', 'rgba(255,0,0,0)'));
     const green = await probe.loadTexture(twoToneImageURI('#00ff00', 'rgba(0,255,0,0)'));
     const floor = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0 }));
     const look = async ({ decal = true, fromBelow = false, intensity = 3, layers = [image] } = {}) => {
       const scene = probe.createScene();
-      scene.add(floor).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(3, 3, 1);
+      scene.add(floor).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(3, 3, 1);
       scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity });
       // A 2 x 2 box, projecting straight down -- or straight up, from below.
       for (const texture of decal ? layers : []) {
         scene.addDecal({ texture, size: [2, 2, 1] })
-          .setRotationAxisAngle([1, 0, 0], fromBelow ? Math.PI / 2 : -Math.PI / 2);
+          .setAxisAngle([1, 0, 0], fromBelow ? Math.PI / 2 : -Math.PI / 2);
       }
       const cam = new Camera({ fovY: 1, near: 0.1 });
       cam.position.set([0, 6, 0.01]);
@@ -1499,8 +1552,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       // The first frame with decals starts their pipelines; draw once they are ready.
       await probe.renderer._variantSets.get(2)?.building;
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       const at = (x) => [0, 1, 2].map((c) => pixels[((height >> 1) * width + Math.floor(x * width)) * 4 + c]);
       // World x -0.44, +0.44 and +1.4: the red half, the clear half, outside the box.
       return { red: at(0.45), clear: at(0.55), outside: at(0.8) };
@@ -1513,7 +1566,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     // whatever order the cluster pass listed them in.
     const greenLast = await look({ layers: [image, green] });
     const redLast = await look({ layers: [green, image] });
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
     const show = (p) => `rgb(${p.join(',')})`;
@@ -1539,7 +1592,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
       post: { strength: 0 },
     });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const cam = new Camera({ fovY: 1, near: 0.1 });
     cam.position.set([0, 0, 6]);
     cam.target.set([0, 0, 0]);
@@ -1549,10 +1602,10 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       const system = probe.renderer.particles;
       const ring = system.rings.get(node.entity);
       const bytes = ring.capacity * 32;
-      const buffer = probe.rhi.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      const encoder = probe.rhi.device.createCommandEncoder();
+      const buffer = probe.gpu.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = probe.gpu.device.createCommandEncoder();
       encoder.copyBufferToBuffer(system.pool, ring.offset * 32, buffer, 0, bytes);
-      probe.rhi.queue.submit([encoder.finish()]);
+      probe.gpu.queue.submit([encoder.finish()]);
       await buffer.mapAsync(GPUMapMode.READ);
       const f = new Float32Array(buffer.getMappedRange().slice(0));
       buffer.unmap();
@@ -1571,7 +1624,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       scene.burst(node, 32);
       probe.renderFrame(scene, cam);
       for (let k = 0; k < steps; k++) {
-        scene.advanceParticles(dt);
+        scene.advance(dt);
         probe.renderFrame(scene, cam);
       }
       return read(node);
@@ -1596,18 +1649,18 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const stream = scene.addEmitter({ rate: 100, lifetime: 1, size: 0.3, speed: 0.5, color: [4, 4, 4, 1] });
     // The canvas first: its image lasts only until something else awaits.
     const lit = async () => {
-      const pixels = await probe.rhi.readPixels();
+      const pixels = await probe.gpu.readPixels();
       let n = 0;
       for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 60) n++;
       return n;
     };
-    for (let k = 0; k < 5; k++) { scene.advanceParticles(0.1); probe.renderFrame(scene, cam); }
+    for (let k = 0; k < 5; k++) { scene.advance(0.1); probe.renderFrame(scene, cam); }
     const drawn = await lit();
     const alive = (await read(stream)).length;
     scene.setEmitter(stream, { rate: 0 });
-    for (let k = 0; k < 12; k++) { scene.advanceParticles(0.1); probe.renderFrame(scene, cam); }
+    for (let k = 0; k < 12; k++) { scene.advance(0.1); probe.renderFrame(scene, cam); }
     const after = await lit();
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -1633,7 +1686,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
       post: { strength: 0 },
     });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
     const halfClear = await probe.loadTexture(twoToneImageURI('rgba(255,255,255,0)', '#ffffff'));
     const wall = await probe.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.2, 0.2, 1], materialExtensions: { KHR_materials_unlit: {} } }));
@@ -1644,8 +1697,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.position.set(from);
       cam.target.set(to);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       return {
         middle: [0, 1, 2].map((c) => pixels[((height >> 1) * width + (width >> 1)) * 4 + c]),
         at: (x) => [0, 1, 2].map((c) => pixels[((height >> 1) * width + Math.floor(x * width)) * 4 + c]),
@@ -1676,7 +1729,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const facing = await shot((s) => s.addSprite({ texture: white, color: red }), above);
     const upright = await shot((s) => s.addSprite({ texture: white, color: red, facing: 'upright' }), above);
     const cutout = await shot((s) => s.addSprite({ texture: halfClear, color: red, position: [0, 0, -2], blend: 'cutout' }));
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -1702,11 +1755,11 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const probe = await Winding.create(canvas);
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
     const sharp = await probe.loadTexture(twoToneImageURI('#ff0000', '#0000ff'), { pixelated: true });
     const smooth = await probe.loadTexture(twoToneImageURI('#ff0000', '#0000ff'));
-    const { width: W, height: H, pixelRatio: r } = probe.rhi;
+    const { width: W, height: H, pixelRatio: r } = probe.gpu;
     const scene = probe.createScene();
     // A unit is a CSS pixel: places and sizes are fractions of the view, in them.
     const box = (texture, x, y, w, h, options = {}) => scene.addSprite({
@@ -1724,7 +1777,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 
     const shoot = async () => {
       probe.renderFrame(scene, camera);
-      const pixels = await probe.rhi.readPixels();
+      const pixels = await probe.gpu.readPixels();
       return (x, y) => {
         const i = (Math.floor(y * H) * W + Math.floor(x * W)) * 4;
         return [pixels[i], pixels[i + 1], pixels[i + 2]];
@@ -1735,7 +1788,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     grey.setPosition(0.05 * W / r, 0.75 * H / r);
     const second = await shoot();
     const movedWritten = probe.stats.sprites2DWritten;
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -1761,13 +1814,127 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report;
   });
 
+  await step('2D multiplies and screens, repeats, smooths turned edges, outlines text, joins long lines, and draws into targets', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    probe.gpu.device.pushErrorScope('validation');
+    const { width: W, pixelRatio: r } = probe.gpu;
+    const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
+    const stripes = await probe.loadTexture(twoToneImageURI('#ff0000', '#0000ff'), { pixelated: true });
+    const font = await probe.loadFont('64px sans-serif');
+    const scene = probe.createScene();
+    // A unit is a canvas pixel here.
+    const camera = new Camera2D({ zoom: 1 / r, background: [1, 1, 1, 1] });
+    const box = (x, y, w, h, options) => scene.addSprite({ texture: white, position: [x, y], size: [w, h], pivot: [0, 0], ...options });
+    // Multiply: grey over red halves it. Screen: red over dark blue adds them, less their product.
+    box(10, 10, 30, 20, { color: [1, 0, 0, 1] });
+    box(10, 10, 30, 20, { color: [0.5, 0.5, 0.5, 1], blend: 'multiply' });
+    box(50, 10, 30, 20, { color: [0, 0, 0.5, 1] });
+    box(50, 10, 30, 20, { color: [0.5, 0, 0, 1], blend: 'screen' });
+    // A red-and-blue image four times across: each texel 5 pixels.
+    scene.addSprite({ texture: stripes, rect: [0, 0, 4, 1], size: [40, 10], pivot: [0, 0], position: [90, 10] });
+    // A turned white square on black: its edge smoothed, as a shape's is.
+    box(140, 5, 50, 50, { color: [0, 0, 0, 1] });
+    box(165, 30, 30, 30, { pivot: [0.5, 0.5], angle: Math.PI / 5 });
+    // White text outlined in red, on black.
+    box(200, 5, 60, 70, { color: [0, 0, 0, 1] });
+    scene.addText({ font, text: 'I', size: 64, color: [1, 1, 1, 1], stroke: [1, 0, 0, 1], strokeWidth: 3, position: [230, 40] });
+    // A see-through line of 60 points, so four pieces: its joins no darker than its middles.
+    const points = Array.from({ length: 60 }, (_, k) => [10 + k * 4, 100]);
+    scene.addPath({ points, closed: false, strokeWidth: 8, stroke: [0, 0, 1, 0.5] });
+    // A 2D scene drawn into a target, and a 3D one into another, both shown by sprites.
+    const flat = await probe.createTarget({ size: [32, 32] });
+    const inner = probe.createScene();
+    inner.addShape({ size: [16, 16], color: [1, 0, 0, 1], pivot: [0, 0], position: [16, 16] });
+    probe.renderFrame(inner, new Camera2D({ background: [0, 1, 0, 1] }), { target: flat });
+    scene.addSprite({ texture: flat, size: [32, 32], pivot: [0, 0], position: [10, 130] });
+    const deep = await probe.createTarget({ size: [64, 64] });
+    const eye = new Camera({ fovY: 1, near: 0.1 });
+    eye.target.set([0, 0.2, -1]);
+    probe.renderFrame(probe.createScene(), eye, { target: deep });
+    scene.addSprite({ texture: deep, size: [64, 64], pivot: [0, 0], position: [60, 130] });
+    probe.renderFrame(scene, camera);
+    const pixels = await probe.gpu.readPixels();
+    const error = await probe.gpu.device.popErrorScope();
+    let unloaded = '';
+    probe.unload(flat);
+    try { probe.renderFrame(inner, new Camera2D(), { target: flat }); } catch (e) { unloaded = e.message; }
+    probe.destroy();
+    canvas.remove();
+
+    const at = (x, y) => [...pixels.subarray((y * W + x) * 4, (y * W + x) * 4 + 3)];
+    const is = (p, rgb, tolerance = 2) => p.every((c, k) => Math.abs(c - rgb[k]) <= tolerance);
+    let smooth = 0;
+    for (let y = 5; y < 55; y++) for (let x = 140; x < 190; x++) { const v = at(x, y)[0]; if (v > 30 && v < 225) smooth++; }
+    let outline = 0;
+    for (let y = 5; y < 75; y++) for (let x = 200; x < 260; x++) { const [red, green] = at(x, y); if (red > 200 && green < 60) outline++; }
+    const [join, middle, end] = [at(10 + 16 * 4, 100), at(10 + 8 * 4, 100), at(10 + 58 * 4, 100)];
+    const inTarget = [at(12, 132), at(10 + 24, 130 + 24)];
+    const sky = at(60 + 32, 130 + 20);
+    const report = `multiply rgb(${at(20, 20)}), screen rgb(${at(60, 20)}); repeat ${[92, 97, 102, 127].map((x) => at(x, 15)[0] > 200 ? 'r' : 'b').join('')}; `
+      + `${smooth} smoothed edge pixels, ${outline} outline pixels; line join rgb(${join}), middle rgb(${middle}), far end rgb(${end}); `
+      + `2D target rgb(${inTarget[0]}) | rgb(${inTarget[1]}), 3D target rgb(${sky}); unloaded: ${unloaded}`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    const ok = is(at(20, 20), [128, 0, 0]) && is(at(60, 20), [128, 0, 128])
+      && report.includes('repeat rbrb') && smooth > 20 && outline > 20
+      && is(join, middle, 1) && middle[2] > 200 && middle[0] > 100 && middle[0] < 160 && is(end, middle, 1)
+      && is(inTarget[0], [0, 255, 0]) && is(inTarget[1], [255, 0, 0]) && sky.some((c) => c > 30)
+      && /unloaded/.test(unloaded);
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('pixel art lands a texel to a pixel wherever it is, and a sheet frame never shows its neighbour', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    const { width: W, pixelRatio: r } = probe.gpu;
+    // Five texels, five colours.
+    const colours = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [255, 0, 255]];
+    const image = new OffscreenCanvas(5, 1);
+    const context = image.getContext('2d');
+    colours.forEach((c, k) => { context.fillStyle = `rgb(${c.join(',')})`; context.fillRect(k, 0, 1, 1); });
+    const strip = await probe.loadTexture(await image.convertToBlob(), { pixelated: true });
+    const sheet = await probe.loadTexture(twoToneImageURI('#ff0000', '#0000ff'));
+    const scene = probe.createScene();
+    // A texel to a canvas pixel, so a unit is one here; ten strips, each a
+    // tenth of a pixel further along, centred on their node.
+    const camera = new Camera2D({ zoom: 1 / r, pixelSnap: true, background: [0, 0, 0, 1] });
+    for (let k = 0; k < 10; k++) scene.addSprite({ texture: strip, position: [20 + k * 10.1, 10 + k * 4] });
+    // The red frame of a red-and-blue sheet, smooth and enlarged: its right
+    // edge is where filtering would reach the blue frame.
+    scene.addSprite({ texture: sheet, rect: [0, 0, 0.5, 1], size: [40, 40], pivot: [0, 0], position: [200, 10] });
+    probe.renderFrame(scene, camera);
+    const pixels = await probe.gpu.readPixels();
+    probe.destroy();
+    canvas.remove();
+    const at = (x, y) => [...pixels.subarray((y * W + x) * 4, (y * W + x) * 4 + 3)];
+    const rows = [];
+    for (let k = 0; k < 10; k++) {
+      const y = 10 + k * 4;
+      rows.push(Array.from({ length: 150 }, (_, x) => at(x, y)).filter((p) => p.some((c) => c > 0)).map((p) => p.join(',')));
+    }
+    const wanted = colours.map((c) => c.join(',')).join(' ');
+    const wrong = rows.map((row, k) => [k, row.join(' ')]).filter(([, row]) => row !== wanted);
+    const edge = at(238, 30);
+    const report = `${10 - wrong.length} of 10 strips exactly one pixel a texel; a sheet frame's far edge rgb(${edge.join(',')})`;
+    if (wrong.length > 0) throw new Error(`${report}; strip ${wrong[0][0]} drew ${wrong[0][1]}`);
+    if (edge[2] > 2) throw new Error(report);
+    return report;
+  });
+
   await step('a tilemap draws its tiles, flipped as Tiled flips them, shows through where empty, and uploads one changed tile', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const probe = await Winding.create(canvas);
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     // One tile, two texels: red on its left, blue on its right.
     const tileset = await probe.loadTexture(twoToneImageURI('#ff0000', '#0000ff'), { pixelated: true });
     const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
@@ -1782,9 +1949,9 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 
     const shoot = async () => {
       probe.renderFrame(scene, camera);
-      const pixels = await probe.rhi.readPixels();
+      const pixels = await probe.gpu.readPixels();
       // x in CSS pixels, read at the canvas pixel it lands on.
-      const { width: W, pixelRatio: r } = probe.rhi;
+      const { width: W, pixelRatio: r } = probe.gpu;
       return (x) => [0, 1, 2].map((c) => pixels[(Math.floor(30 * r) * W + Math.floor(x * r)) * 4 + c]);
     };
     const first = await shoot();
@@ -1792,7 +1959,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     scene.setTile(map, 2, 0, 1);
     const second = await shoot();
     const changed = probe.stats.tiles2DWritten;
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -1809,21 +1976,21 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report;
   });
 
-  await step('a HUD overlay draws over the finished 3D frame: exact colours, round shapes, a one-pixel edge', async () => {
+  await step('a HUD draws over the finished 3D frame: exact colours, round shapes, a one-pixel edge', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const SKY = [0, 0, 0];
     const probe = await Winding.create(canvas, { environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } } });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const wall = await probe.load(buildFeatureGLB({ baseColorFactor: [0.5, 0.5, 0.5, 1], materialExtensions: { KHR_materials_unlit: {} } }));
     const scene = probe.createScene();
     scene.add(wall).setPosition(0, 0, -1).setScale(4, 4, 1);
     const camera = new Camera({ fovY: 1, near: 0.1 });
     camera.position.set([0, 0, 0]);
     camera.target.set([0, 0, -1]);
-    const { width: W, height: H, pixelRatio: r } = probe.rhi;
+    const { width: W, height: H, pixelRatio: r } = probe.gpu;
     const cx = W >> 1, cy = H >> 1;
     // Laid out in canvas pixels, to read single ones back: a unit is a CSS pixel.
     const px = (v) => v / r;
@@ -1838,10 +2005,10 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       position: [px(cx + 0.5), px(cy + 0.5)],
     });
 
-    probe.renderFrame(scene, camera, { overlay: { scene: hud } });
-    const pixels = await probe.rhi.readPixels();
+    probe.renderFrame(scene, camera, { hud: { scene: hud } });
+    const pixels = await probe.gpu.readPixels();
     const at = (x, y) => [0, 1, 2].map((c) => pixels[(y * W + x) * 4 + c]);
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -1871,7 +2038,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const probe = await Winding.create(canvas);
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
     const font = await probe.loadFont('32px sans-serif');
     const scene = probe.createScene();
@@ -1881,13 +2048,13 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const bar = scene.addSprite({ texture: white, color: [0, 1, 0, 1], size: [90, 30], position: [230, 70], layer: 1 });
     bar.setAngle(-0.6);
     // Three words, each about 40 pixels wide at 20, in a 70-pixel box: three lines.
-    scene.addText({ font, text: 'wide wide wide', size: 20, width: 70, anchor: [0, 1], color: [0, 0, 1, 1], position: [20, 140] });
+    scene.addText({ font, text: 'wide wide wide', size: 20, width: 70, pivot: [0, 0], color: [0, 0, 1, 1], position: [20, 140] });
 
     probe.renderFrame(scene, camera);
-    const pixels = await probe.rhi.readPixels();
-    const { width: W, pixelRatio: r } = probe.rhi;
+    const pixels = await probe.gpu.readPixels();
+    const { width: W, pixelRatio: r } = probe.gpu;
     const colour = (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -1931,7 +2098,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const probe = await Winding.create(canvas);
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
     const scene = probe.createScene();
     const camera = new Camera2D();
@@ -1941,12 +2108,12 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     scene.addSprite({ texture: white, color: [0, 1, 0, 1], size: [60, 60], pivot: [0, 0.5], position: [100, 100], layer: 2 });
     scene.addSprite({ texture: white, color: [0, 0, 1, 1], size: [100, 100], position: [100, 100] });
     scene.burst(cloud, 40);
-    scene.advanceParticles(0.016);
+    scene.advance(0.016);
     probe.renderFrame(scene, camera);
-    const pixels = await probe.rhi.readPixels();
-    const { width: W, pixelRatio: r } = probe.rhi;
+    const pixels = await probe.gpu.readPixels();
+    const { width: W, pixelRatio: r } = probe.gpu;
     const at = (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
     const show = (p) => `rgb(${p.join(',')})`;
@@ -1965,13 +2132,13 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const probe = await Winding.create(canvas);
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const scene = probe.createScene();
     const camera = new Camera2D();
     const shoot = async () => {
       probe.renderFrame(scene, camera);
-      const pixels = await probe.rhi.readPixels();
-      const { width: W, pixelRatio: r } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width: W, pixelRatio: r } = probe.gpu;
       return (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
     };
     // On pixel centres, so each lands on one row or column.
@@ -1979,7 +2146,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     probe.debug.circle([200.5, 170.5], 20, [0.5, 0.5, 0.5]);
     const first = await shoot();
     const second = await shoot();
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
     const show = (p) => `rgb(${p.join(',')})`;
@@ -2000,7 +2167,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const probe = await Winding.create(canvas);
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     // White on the left, clear on the right. Clear pixels decode with black in
     // them, which filtering must not let through.
     const small = await probe.loadTexture(twoToneImageURI('#ffffff', 'rgba(255,255,255,0)'));
@@ -2016,15 +2183,15 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     scene.addSprite({ texture: small, size: [200, 40], pivot: [0, 0], position: [20, 20] });   // enlarged 100 times
     scene.addSprite({ texture: large, size: [8, 8], pivot: [0, 0], position: [20, 100] });     // shrunk 8 times: mip 3
     probe.renderFrame(scene, camera);
-    const pixels = await probe.rhi.readPixels();
-    const { width: W, pixelRatio: r } = probe.rhi;
+    const pixels = await probe.gpu.readPixels();
+    const { width: W, pixelRatio: r } = probe.gpu;
     const darkest = (y, x0, x1) => {
       let low = 255;
       for (let x = Math.floor(x0 * r); x < Math.ceil(x1 * r); x++) low = Math.min(low, pixels[(Math.floor(y * r) * W + x) * 4]);
       return low;
     };
     const enlarged = darkest(40, 20, 220), shrunk = darkest(104, 20, 28);
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
     const report = `darkest pixel over white: ${enlarged} enlarged, ${shrunk} shrunk (255 is none)`;
@@ -2039,7 +2206,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const probe = await Winding.create(canvas);
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     // Two 2x2 tiles in a 1-texel margin with a 1-texel gap, all of which is
     // magenta: tile 1 is red, green / blue, white; tile 2 yellow.
     const sheet = document.createElement('canvas');
@@ -2059,12 +2226,12 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const map = scene.addTilemap({ tileset, tileSize: [2, 2], margin: 1, spacing: 1, columns: 3, rows: 1, tiles: [1, DIAGONAL | 1, 2], position: [20, 100] });
     map.setScale(20, 20, 1);
     probe.renderFrame(scene, camera);
-    const pixels = await probe.rhi.readPixels();
-    const { width: W, pixelRatio: r } = probe.rhi;
+    const pixels = await probe.gpu.readPixels();
+    const { width: W, pixelRatio: r } = probe.gpu;
     const at = (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
     let magenta = 0;
     for (let y = 100; y < 140; y++) for (let x = 20; x < 140; x++) { const [red, green, blue] = at(x, y); if (red > 200 && blue > 200 && green < 50) magenta++; }
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -2086,7 +2253,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     canvas.style.height = '240px';
     document.body.appendChild(canvas);
     const probe = await Winding.create(canvas);
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const white = await probe.loadTexture(twoToneImageURI('#ffffff', '#ffffff'));
     const scene = probe.createScene();
     const camera = new Camera2D();
@@ -2104,14 +2271,14 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 
     const shoot = async () => {
       probe.renderFrame(scene, camera);
-      const pixels = await probe.rhi.readPixels();
-      const { width: W, pixelRatio: r } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width: W, pixelRatio: r } = probe.gpu;
       return (x, y) => [0, 1, 2].map((c) => pixels[(Math.floor(y * r) * W + Math.floor(x * r)) * 4 + c]);
     };
     const dark = await shoot();
     camera.ambient.set([0.2, 0.2, 0.2]);
     const dim = await shoot();
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -2148,7 +2315,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const probe = await Winding.create(canvas, {
       environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
     });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     const unlit = (color) => probe.load(buildFeatureGLB({
       baseColorFactor: color, materialExtensions: { KHR_materials_unlit: {} },
     }));
@@ -2157,7 +2324,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     // above the middle, blue on it toward +Z.
     const room = () => {
       const scene = probe.createScene();
-      const facing = (node) => node.setRotationAxisAngle([0, 1, 0], -Math.PI / 2);
+      const facing = (node) => node.setAxisAngle([0, 1, 0], -Math.PI / 2);
       facing(scene.add(red)).setPosition(2, 0, 0);
       facing(scene.add(green)).setPosition(1.9, 0.8, 0).setScale(0.15, 0.15, 1);
       facing(scene.add(blue)).setPosition(1.9, 0, 0.8).setScale(0.15, 0.15, 1);
@@ -2166,17 +2333,17 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 
     // 1. The capture itself, read back from the probe array: face 0 is +X.
     const scene = room();
-    scene.addReflectionProbe({ min: [-3, -3, -3], max: [3, 3, 3] });
-    await probe.captureReflectionProbes(scene);
+    scene.addProbe({ size: [6, 6, 6] });
+    await probe.captureProbes(scene);
     const set = probe.renderer._probeSets.get(scene);
     const size = set.size;
-    const readback = probe.rhi.device.createBuffer({ size: size * size * 8 * 2, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const encoder = probe.rhi.device.createCommandEncoder();
+    const readback = probe.gpu.device.createBuffer({ size: size * size * 8 * 2, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = probe.gpu.device.createCommandEncoder();
     encoder.copyTextureToBuffer(
       { texture: set.texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
       { buffer: readback, bytesPerRow: size * 8, rowsPerImage: size }, [size, size, 2],
     );
-    probe.rhi.queue.submit([encoder.finish()]);
+    probe.gpu.queue.submit([encoder.finish()]);
     await readback.mapAsync(GPUMapMode.READ);
     const halves = new Uint16Array(readback.getMappedRange().slice(0));
     readback.unmap();
@@ -2207,22 +2374,22 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const floorMirror = await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], metallicFactor: 1, roughnessFactor: 0 }));
     const reflection = async (probeBox) => {
       const s = room();
-      s.add(floorMirror).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setPosition(0, -1, 0).setScale(1, 1, 1);
-      if (probeBox) await probe.captureReflectionProbes(s, [s.addReflectionProbe(probeBox)]);
+      s.add(floorMirror).setAxisAngle([1, 0, 0], -Math.PI / 2).setPosition(0, -1, 0).setScale(1, 1, 1);
+      if (probeBox) await probe.captureProbes(s, [s.addProbe(probeBox)]);
       const cam = new Camera({ fovY: 1, near: 0.1 });
       cam.position.set([-1.5, 0.2, 0]);
       cam.target.set([1, -1, 0]);
       probe.renderFrame(s, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       // Where the floor is, below the middle of the view.
       const i = (Math.floor(height * 0.8) * width + (width >> 1)) * 4;
       return [pixels[i], pixels[i + 1], pixels[i + 2]];
     };
     const sky = await reflection(null);
-    const captured = await reflection({ min: [-3, -3, -3], max: [3, 3, 3] });
-    const elsewhere = await reflection({ min: [10, -3, -3], max: [16, 3, 3] });
-    const error = await probe.rhi.device.popErrorScope();
+    const captured = await reflection({ size: [6, 6, 6] });
+    const elsewhere = await reflection({ position: [13, 0, 0], size: [6, 6, 6] });
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
     const show = (p) => `rgb(${p.join(',')})`;
@@ -2251,14 +2418,14 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const dark = async (doubleSided) => {
       const quad = await probe.load(buildFeatureGLB({ metallicFactor: 0, doubleSided }));
       const scene = probe.createScene();
-      scene.add(floor).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
-      scene.add(quad).setRotationAxisAngle([1, 0, 0], -Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
+      scene.add(floor).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
+      scene.add(quad).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(0.35, 0.35, 1).setPosition(0, 1, 0);
       scene.addLight({ type: 'directional', direction: [1, -1, 0], intensity: 3 });
       const cam = new Camera({ fovY: 1, near: 0.1 });
       cam.position.set([0, 6, 0.01]);
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
+      const pixels = await probe.gpu.readPixels();
       let count = 0;
       for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 1] < 60) count++;
       return count;
@@ -2281,7 +2448,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const probe = await Winding.create(canvas, {
       environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
     });
-    probe.rhi.device.pushErrorScope('validation');
+    probe.gpu.device.pushErrorScope('validation');
     // The quad's sphere: radius hypot(3.2, 3.2) / 2 = 2.263. At fovY 1 its
     // coverage is 2.263 / tan(0.5) / d = 4.14 / d: 1.04 at 4, 0.35 at 12,
     // 0.10 at 40, and 0.04 at 100, below the last level's 0.05.
@@ -2293,8 +2460,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.position.set([0, 0, distance]);
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       const i = ((height >> 1) * width + (width >> 1)) * 4;
       return [pixels[i], pixels[i + 1], pixels[i + 2]];
     };
@@ -2311,21 +2478,21 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const shadowAt = async (asset) => {
       const scene = probe.createScene();
       scene.add(wall).setPosition(0, 0, -2).setScale(4, 4, 1);
-      scene.add(asset).setRotationAxisAngle([0, 1, 0], Math.PI).setScale(0.3, 0.3, 1);
+      scene.add(asset).setAxisAngle([0, 1, 0], Math.PI).setScale(0.3, 0.3, 1);
       scene.addLight({ type: 'directional', direction: [0.3, 0, -1], intensity: 3 });
       const cam = new Camera({ fovY: 1, near: 0.1 });
       cam.position.set([0, 0, 4]);
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       const at = (x) => pixels[((height >> 1) * width + Math.floor(x * width)) * 4 + 1];
       // Where the shadow falls on the wall, and the same spot mirrored.
       return { shadow: at(0.603), clear: at(0.397) };
     };
     const cast = await shadowAt(lod);
     const none = await shadowAt(hidden);
-    const error = await probe.rhi.device.popErrorScope();
+    const error = await probe.gpu.device.popErrorScope();
     probe.destroy();
     canvas.remove();
 
@@ -2361,8 +2528,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       probe.debug.depthTest = depthTest;
       if (draw) probe.debug.line([-1, 0, -1], [1, 0, -1], [1, 0, 0]);
       probe.renderFrame(scene, cam);
-      const pixels = await probe.rhi.readPixels();
-      const { width, height } = probe.rhi;
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
       const at = (y) => { const i = (y * width + (width >> 1)) * 4; return [pixels[i], pixels[i + 1], pixels[i + 2]]; };
       const [a, b] = [at((height >> 1) - 1), at(height >> 1)];
       return a[0] >= b[0] ? a : b;
@@ -2406,8 +2573,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         cam.target.set([0, 0, -1]);
         if (drawQuad) scene.add(quad).setPosition(0, 0, -distance).setScale(distance, distance, 1);
         probe.renderFrame(scene, cam);
-        const pixels = await probe.rhi.readPixels();
-        const { width, height } = probe.rhi;
+        const pixels = await probe.gpu.readPixels();
+        const { width, height } = probe.gpu;
         const at = (y) => { const i = (Math.floor(y * height) * width + (width >> 1)) * 4; return [pixels[i], pixels[i + 1], pixels[i + 2]]; };
         results[name] = { middle: at(0.5), top: at(0.02) };
       }
@@ -2458,7 +2625,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       const probe = await Winding.create(canvas, {
         environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } }, ...engineOptions,
       });
-      probe.rhi.device.pushErrorScope('validation');
+      probe.gpu.device.pushErrorScope('validation');
       const results = {};
       for (const [name, { glass, back = 1, lamp = false }] of Object.entries(cases)) {
         const scene = probe.createScene();
@@ -2476,12 +2643,12 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         }
         if (lamp) scene.addLight({ position: [0, 0, -0.5], color: [1, 1, 1], intensity: 3, radius: 4 });
         probe.renderFrame(scene, cam);
-        const pixels = await probe.rhi.readPixels();
-        const { width, height } = probe.rhi;
+        const pixels = await probe.gpu.readPixels();
+        const { width, height } = probe.gpu;
         const red = (x, y = 0.5) => pixels[(Math.floor(y * height) * width + Math.floor(x * width)) * 4];
         results[name] = { middle: red(0.5), edge: EDGE.map((x) => red(x)) };
       }
-      const error = await probe.rhi.device.popErrorScope();
+      const error = await probe.gpu.device.popErrorScope();
       probe.destroy();
       canvas.remove();
       if (error) throw new Error(`transmission with ${JSON.stringify(engineOptions)}: ${error.message}`);
@@ -2541,7 +2708,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       oitCamera.position.set([0, 2, 8]);
 
       for (let i = 0; i < 5; i++) oitEngine.renderFrame(oitScene, oitCamera);
-      await oitEngine.rhi.device.queue.onSubmittedWorkDone();
+      await oitEngine.gpu.device.queue.onSubmittedWorkDone();
 
       const graph = oitEngine.renderer.graph;
       const names = [];
@@ -2578,7 +2745,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     // Drawing after the free is the real check: a batch still naming a
     // destroyed buffer shows up as the device error asserted at the end.
     engine.renderFrame(scene, camera);
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
 
     const again = await engine.load(await buildDemoGLB({ arms: 2 }));
     if (!again.materialIds.every((id) => asset.materialIds.includes(id))) {
@@ -2611,7 +2778,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       }
       counts.push(gpu.batchCount);
     }
-    await engine.rhi.device.queue.onSubmittedWorkDone();
+    await engine.gpu.device.queue.onSubmittedWorkDone();
     return `batches per frame: ${counts.join(', ')}`;
   });
 
@@ -2633,14 +2800,14 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   });
 
   await step('the device is asked for what the adapter has, not the defaults', async () => {
-    const { adapter, limits } = engine.rhi;
+    const { adapter, limits } = engine.gpu;
     for (const name of ['maxBufferSize', 'maxStorageBufferBindingSize', 'maxTextureDimension2D']) {
       if (limits[name] !== adapter.limits[name]) {
         throw new Error(`${name}: device ${limits[name]}, adapter ${adapter.limits[name]}`);
       }
     }
     // A cube this small has five levels; asking for six made an invalid texture.
-    const small = new Environment(engine.rhi, { size: 16 });
+    const small = new Environment(engine.gpu, { size: 16 });
     const mips = small.prefilterMips;
     small.destroy();
     if (mips !== 5) throw new Error(`a 16 cube kept ${mips} prefilter levels`);
@@ -2660,7 +2827,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     let message = '';
     try { await inFlight; } catch (error) { message = error.message; }
     if (!/destroyed/.test(message)) throw new Error(`a load in flight ${message ? `threw "${message}"` : 'resolved'}`);
-    for (const call of [() => doomed.createScene(), () => doomed.renderFrame(null, camera), () => doomed.run({})]) {
+    for (const call of [() => doomed.createScene(), () => doomed.renderFrame(null, camera), () => doomed.run(null, camera)]) {
       let threw = '';
       try { call(); } catch (error) { threw = error.message; }
       if (!/destroyed/.test(threw)) throw new Error(`a call on a destroyed engine ${threw ? `threw "${threw}"` : 'went through'}`);
@@ -2677,8 +2844,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const idle = await Winding.create(idleCanvas);
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     idleCanvas.remove();
-    for (let i = 0; i < 20 && !idle.rhi.destroyed; i++) await new Promise((r) => setTimeout(r, 50));
-    if (!idle.rhi.destroyed) {
+    for (let i = 0; i < 20 && !idle.gpu.destroyed; i++) await new Promise((r) => setTimeout(r, 50));
+    if (!idle.gpu.destroyed) {
       idle.destroy();
       throw new Error('still alive a second after its canvas left');
     }
@@ -2698,14 +2865,14 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     try {
       const goneScene = gone.createScene();
       let drawn = 0;
-      gone.run({ scene: goneScene, camera: new Camera({ near: 0.1 }), frame: () => drawn++ });
+      gone.run(goneScene, new Camera({ near: 0.1 }), { frame: () => drawn++ });
       const tick = (ms) => frames.splice(0).forEach((cb) => cb(ms));
       tick(16);
-      if (drawn !== 1 || gone.rhi.destroyed) throw new Error('a connected canvas did not draw');
+      if (drawn !== 1 || gone.gpu.destroyed) throw new Error('a connected canvas did not draw');
       goneCanvas.remove();
       tick(32);
       if (drawn !== 1) throw new Error('drew into a detached canvas');
-      if (!gone.rhi.destroyed) throw new Error('the device was kept alive');
+      if (!gone.gpu.destroyed) throw new Error('the device was kept alive');
       if (frames.length) throw new Error('the loop asked for another frame');
       gone.destroy();   // the page's own teardown may still call it
       return 'destroyed on the first frame after removal';
