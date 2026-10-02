@@ -31,7 +31,17 @@ const SPLAT_BYTES = 32;
 export function parseSplats(bytes) {
   const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   const isPly = data.length >= 4 && data[0] === 0x70 && data[1] === 0x6c && data[2] === 0x79 && (data[3] === 0x0a || data[3] === 0x0d);
-  return isPly ? parsePly(data) : parseSplatFile(data);
+  if (isPly) return parsePly(data);
+  // A .splat has no header to check, so the formats it could be mistaken
+  // for are refused by theirs: one whose size happened to divide by 32 would
+  // otherwise load as noise.
+  if (data[0] === 0x50 && data[1] === 0x4b && data[2] === 0x03 && data[3] === 0x04) {
+    throw new Error('splats: this is a zip -- a .sog, perhaps -- which is not read; export a .ply or .splat');
+  }
+  if (data[0] === 0x1f && data[1] === 0x8b) {
+    throw new Error('splats: this is gzipped -- a .spz, perhaps -- which is not read; export a .ply or .splat');
+  }
+  return parseSplatFile(data);
 }
 
 function output(count) {
@@ -130,6 +140,8 @@ function parsePly(data) {
     const words = line.trim().split(/\s+/);
     if (words[0] === 'format') format = words[1];
     else if (words[0] === 'element') {
+      // SuperSplat's compressed .ply leads with its chunks of quantised ranges.
+      if (vertices === null && words[1] === 'chunk') throw new Error('splats: a compressed .ply (from SuperSplat) is not read; export an uncompressed .ply or a .splat');
       if (vertices === null && words[1] !== 'vertex') throw new Error(`splats: a .ply whose first element is '${words[1]}', not 'vertex'`);
       if (vertices !== null) break;   // elements after the splats are not needed
       vertices = { count: Number(words[2]), properties: [], stride: 0 };

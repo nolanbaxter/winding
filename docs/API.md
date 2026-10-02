@@ -301,7 +301,7 @@ Loads a Gaussian splat capture for [`scene.addSplats`](#scene-addsplats). It rea
 `source` is a URL, an `ArrayBuffer` or a `Uint8Array`. `fetch` replaces `fetch` for downloading `source`.
 
 Returns: `{ count, min, max }`: how many splats, and the corners of the box around their centres, in the capture's units. Free it with [`engine.unload`](#engine-unload) once no scene draws it.
-Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' format; only binary_little_endian is read'`; `'splats: this .ply is not a splat capture: no <properties>'`; `'splats: the .ply is cut short: …'`; `'splats: not a .ply, and <n> bytes is not a whole number of 32-byte .splat records'`; `'splats: splat <i> has a position that is not a number'`.
+Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' format; only binary_little_endian is read'`; `'splats: this .ply is not a splat capture: no <properties>'`; `'splats: the .ply is cut short: …'`; `'splats: not a .ply, and <n> bytes is not a whole number of 32-byte .splat records'`; `'splats: splat <i> has a position that is not a number'`; `'splats: a compressed .ply (from SuperSplat) is not read; …'`; `'splats: this is a zip -- a .sog, perhaps -- which is not read; …'`; `'splats: this is gzipped -- a .spz, perhaps -- which is not read; …'`; `'splats: <n> splats need <bytes> bytes in one buffer, past this device's <limit>; …'`.
 
 ```js
 const room = await engine.loadSplats('room.ply');
@@ -475,6 +475,7 @@ Counts from the last frame drawn. Read only. The first five fields start at 0; t
 | `emitters` | 2D | Particle emitters drawn in the 2D view. |
 | `hudSprites` | HUD | Sprites and glyphs in the HUD. |
 | `hudSpritesWritten` | HUD | Of those, how many were re-uploaded. |
+| `splats` | 3D | Splats in the clouds drawn, before culling. |
 
 ```js
 console.log(`${engine.stats.draws} draws, ${engine.stats.renderables} meshes`);
@@ -591,7 +592,7 @@ Throws (on the next frame): `'resolution must be from 0.5 to 1, …'`.
 engine.renderer.resolution = 0.75;
 ```
 
-Notes: only frames drawn to the canvas are scaled. A [target](#engine-createtarget) keeps the size it was made at. The HUD and the stats overlay are drawn at the canvas's full resolution, after scaling, so text stays crisp. Sprites sized in pixels keep their size on screen. The first time a lower resolution is set, the scaler builds in the background, and frames are stretched without sharpening until it is ready, as with [`ao`](#renderer-ao).
+Notes: only frames drawn to the canvas are scaled. A [target](#engine-createtarget) keeps the size it was made at. The HUD and the stats overlay are drawn at the canvas's full resolution, after scaling, so text stays crisp. [Debug lines](#debug-lines) are drawn into the 3D view, so they are scaled with it. Sprites sized in pixels keep their size on screen. The first time a lower resolution is set, the scaler builds in the background, and frames are stretched without sharpening until it is ready, as with [`ao`](#renderer-ao).
 
 <a id="renderer-fog"></a>
 ### `engine.renderer.fog` → `object | null`
@@ -1429,14 +1430,14 @@ Whether a particle may still be alive, or one is about to be born.
 <a id="splats"></a>
 ## Gaussian splats
 
-A capture made by 3D Gaussian Splatting: up to millions of soft, coloured ellipsoids fitted to photographs. They are sorted back to front on the GPU every frame and blended over the scene. Load one with [`engine.loadSplats`](#engine-loadsplats).
+A capture made by 3D Gaussian Splatting: up to millions of soft, coloured ellipsoids fitted to photographs. They are sorted back to front on the GPU whenever the camera, the cloud or the canvas has moved, and blended over the scene. Load one with [`engine.loadSplats`](#engine-loadsplats).
 
 <a id="scene-addsplats"></a>
 ### `scene.addSplats({ splats, position, parent })` → `Node`
 
 Adds a capture as a node. The node's position, rotation and scale place it, and one capture can be added any number of times. `position` defaults to `[0, 0, 0]`.
 
-Splats are lit by nothing: they show the colour the capture saw, decoded from sRGB and tonemapped with the rest of the frame. Geometry in front hides them. They write no depth, so they hide nothing, and they cast no shadows. They count in [`scene.bounds`](#scene-bounds) and [`scene.frame`](#scene-frame) by the box around their centres. They are not picked or raycast.
+Splats are lit by nothing: they show the colour the capture saw, decoded from sRGB, fogged by [`renderer.fog`](#renderer-fog) by the distance to each one, and tonemapped with the rest of the frame. Geometry in front hides them. They write no depth, so they hide nothing and cast no shadows. They are drawn straight after opaque geometry, so sprites, particles and blended surfaces in front of a capture show over it; blended or transmissive surfaces behind one show over it too. [Depth of field](#renderer-dof) works from depth, so it blurs splats as whatever geometry is behind them, or as far away where there is none. They count in [`scene.bounds`](#scene-bounds) and [`scene.frame`](#scene-frame) by the box around their centres. They are not picked or raycast.
 
 Throws: `'addSplats: splats must be what engine.loadSplats returned'`; `'addSplats: these splats were unloaded'`. A frame drawing splats unloaded since they were added throws `'addSplats: these splats were unloaded; remove the node first'`.
 
@@ -1446,7 +1447,7 @@ const room = await engine.loadSplats('room.ply');
 scene.addSplats({ splats: room }).setAxisAngle([1, 0, 0], Math.PI);
 ```
 
-Notes: two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. Drawing is limited by fill rate: a capture filling the screen costs about 14 to 21 ms at 1280x720 on integrated graphics (a million splats, Intel Iris Xe), and the sort about 3 ms. [`renderer.resolution`](#renderer-resolution) cuts the fill.
+Notes: two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. On integrated graphics (Intel Iris Xe, a million splats, 1280x720) the draw costs about 10 ms for a capture seen whole, and more up close, where splats fill the screen; [`renderer.resolution`](#renderer-resolution) cuts that part. The sort costs about 2 ms, and nothing while the view is still.
 
 <a id="scene-splatsof"></a>
 ### `scene.splatsOf(node)` → `{ splats } | null`

@@ -93,6 +93,14 @@ test('what is not a splat capture is refused, by what is wrong with it', () => {
   assert.throws(() => parseSplats(new Uint8Array(33)), /not a whole number of 32-byte/);
   const nan = splatRecord([NaN, 0, 0], [1, 1, 1], [0, 0, 0, 0], [255, 128, 128, 128]);
   assert.throws(() => parseSplats(nan), /splat 0 has a position that is not a number/);
+  // Formats a .splat could be mistaken for, sized as one would be.
+  const zip = new Uint8Array(64); zip.set([0x50, 0x4b, 0x03, 0x04]);
+  assert.throws(() => parseSplats(zip), /this is a zip/);
+  const gz = new Uint8Array(64); gz.set([0x1f, 0x8b]);
+  assert.throws(() => parseSplats(gz), /this is gzipped/);
+  const compressed = new TextEncoder().encode('ply\nformat binary_little_endian 1.0\nelement chunk 1\nproperty float min_x\n'
+    + 'element vertex 1\nproperty uint packed_position\nend_header\n');
+  assert.throws(() => parseSplats(compressed), /a compressed .ply \(from SuperSplat\) is not read/);
 });
 
 test('a scene places splats as a node: in its bounds where the node puts them, and gone when removed', () => {

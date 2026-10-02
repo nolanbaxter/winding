@@ -23,38 +23,53 @@
 // within a bucket comes out of atomics, so it varies, but a bucket is a
 // 65536th of the cloud's depth, and splats that close are drawn as one. The
 // draw is indirect: the survivors' count is what the keys pass appended, and
-// never comes back to the CPU.
+// never comes back to the CPU. Nothing is sorted again until the camera, the
+// cloud or the canvas moves: a scene with something animating beside a still
+// capture keeps its order.
+//
+// The vertex shader projects each splat at each of its four corners, and that
+// is measured, not overlooked: projecting once in the keys pass and storing
+// the ellipse cost the sort what it saved the draw (Iris Xe, a million
+// splats), and 32 more bytes a splat. What bounds the draw where it is not
+// fill is the two triangles a splat, however small: 6 ms for a million of
+// them at 320x180.
 //
 // A splat is lit by nothing: its colour is what the capture saw, decoded from
-// sRGB, and tonemapped with everything else. Colour does not change with the
-// view (the file's higher harmonics are skipped). Splats are hidden by
-// geometry in front of them, and hide nothing: they write no depth, and cast
-// no shadows. Two clouds are each sorted on their own and drawn far one
-// first, so where two overlap, they do not interleave.
+// sRGB, fogged as the scene is, and tonemapped with everything else. Colour
+// does not change with the view (the file's higher harmonics are skipped).
+// Splats are hidden by geometry in front of them, and hide nothing: they
+// write no depth, and cast no shadows. So they are drawn straight after the
+// opaque scene, before sprites, particles and blended surfaces, which a
+// capture -- usually the background -- would otherwise paint over. Two
+// clouds are each sorted on their own and drawn far one first, so where two
+// overlap, they do not interleave.
 
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
-import { createBuffer } from '../rhi/buffer.js';
+import { createBuffer, storageCapacity } from '../rhi/buffer.js';
 import { DEPTH_FORMAT, DEPTH_COMPARE } from '../rhi/device.js';
 import { handleIndex } from '../core/handle.js';
 import { mat4Multiply } from '../core/math/mat4.js';
+import { FRAME_WGSL } from './shaders/pbr.js';
+import { FOG_WGSL } from './fog.js';
 
 const BUCKETS = 65536;
 const WORKGROUP = 256;
-/** view, projection, model, viewport, depth range, count */
+/** modelView, projection, viewport, depth range, count: what a sort depends on. Then model, for fog. */
+const CLOUD_FLOATS = 37;
 const CLOUD_BYTES = 224;
 /** Frames a node's sort buffers outlive the last frame that drew it. */
 const KEEP_FRAMES = 120;
 
 const CLOUD_WGSL = /* wgsl */ `
 struct Cloud {
-  view       : mat4x4<f32>,
+  modelView  : mat4x4<f32>,   // multiplied once, on the CPU
   projection : mat4x4<f32>,
-  model      : mat4x4<f32>,
   viewport   : vec2<f32>,
   depthMin   : f32,   // the nearest view depth the cloud reaches
   depthScale : f32,   // buckets per unit of depth across it
   count      : u32,
+  model      : mat4x4<f32>,   // for fog, which is in world space
 };
 `;
 
@@ -87,12 +102,17 @@ fn splatOf(id : vec3<u32>, groups : vec3<u32>) -> u32 {
 fn makeKeys(@builtin(global_invocation_id) id : vec3<u32>, @builtin(num_workgroups) groups : vec3<u32>) {
   let i = splatOf(id, groups);
   if (i >= cloud.count) { return; }
-  let view = cloud.view * cloud.model * vec4<f32>(bitcast<vec3<f32>>(centers[i].xyz), 1.0);
+  let center = centers[i];
+  let view = cloud.modelView * vec4<f32>(bitcast<vec3<f32>>(center.xyz), 1.0);
   let clip = cloud.projection * view;
   // Behind the camera, or well outside the view: its centre, with a margin
   // for the part of a splat that reaches in from beside it.
   let w = clip.w;
-  if (view.z >= 0.0 || abs(clip.x) > 1.3 * w || abs(clip.y) > 1.3 * w) { return; }
+  // Nearer than the near plane, too: every corner shares the centre's depth,
+  // so the whole quad would be clipped.
+  if (view.z >= 0.0 || clip.z > w || abs(clip.x) > 1.3 * w || abs(clip.y) > 1.3 * w) { return; }
+  // Too faint to reach 1/255 anywhere: the draw would discard all of it.
+  if (unpack4x8unorm(center.w).a * 255.0 <= 1.0) { return; }
   // Far first: the farthest key is the smallest.
   let bucket = u32(clamp((-view.z - cloud.depthMin) * cloud.depthScale, 0.0, f32(BUCKETS - 1u)));
   let key = BUCKETS - 1u - bucket;
@@ -138,10 +158,15 @@ fn place(@builtin(global_invocation_id) id : vec3<u32>, @builtin(num_workgroups)
 
 const DRAW_SHADER = /* wgsl */ `
 ${CLOUD_WGSL}
+${FRAME_WGSL}
+${FOG_WGSL}
 @group(0) @binding(0) var<uniform> cloud : Cloud;
 @group(0) @binding(1) var<storage, read> centers : array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read> covariances : array<f32>;
 @group(0) @binding(3) var<storage, read> order : array<u32>;
+@group(1) @binding(0) var<uniform> frame : Frame;
+@group(1) @binding(1) var irradiance : texture_cube<f32>;
+@group(1) @binding(2) var envSampler : sampler;
 
 struct VertexOut {
   @builtin(position) position : vec4<f32>,
@@ -161,7 +186,7 @@ fn vs(@builtin(vertex_index) corner : u32, @builtin(instance_index) instance : u
   out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
   let i = order[instance];
   let center = centers[i];
-  let modelView = cloud.view * cloud.model;
+  let modelView = cloud.modelView;
   let view = modelView * vec4<f32>(bitcast<vec3<f32>>(center.xyz), 1.0);
   let clip = cloud.projection * view;
 
@@ -199,7 +224,8 @@ fn vs(@builtin(vertex_index) corner : u32, @builtin(instance_index) instance : u
   let radius = length(vec2<f32>(0.5 * (a - c), b));
   let major = mid + radius;
   let minor = mid - radius;
-  if (minor <= 0.0) { return out; }
+  // Not drawn when it projects to nothing -- or to NaN, from a size no float holds.
+  if (!(minor > 0.0)) { return out; }
   var axis = vec2<f32>(1.0, 0.0);
   if (abs(b) > 1e-12) { axis = normalize(vec2<f32>(b, major - a)); } else if (c > a) { axis = vec2<f32>(0.0, 1.0); }
   let along = min(sqrt(2.0 * major), 1024.0) * axis;
@@ -214,7 +240,16 @@ fn vs(@builtin(vertex_index) corner : u32, @builtin(instance_index) instance : u
   let pixels = q.x * along + q.y * across;
   out.position = vec4<f32>(clip.xy + pixels * 2.0 / cloud.viewport * clip.w, clip.z, clip.w);
   out.offset = q;
-  out.colour = vec4<f32>(decodeSRGB(colour.rgb), colour.a);
+  var rgb = decodeSRGB(colour.rgb);
+  // Fogged as a particle is, by the distance to its centre.
+  if (frame.fog.x > 0.0) {
+    let toSplat = (cloud.model * vec4<f32>(bitcast<vec3<f32>>(center.xyz), 1.0)).xyz - frame.cameraPosition.xyz;
+    let distance = length(toSplat);
+    let through = exp(-fogDepth(frame.fog, frame.cameraPosition.xyz, toSplat / max(distance, 1e-6), distance));
+    let inscatter = frame.fogAlbedo.rgb * fogMeanRadiance(irradiance, envSampler) + frame.fogLight.rgb;
+    rgb = rgb * through + inscatter * (1.0 - through);
+  }
+  out.colour = vec4<f32>(rgb, colour.a);
   return out;
 }
 
@@ -234,6 +269,12 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
  */
 export class Splats {
   constructor(rhi, data, label = 'splats') {
+    // Refused here, by name, rather than as a validation error on the first
+    // frame: the covariances are the largest buffer a shader binds whole.
+    const most = storageCapacity(rhi, 24);
+    if (data.count > most) {
+      throw new Error(`splats: ${data.count} splats are more than this device holds in one buffer, ${most}`);
+    }
     this.rhi = rhi;
     this.count = data.count;
     this.min = data.min;
@@ -249,7 +290,7 @@ export class Splats {
 }
 
 export class SplatPass {
-  static async create(rhi, pipelines, colorFormat) {
+  static async create(rhi, pipelines, colorFormat, frameBuffer) {
     const device = rhi.device;
     const [sortShader, drawShader] = await Promise.all([
       compileShader(device, SORT_SHADER, 'splats-sort.wgsl'),
@@ -272,11 +313,19 @@ export class SplatPass {
         { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
+    const frameLayout = device.createBindGroupLayout({
+      label: 'splats-frame',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX, texture: { viewDimension: 'cube' } },
+        { binding: 2, visibility: GPUShaderStage.VERTEX, sampler: {} },
+      ],
+    });
     const sort = createPipelineLayout(device, { 0: sortLayout }, 'splats-sort');
     const compute = (entry) => pipelines.compute({ label: `splats-${entry}`, layout: sort, shader: sortShader, entry });
     const drawDescriptor = {
       label: 'splats',
-      layout: createPipelineLayout(device, { 0: drawLayout }, 'splats'),
+      layout: createPipelineLayout(device, { 0: drawLayout, 1: frameLayout }, 'splats'),
       shader: drawShader,
       buffers: [],
       targets: [{
@@ -290,15 +339,18 @@ export class SplatPass {
       depth: { format: DEPTH_FORMAT, depthCompare: DEPTH_COMPARE, depthWriteEnabled: false },
     };
     await pipelines.warm([drawDescriptor]);
-    return new SplatPass(rhi, {
-      sortLayout, drawLayout,
+    return new SplatPass(rhi, frameBuffer, {
+      sortLayout, drawLayout, frameLayout,
       keys: compute('makeKeys'), scan: compute('scanCounts'), scatter: compute('place'),
       draw: pipelines.get(drawDescriptor),
     });
   }
 
-  constructor(rhi, built) {
+  constructor(rhi, frameBuffer, built) {
     this.rhi = rhi;
+    this._frameBuffer = frameBuffer;
+    /** The frame's group, by environment: its irradiance is what fog scatters. */
+    this._frameGroups = new WeakMap();
     Object.assign(this, built);
     /** Each placed cloud's sort buffers, by its scene record. */
     this._states = new Map();
@@ -311,28 +363,31 @@ export class SplatPass {
     this._args = new Uint32Array([4, 0, 0, 0]);
     /** Splats in the clouds the last frame drew, before culling. */
     this.count = 0;
+    /** Clouds the last frame sorted; the rest kept the order they had. */
+    this.sorted = 0;
     this._sort = (pass) => this._encodeSort(pass);
     this._draw = (pass) => this._encodeDraw(pass);
   }
 
   /**
-   * This frame's clouds: each one's camera, transform and depth range
-   * written, and its draw count reset. Returns how many there are.
+   * This frame's clouds: each one whose camera, transform or canvas moved
+   * has them written and its count reset, to be sorted again. Returns how
+   * many clouds there are.
    */
-  prepare(scene, camera, width, height) {
+  prepare(scene, camera, environment, width, height) {
     this._frame++;
+    this._environment = environment;
     const items = this._items;
     items.length = 0;
     this.count = 0;
+    this.sorted = 0;
     for (const [entity, record] of scene.splats) {
       const splats = record.splats;
       if (splats.unloaded) throw new Error('addSplats: these splats were unloaded; remove the node first');
-      const state = this._stateFor(record, splats);
+      const state = this._stateFor(record, splats, scene, entity);
       state.lastFrame = this._frame;
-      const m = handleIndex(entity) * 16;
-      const world = scene.transforms.world;
       const modelView = this._modelView;
-      mat4Multiply(modelView, camera.view, world, 0, 0, m);
+      mat4Multiply(modelView, camera.view, scene.transforms.world, 0, 0, handleIndex(entity) * 16);
       // The depth the cloud spans in view: its box's eight corners.
       let near = Infinity;
       let far = -Infinity;
@@ -344,27 +399,39 @@ export class SplatPass {
         if (depth < near) near = depth;
         if (depth > far) far = depth;
       }
+      if (far <= 0) continue;   // wholly behind the camera
       near = Math.max(near, 0);
-      if (far <= near) continue;   // wholly behind the camera
       const f = this._cloudF32;
-      f.set(camera.view, 0);
+      f.set(modelView, 0);
       f.set(camera.projection, 16);
-      f.set(world.subarray(m, m + 16), 32);
-      f[48] = width;
-      f[49] = height;
-      f[50] = near;
-      f[51] = (BUCKETS - 1) / (far - near);
-      this._cloudU32[52] = splats.count;
+      f[32] = width;
+      f[33] = height;
+      f[34] = near;
+      // Floored: a cloud with no depth -- one splat, or a flat one edge on --
+      // spans none, and is all in one bucket.
+      f[35] = (BUCKETS - 1) / Math.max(far - near, 1e-6);
+      this._cloudU32[36] = splats.count;
+      f.set(scene.transforms.world.subarray(handleIndex(entity) * 16, handleIndex(entity) * 16 + 16), 40);
       this.rhi.queue.writeBuffer(state.cloud, 0, this._cloud);
-      this.rhi.queue.writeBuffer(state.args, 0, this._args);
+      // Sorted again only when something it is sorted by changed. What it
+      // was sorted for is kept when the sort is recorded, not here: a frame
+      // that throws before then must not leave it looking sorted.
+      const sort = !sameFloats(state.last, f, CLOUD_FLOATS);
+      if (sort) {
+        state.next.set(f.subarray(0, CLOUD_FLOATS));
+        this.rhi.queue.writeBuffer(state.args, 0, this._args);
+        this.sorted++;
+      }
       const cx = (splats.min[0] + splats.max[0]) / 2, cy = (splats.min[1] + splats.max[1]) / 2, cz = (splats.min[2] + splats.max[2]) / 2;
-      items.push({ state, count: splats.count, depth: -(modelView[2] * cx + modelView[6] * cy + modelView[10] * cz + modelView[14]) });
+      items.push({ state, sort, count: splats.count, depth: -(modelView[2] * cx + modelView[6] * cy + modelView[10] * cz + modelView[14]) });
       this.count += splats.count;
     }
     items.sort((a, b) => b.depth - a.depth);
-    // A cloud no frame has drawn for a while gives its buffers back.
+    // A cloud gives its buffers back once its node is removed from this
+    // scene, or when no frame has drawn it for a while.
     for (const [record, state] of this._states) {
-      if (state.lastFrame < this._frame - KEEP_FRAMES) {
+      const removed = state.scene === scene && scene.splats.get(state.entity) !== record;
+      if (removed || state.lastFrame < this._frame - KEEP_FRAMES) {
         destroyState(state);
         this._states.delete(record);
       }
@@ -372,16 +439,16 @@ export class SplatPass {
     return items.length;
   }
 
-  /** Sorted on the GPU, then drawn over `sceneColor`, behind what `depth` holds. */
+  /** Sorted on the GPU where it needs to be, then drawn over `sceneColor`, behind what `depth` holds. */
   addPasses(graph, { sceneColor, depth }) {
     if (this._items.length === 0) return;
     // One of the sorted orders stands for all of them: it is what puts the draw after the sort.
     const order = graph.importBuffer('splat-order', this._items[0].state.order);
-    graph.addPass({ name: 'splats:sort', type: 'compute', writes: [order], execute: this._sort });
+    if (this.sorted > 0) graph.addPass({ name: 'splats:sort', type: 'compute', writes: [order], execute: this._sort });
     graph.addPass({ name: 'splats', reads: [order], color: [{ resource: sceneColor }], depth: { resource: depth }, execute: this._draw });
   }
 
-  _stateFor(record, splats) {
+  _stateFor(record, splats, scene, entity) {
     let state = this._states.get(record);
     if (state !== undefined && state.splats === splats) return state;
     if (state !== undefined) destroyState(state);
@@ -390,7 +457,12 @@ export class SplatPass {
     const make = (label, size, usage = GPUBufferUsage.STORAGE) => createBuffer(rhi, { label: `splats-${label}`, size, usage });
     state = {
       splats,
+      scene,
+      entity,
       lastFrame: 0,
+      // What it was last sorted for. NaN matches nothing, so the first frame sorts.
+      last: new Float32Array(CLOUD_FLOATS).fill(NaN),
+      next: new Float32Array(CLOUD_FLOATS),
       cloud: make('cloud', CLOUD_BYTES, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
       keys: make('keys', n * 4),
       visible: make('visible', n * 4),
@@ -417,7 +489,9 @@ export class SplatPass {
 
   _encodeSort(pass) {
     const limit = this.rhi.limits.maxComputeWorkgroupsPerDimension ?? 65535;
-    for (const { state, count } of this._items) {
+    for (const { state, sort, count } of this._items) {
+      if (!sort) continue;
+      state.last.set(state.next);
       const groups = Math.ceil(count / WORKGROUP);
       const x = Math.min(groups, limit);
       const y = Math.ceil(groups / x);
@@ -432,7 +506,22 @@ export class SplatPass {
   }
 
   _encodeDraw(pass) {
+    const environment = this._environment;
+    let frameGroup = this._frameGroups.get(environment);
+    if (!frameGroup) {
+      frameGroup = this.rhi.device.createBindGroup({
+        label: 'splats-frame',
+        layout: this.frameLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this._frameBuffer } },
+          { binding: 1, resource: environment.irradianceView },
+          { binding: 2, resource: environment.sampler },
+        ],
+      });
+      this._frameGroups.set(environment, frameGroup);
+    }
     pass.setPipeline(this.draw);
+    pass.setBindGroup(1, frameGroup);
     for (const { state } of this._items) {
       pass.setBindGroup(0, state.drawGroup);
       pass.drawIndirect(state.args, 0);
@@ -443,6 +532,11 @@ export class SplatPass {
     for (const state of this._states.values()) destroyState(state);
     this._states.clear();
   }
+}
+
+function sameFloats(a, b, n) {
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 function destroyState(state) {

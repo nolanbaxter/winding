@@ -110,7 +110,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.1.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.1.1/src/winding.js';
 </script>
 ```
 
@@ -130,8 +130,8 @@ import { Winding, Camera } from 'winding-engine';
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.1.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.1.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.1.1/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.1.1/src/"
   }
 }
 </script>
@@ -312,8 +312,8 @@ box-projected, so a room reflects the room and not the sky.
 
 **Gaussian splats.** A capture from 3D Gaussian Splatting, `.ply` or `.splat`, loaded with
 [`engine.loadSplats`](docs/API.md#engine-loadsplats) and placed as a node by
-[`scene.addSplats`](docs/API.md#scene-addsplats): culled and sorted back to front on the GPU every
-frame, a million splats in about 3 ms, and drawn behind the geometry in front of them.
+[`scene.addSplats`](docs/API.md#scene-addsplats): culled and sorted back to front on the GPU whenever
+the view moves, a million splats in about 2 ms, and drawn behind the geometry in front of them.
 
 **Picking.** [`scene.pick`](docs/API.md#scene-pick) returns what's under the pointer, by bounding
 box, or by triangle for a model loaded with `retainGeometry`, skinned and morphed meshes as posed.

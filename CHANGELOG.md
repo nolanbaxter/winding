@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-02
+
+**A hunt through 1.1.** The resolution scaler and splats, reviewed three times over, each bug shown
+in the 1.1.0 code before it was fixed, and each fix with a test that fails without it.
+
+### Fixed
+
+- **`engine.run` could stop on an unfinished frame.** A frame drawn while something was still
+  building -- the scaler for a lower `renderer.resolution`, FXAA, or the pipelines for a feature
+  just switched on -- was taken as final if the build finished before the next frame, so a still
+  scene kept the stretched or un-antialiased picture. A frame drawn without something still
+  building is never the last now. FXAA and feature pipelines have had this since 1.0.
+- **At a lower resolution, a still scene was drawn every frame** on canvases whose scaled size
+  rounds (301x201 at 0.5): the frame's camera took the rounded shape, and `run` never saw it rest.
+  The camera takes the canvas's shape.
+- **A cloud of one splat, or a flat one seen edge on, was never drawn.**
+- **Particles, sprites and blended surfaces in front of splats were painted over by them.** Splats
+  write no depth, so they are drawn first now, straight after opaque geometry.
+- **Fog left splats clear.** They are fogged as particles are.
+- **A cloud could stay blank** after a frame that threw partway (an unloaded capture, say), until
+  the camera moved.
+- `.sog`, `.spz` and SuperSplat's compressed `.ply` are refused by name. A zip or a gzip whose size
+  divided by 32 loaded as noise.
+- A capture past what the device holds in one buffer is refused by name, checking the buffer
+  limit too.
+- The scaler destroyed while building left a buffer behind; a failed build logged every frame.
+- The scaled view was kept through 2D frames, and a removed cloud's buffers until 120 more frames.
+
+### Changed
+
+- **Splats sort only when the camera, the cloud or the canvas has moved**: nothing, rather than
+  about 2 ms for a million on Iris Xe, while the view is still. Splats too faint to see, and those
+  nearer than the near plane, are dropped before sorting, and the model-view matrix is multiplied
+  once on the CPU rather than in every vertex.
+
 ## [1.1.0] - 2026-10-02
 
 **Fewer pixels, and Gaussian splats.** Two additions from NVIDIA's open-source work and the
@@ -2099,7 +2134,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/nolanbaxter/winding/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nolanbaxter/winding/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/nolanbaxter/winding/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/nolanbaxter/winding/compare/v0.14.0...v1.0.0

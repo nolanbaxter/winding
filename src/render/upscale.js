@@ -433,12 +433,15 @@ export class Upscaler {
   /**
    * The scaler's pipeline, started the first time a frame is scaled: an
    * engine that never lowers its resolution never compiles it. Frames are
-   * stretched until it is ready.
+   * stretched until it is ready -- or for good, if it fails, which is said
+   * once rather than every frame.
    */
   _scalerReady() {
     this._building ??= (async () => {
       const device = this.rhi.device;
       const shader = await compileShader(device, scalerShader(), 'nis.wgsl');
+      // Destroyed while compiling: nothing is made that nothing would free.
+      if (this._destroyed) return;
       this.scaleLayout = device.createBindGroupLayout({
         label: 'nis',
         entries: [
@@ -453,11 +456,24 @@ export class Upscaler {
       const banks = Float32Array.from([...SCALE, ...USM]);
       this.banks = createBuffer(this.rhi, { label: 'nis-banks', size: banks.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.rhi.queue.writeBuffer(this.banks, 0, banks);
-      this.scalePipeline = await device.createComputePipelineAsync({
+      const pipeline = await device.createComputePipelineAsync({
         label: 'nis', layout: layout.gpu, compute: { module: shader.module, entryPoint: 'scale' },
       });
-    })();
+      if (this._destroyed) {
+        this.banks.destroy();
+        return;
+      }
+      this.scalePipeline = pipeline;
+    })().catch((error) => {
+      this.failed = true;
+      console.error(error);
+    });
     return this._building;
+  }
+
+  /** Whether the scaler is still building: a frame drawn now is stretched, and a later one will not be. */
+  get pending() {
+    return this._building !== undefined && this.scalePipeline === undefined && this.failed !== true && !this._destroyed;
   }
 
   /**
@@ -466,7 +482,7 @@ export class Upscaler {
    * canvas's plain view, `width` x `height`.
    */
   addPasses(graph, { source, sourceResource, surface, width, height }) {
-    if (this.scalePipeline === undefined) this._scalerReady().catch((error) => console.error(error));
+    if (this.scalePipeline === undefined) this._scalerReady();
     this.scaled = this.scalePipeline !== undefined;
     this._source = source;
     this._graph = graph;
@@ -532,6 +548,7 @@ export class Upscaler {
   }
 
   destroy() {
+    this._destroyed = true;
     this.params.destroy();
     this.banks?.destroy();
     this._groups.clear();

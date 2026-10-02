@@ -467,7 +467,7 @@ export class Renderer {
     this.debug = await DebugLines.create(this.rhi, this.pipelines);
     this.sprites = await SpritePass.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
     this.particles = await ParticleSystem.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
-    this.splats = await SplatPass.create(this.rhi, this.pipelines, HDR_FORMAT);
+    this.splats = await SplatPass.create(this.rhi, this.pipelines, HDR_FORMAT, this.frameBuffer);
     this.dofPass = await DepthOfField.create(this.rhi, this.pipelines, HDR_FORMAT);
     this.view2d = await View2D.create(this.rhi, this.pipelines, this.particles);
     // ponytail: a HUD's emitters aren't drawn -- the particle system follows one
@@ -898,7 +898,9 @@ export class Renderer {
     this.stats.recomposed = scene.update(jobs);
     const tAfterTransforms = now();
     p?.mark('transforms');
-    camera.update(width / height);
+    // A scaled frame is shown at the canvas's shape, which rounding the
+    // smaller size could miss by a fraction of a pixel.
+    camera.update(scaled !== null ? rhi.width / rhi.height : width / height);
     frustumFromViewProjection(this.frustum, camera.viewProjection);
     p?.mark('camera');
 
@@ -1288,7 +1290,7 @@ export class Renderer {
     const sprites = this.sprites.prepare(scene, camera, environment, scaled ? rhi.width : width, scaled ? rhi.height : height, anyMoved);
     // Particles likewise; and during a probe capture they are seen, not moved.
     const emitters = this.particles.prepare(scene, camera, environment, target !== null);
-    const clouds = this.splats.prepare(scene, camera, width, height);
+    const clouds = this.splats.prepare(scene, camera, environment, width, height);
     this.stats.splats = this.splats.count;
     this._blendInLate = !this._frameOIT && ambient === null && !transmissive && sprites === 0 && emitters === 0 && clouds === 0;
 
@@ -1310,11 +1312,13 @@ export class Renderer {
       this.aoPass.addPasses(graph, { depth, ambient, sceneColor, width, height });
     }
 
+    // Splats first: they write no depth, so whatever is drawn before them --
+    // smoke in front of a captured room -- they would paint over.
+    this.splats.addPasses(graph, { sceneColor, depth });
     // Sprites, on the finished opaque scene: before the transmission copy, so
     // glass shows what is behind it, and before blended geometry.
     this.sprites.addPass(graph, { sceneColor, depth });
     this.particles.addPasses(graph, { sceneColor, depth });
-    this.splats.addPasses(graph, { sceneColor, depth });
 
     // Transmission: the opaque scene copied down a mip chain, then the
     // transmissive surfaces, which read it.
@@ -1425,6 +1429,8 @@ export class Renderer {
    * See render/view2d.js.
    */
   _render2D(scene, camera, jobs, overlay, output = null) {
+    // Resolution is the 3D view's: its scaled view is not kept through 2D frames.
+    if (output === null) this._dropScaled();
     const rhi = this.rhi;
     const p = this.profiler;
     p?.frameStart();

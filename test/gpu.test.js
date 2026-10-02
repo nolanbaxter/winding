@@ -1424,6 +1424,43 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
   });
 
+  await step('run waits for the sharpened frame at a lower resolution, then rests while nothing moves', async () => {
+    // A canvas whose half size rounds: 301x201 is drawn at 151x101, a shape a
+    // fraction of a pixel off the canvas's. The first frame is stretched while
+    // the scaler builds, and must not count as the last word; once it is
+    // sharp, a still scene must count as still.
+    const canvas = document.createElement('canvas');
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false });
+    try {
+      probe.gpu.resize(301, 201);
+      const scene = probe.createScene();
+      scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1] })));
+      const cam = new Camera({ fovY: 1.0, near: 0.1 });
+      cam.position.set([0, 0, 3]);
+      cam.target.set([0, 0, 0]);
+      const frame = () => {
+        probe.renderer.render(scene, cam, probe.jobs, null, null);
+        probe._remember(scene, cam, null);
+      };
+      probe.renderer.resolution = 0.5;
+      frame();
+      if (!probe.renderer.upscaler.pending) throw new Error('the scaler was not building after the first scaled frame');
+      if (probe._idle(scene, cam)) throw new Error('a stretched frame counted as the last: run would stop before the sharp one');
+      await probe.renderer.upscaler._scalerReady();
+      // Built between two frames: the stretched one drawn last is still not final.
+      if (probe._idle(scene, cam)) throw new Error('the scaler finished between frames, and the stretched frame stayed up');
+      frame();
+      frame();
+      if (!probe.renderer.upscaler.scaled) throw new Error('the frame after the scaler built was not scaled');
+      if (!probe._idle(scene, cam)) throw new Error('a still scene at a lower resolution never rests: every frame is drawn again');
+      return 'waits while the scaler builds, rests once it has';
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('splats draw back to front whatever order the file has them in, behind geometry in front', async () => {
     // Two opaque splats on the view axis, red in front of blue, written to
     // the file in both orders: the sort puts red over blue either way. Then
@@ -1468,6 +1505,16 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         const scene = probe.createScene();
         scene.addSplats({ splats });
         seen.push(await centre(scene));
+        // From the far side blue is in front: the order follows the camera.
+        // Drawn again from there, nothing moved, so the sort is skipped and
+        // the picture is the same.
+        cam.position.set([0, 0, -5]);
+        const [r1, , b1] = await centre(scene);
+        const [r2, , b2] = await centre(scene);
+        const sorted = probe.renderer.splats.sorted;
+        cam.position.set([0, 0, 5]);
+        if (!(b1 > 150 && r1 < 30)) throw new Error(`from behind, the centre is ${r1},_,${b1}, not blue: the order did not follow the camera`);
+        if (sorted !== 0 || b2 !== b1 || r2 !== r1) throw new Error(`a frame where nothing moved sorted ${sorted} clouds, and drew ${r2},_,${b2} after ${r1},_,${b1}`);
         // And behind a quad at z = 2, which hides them both.
         scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
           .setPosition(0, 0, 2).setScale(0.5, 0.5, 1);
@@ -1477,6 +1524,31 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         try { probe.renderFrame(scene, cam); } catch (error) { refused = error.message; }
         if (!/unloaded/.test(refused)) throw new Error(`an unloaded capture still drew: ${refused}`);
       }
+      // One splat alone: a cloud with no depth to span still draws. Then in
+      // fog that hides it, it fades to the fog's colour, as the scene does.
+      const single = await probe.loadSplats(file(red));
+      const lone = probe.createScene();
+      lone.addSplats({ splats: single });
+      const [r0, , b0] = await centre(lone);
+      if (!(r0 > 150 && b0 < 30)) throw new Error(`one splat alone drew ${r0},_,${b0}, not red`);
+      probe.renderer.fog = { visibility: 0.5 };
+      const [rf] = await centre(lone);
+      probe.renderer.fog = null;
+      if (!(rf < r0 * 0.5)) throw new Error(`in thick fog the splat stayed ${rf} red of ${r0}`);
+      probe.unload(single);
+
+      // Smoke in front of a capture shows over it: splats write no depth, so
+      // they are drawn before particles, or they would paint over them.
+      const room = await probe.loadSplats(file(red, blue));
+      const smoky = probe.createScene();
+      smoky.addSplats({ splats: room });
+      const smoke = smoky.addEmitter({ position: [0, 0, 3], lifetime: 100, size: 1.5, color: [0, 1, 0, 1], blend: 'alpha' });
+      smoky.burst(smoke, 1);
+      smoky.advance(0.01);
+      const [rs, gs] = await centre(smoky);
+      probe.unload(room);
+      if (!(gs > 150 && rs < 30)) throw new Error(`smoke in front of the splats drew ${rs},${gs},_: the splats painted over it`);
+
       const [front, hidden, back, hidden2] = seen;
       for (const [name, [r, g, b]] of [['red first', front], ['blue first', back]]) {
         if (!(r > 150 && b < 30)) throw new Error(`${name} in the file: centre is ${r},${g},${b}, not red`);

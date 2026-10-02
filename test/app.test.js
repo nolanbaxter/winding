@@ -295,6 +295,7 @@ test('run() skips a frame only when nothing it is drawn from has changed', () =>
     exposure: 1, fog: null, dof: null, skybox: true, shadowDistance: null, lightDistance: null, ao: null,
     debug: { count: 0, depthTest: true }, _variantSets: sets,
     post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, levels: 5, antialias: true, grading: null, fxaaPipeline: {} },
+    upscaler: { pending: false },
     shadows: { lambda: 0.7, casterExtent: 4, normalBias: 1.5 },
   };
   engine._drawn = null;
@@ -344,6 +345,7 @@ test('a HUD is part of what run() compares before skipping a frame', () => {
     exposure: 1, fog: null, dof: null, skybox: true, shadowDistance: null, lightDistance: null, ao: null,
     debug: { count: 0, depthTest: true }, _variantSets: new Map(),
     post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, levels: 5, antialias: true, grading: null, fxaaPipeline: {} },
+    upscaler: { pending: false },
     shadows: { lambda: 0.7, casterExtent: 4, normalBias: 1.5 },
   };
   engine._drawn = null;
@@ -1851,6 +1853,7 @@ test('a 2D view redraws when only the page zoom changes', () => {
     exposure: 1, fog: null, dof: null, skybox: true, shadowDistance: null, lightDistance: null, ao: null,
     debug: { count: 0, depthTest: true }, _variantSets: new Map(),
     post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, levels: 5, antialias: true, grading: null, fxaaPipeline: {} },
+    upscaler: { pending: false },
     shadows: { lambda: 0.7, casterExtent: 4, normalBias: 1.5 },
   };
   engine._drawn = null;
@@ -2131,6 +2134,7 @@ test('1.0.1: run sees a frame drawn by hand, and a restart is no jump', () => {
     exposure: 1, fog: null, dof: null, skybox: true, shadowDistance: null, lightDistance: null, ao: null, oit: false,
     debug: { count: 0, depthTest: true }, _variantSets: new Map(),
     post: { threshold: 1, knee: 0.5, filterRadius: 1, strength: 0.06, levels: 5, antialias: true, grading: null, fxaaPipeline: {} },
+    upscaler: { pending: false },
     shadows: { lambda: 0.7, casterExtent: 4, normalBias: 1.5 },
     render(scene, camera) { scene.update(); scene.transforms.moved.fill(0); scene.transforms.movedPending = false; camera.update(320 / 240); drawn.push(scene.name); },
   };

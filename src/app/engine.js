@@ -746,9 +746,10 @@ export class Winding {
     if (this.gpu.width !== last.width || this.gpu.height !== last.height) return false;
     const renderer = this.renderer;
     if (renderer.debug.count > 0) return false;
-    for (const set of renderer._variantSets.values()) if (!set.ready) return false;
-    // Antialiasing asked for and still building: the frame that has it is still to come.
-    if (renderer.post.antialias && renderer.post.fxaaPipeline === undefined) return false;
+    // A frame drawn without something still building is not the last word,
+    // and neither is the next while it builds. Asking only now missed a build
+    // that finished between two frames: the one drawn without it stayed up.
+    if (last.building || this._building()) return false;
     // With the size and pixel ratio, as a frame updates it: a Camera2D's view
     // changes with the ratio alone, when the page is zoomed.
     camera.update(this.gpu.width / this.gpu.height, this.gpu.width, this.gpu.height, this.gpu.pixelRatio);
@@ -769,9 +770,22 @@ export class Winding {
       && sameFloats(camera.ambient, last.hudAmbient);
   }
 
+  /**
+   * Whether a frame drawn now is drawn without something it will have once
+   * it is built: pipelines for a feature switched on, FXAA, or the scaler
+   * for a lower resolution.
+   */
+  _building() {
+    const renderer = this.renderer;
+    for (const set of renderer._variantSets.values()) if (!set.ready) return true;
+    if (renderer.post.antialias && renderer.post.fxaaPipeline === undefined) return true;
+    return renderer.upscaler.pending;
+  }
+
   _remember(scene, camera, hud = null) {
     const last = this._drawn ?? { view: new Float32Array(16), projection: new Float32Array(16), morphs: [], hudView: new Float32Array(16) };
     last.scene = scene;
+    last.building = this._building();
     last.camera = camera;
     last.hud = hud;
     if (hud !== null) {
