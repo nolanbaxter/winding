@@ -17,7 +17,7 @@
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer, storageCapacity } from '../rhi/buffer.js';
-import { clampSampler, pixelatedSampler, spriteSampler } from '../rhi/texture.js';
+import { clampSampler, pixelatedSampler, spriteSampler, generateMipmaps } from '../rhi/texture.js';
 import { grownCapacity } from '../core/grow.js';
 import { handleIndex } from '../core/handle.js';
 import { spriteRect, frame2D, shapeRadius, repeats, BLENDS } from '../scene/scene.js';
@@ -317,29 +317,42 @@ fn fs(v : Out) -> @location(0) vec4<f32> {
 }
 
 // A tilemap: uv counts tiles, and each pixel looks up the tile it is in.
+//
+// From a padded copy of the tileset (padTileset): each tile alone in a cell,
+// its edges stretched out to fill it, so its mips never take in a neighbour,
+// and a map zoomed far out is filtered, not shimmering. The mip level comes
+// from how fast the map's own coordinate changes, which is smooth, not from
+// the tile coordinate, which jumps at every tile's edge. A tileset too large
+// to pad is read as it is, at full size: extra.w is 0.
 @fragment
 fn fsTilemap(v : Out) -> @location(0) vec4<f32> {
   let tile = v.extra.xy;
+  // In the tileset's texels a screen pixel along: taken here, before anything branches.
+  var dx = dpdx(v.uv) * tile;
+  var dy = dpdy(v.uv) * tile;
   let map = vec2<i32>(textureDimensions(tiles));
   let cell = vec2<i32>(floor(v.uv));
   let id = textureLoad(tiles, clamp(cell, vec2<i32>(0), map - 1), 0).r;
   let number = id & 0x1fffffffu;
   // Tiled's flips, undone in the reverse of the order it applies them:
-  // diagonal first, then horizontal and vertical.
+  // diagonal first, then horizontal and vertical. The steps turn with them.
   var f = fract(v.uv);
-  if ((id & 0x80000000u) != 0u) { f.x = 1.0 - f.x; }
-  if ((id & 0x40000000u) != 0u) { f.y = 1.0 - f.y; }
-  if ((id & 0x20000000u) != 0u) { f = f.yx; }
+  if ((id & 0x80000000u) != 0u) { f.x = 1.0 - f.x; dx.x = -dx.x; dy.x = -dy.x; }
+  if ((id & 0x40000000u) != 0u) { f.y = 1.0 - f.y; dx.y = -dx.y; dy.y = -dy.y; }
+  if ((id & 0x20000000u) != 0u) { f = f.yx; dx = dx.yx; dy = dy.yx; }
   let columns = u32(v.extra.z);
   let index = max(number, 1u) - 1u;
-  // Past the margin, a tile and a gap at a time.
-  let origin = v.f.x + vec2<f32>(f32(index % columns), f32(index / columns)) * (tile + v.f.y);
-  // Half a texel inside the tile, so filtering never reaches its neighbour.
-  let texel = clamp(origin + f * tile, origin + 0.5, origin + tile - 0.5);
-  // ponytail: the full-size image only, no mips -- a mip would blend
-  // neighbouring tiles. Zoomed far out a map shimmers; padded tilesets or a
-  // per-tile mip chain if that matters.
-  let sampled = textureSampleLevel(image, imageSampler, texel / vec2<f32>(textureDimensions(image)), 0.0);
+  // A cell at a time, from the first's corner: f.xy the cells' size, f.zw where a tile starts in its cell.
+  let origin = v.f.zw + vec2<f32>(f32(index % columns), f32(index / columns)) * v.f.xy;
+  let size = vec2<f32>(textureDimensions(image));
+  var sampled : vec4<f32>;
+  if (v.extra.w > 0.0) {
+    sampled = textureSampleGrad(image, imageSampler, (origin + f * tile) / size, dx / size, dy / size);
+  } else {
+    // Unpadded: half a texel inside the tile, so filtering never reaches a neighbour, and no mips.
+    let texel = clamp(origin + f * tile, origin + 0.5, origin + tile - 0.5);
+    sampled = textureSampleLevel(image, imageSampler, texel / size, 0.0);
+  }
   if (number == 0u || any(cell < vec2<i32>(0)) || any(cell >= map)) { discard; }
   let colour = vec4<f32>(encode(sampled.rgb), sampled.a) * v.color;
   return blended(vec4<f32>(lit(colour.rgb, v.flags, v.world), colour.a));
@@ -526,12 +539,11 @@ export function write2D(out, o, world, entity, source, box, firstPoint = 0, piec
       out[o + 13] = pointCount;
     }
   } else if (tilemap) {
-    const [tw, th] = source.tileSize;
-    out[o + 16] = tw;
-    out[o + 17] = th;
-    // The tileset's columns: as many tiles and gaps as fit inside its margin.
-    out[o + 18] = Math.floor((source.tileset.width - 2 * source.margin + source.spacing) / (tw + source.spacing));
-    out[o + 19] = 0;
+    const layout = tileLayout(source);
+    out[o + 16] = source.tileSize[0];
+    out[o + 17] = source.tileSize[1];
+    out[o + 18] = layout.columns;
+    out[o + 19] = layout.padded ? 1 : 0;
   } else {
     out[o + 16] = glyph ? 0 : source.cutoff;
     out[o + 17] = glyph ? source.strokeEdge : 0;
@@ -547,9 +559,36 @@ export function write2D(out, o, world, entity, source, box, firstPoint = 0, piec
     out[o + 23] = Math.max(rect[1], rect[3]);
   }
   if (tilemap) {
-    out[o + 20] = source.margin;
-    out[o + 21] = source.spacing;
+    const layout = tileLayout(source);
+    out[o + 20] = layout.cell[0];
+    out[o + 21] = layout.cell[1];
+    out[o + 22] = layout.pad[0];
+    out[o + 23] = layout.pad[1];
   }
+}
+
+/** The largest texture every WebGPU device makes: a padded tileset past it is read unpadded. */
+const PADDED_MOST = 8192;
+
+/**
+ * Where a tilemap's tiles are in the texture it draws from. Padded: each
+ * tile in a cell of its own, `pad` texels in from its corner, with room
+ * around it for mips down to a tile two texels across -- each level halves
+ * the room, and a level's filter reaches a texel past the tile -- and cells
+ * a multiple of the last level's texel, so no level's texel straddles two.
+ * Unpadded, the tileset as it is: a margin, then tiles and gaps.
+ */
+export function tileLayout({ tileset, tileSize: [tw, th], margin, spacing }) {
+  const columns = Math.floor((tileset.width - 2 * margin + spacing) / (tw + spacing));
+  const rows = Math.floor((tileset.height - 2 * margin + spacing) / (th + spacing));
+  const levels = Math.max(0, Math.floor(Math.log2(Math.min(tw, th) / 2)));
+  const step = 2 ** levels;
+  const cell = [Math.ceil((tw + 2 * step) / step) * step, Math.ceil((th + 2 * step) / step) * step];
+  const width = columns * cell[0], height = rows * cell[1];
+  if (levels > 0 && width <= PADDED_MOST && height <= PADDED_MOST) {
+    return { padded: true, columns, rows, cell, pad: [step, step], levels: levels + 1, width, height };
+  }
+  return { padded: false, columns, rows, cell: [tw + spacing, th + spacing], pad: [margin, margin], levels: 1, width: 0, height: 0 };
 }
 
 const FRAME = new Float64Array(4);
@@ -631,6 +670,8 @@ export class View2D {
     this._tilemapLayout = tilemapLayout;
     /** Tilemap record -> { texture, group }: its ids on the GPU. */
     this._tilemaps = new Map();
+    /** Tileset -> its padded copies, by tile layout: see tileLayout. */
+    this._padded = new Map();
     this._uniform = createBuffer(rhi, { label: 'view2d', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this._uniformData = new Float32Array(24);
     /** Paths' points and the scene's lights, each grown as needed: { buffer, size } by name. */
@@ -938,10 +979,15 @@ export class View2D {
       }
       if (tilemap !== null) {
         const gpu = this._tilemaps.get(tilemap);
+        const padded = this._paddedFor(tilemap);
+        if (gpu.padded !== padded) {
+          gpu.padded = padded;
+          gpu.group = null;
+        }
         gpu.group ??= this.rhi.device.createBindGroup({
           label: 'view2d-tilemap', layout: this._tilemapLayout,
           entries: [
-            { binding: 0, resource: texture.view },
+            { binding: 0, resource: padded?.view ?? texture.view },
             { binding: 1, resource: texture.pixelated ? pixelatedSampler(this.rhi) : clampSampler(this.rhi) },
             { binding: 2, resource: gpu.texture.createView() },
           ],
@@ -969,10 +1015,116 @@ export class View2D {
     }
   }
 
+  /**
+   * A tilemap's tileset, padded and mipped as tileLayout lays it out; made
+   * the first time it is drawn, and shared by every map that lays it out
+   * alike. Null when it is read as it is.
+   */
+  _paddedFor(map) {
+    const layout = tileLayout(map);
+    if (!layout.padded) return null;
+    const tileset = map.tileset;
+    let byLayout = this._padded.get(tileset);
+    if (!byLayout) this._padded.set(tileset, byLayout = new Map());
+    const key = `${map.tileSize[0]}x${map.tileSize[1]}+${map.margin}+${map.spacing}`;
+    let padded = byLayout.get(key);
+    if (!padded) {
+      padded = padTileset(this.rhi, this.pipelines, tileset, map, layout);
+      byLayout.set(key, padded);
+    }
+    return padded;
+  }
+
   destroy() {
     for (const gpu of this._tilemaps.values()) gpu.texture.destroy();
+    for (const byLayout of this._padded.values()) for (const padded of byLayout.values()) padded.texture.destroy();
     for (const store of Object.values(this._stores)) store?.buffer.destroy();
     this._buffer?.destroy();
     this._uniform.destroy();
   }
 }
+
+const PAD_SHADER = /* wgsl */ `
+struct Pad {
+  tile    : vec2<f32>,   // a tile's size, in texels
+  cell    : vec2<f32>,   // a cell's, in the padded copy
+  pad     : vec2<f32>,   // where the tile starts in its cell
+  margin  : f32,
+  spacing : f32,
+  columns : f32,
+};
+@group(0) @binding(0) var<uniform> pad : Pad;
+@group(0) @binding(1) var source : texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) index : u32) -> @builtin(position) vec4<f32> {
+  let x = f32((index << 1u) & 2u);
+  let y = f32(index & 2u);
+  return vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+
+/** A texel of the padded copy: its cell's tile, the nearest texel of it -- stretched past its edges. */
+@fragment
+fn fs(@builtin(position) at : vec4<f32>) -> @location(0) vec4<f32> {
+  let cell = floor(at.xy / pad.cell);
+  let index = cell.y * pad.columns + cell.x;
+  let within = clamp(floor(at.xy - cell * pad.cell - pad.pad), vec2<f32>(0.0), pad.tile - 1.0);
+  let texel = pad.margin + vec2<f32>(index % pad.columns, floor(index / pad.columns)) * (pad.tile + pad.spacing) + within;
+  return textureLoad(source, vec2<i32>(texel), 0);
+}
+`;
+
+/**
+ * A tileset laid out as tileLayout pads it, drawn once by a pass that reads
+ * the original texel for texel, then mipped by coverage, as a sprite's
+ * image is.
+ */
+function padTileset(rhi, pipelines, tileset, map, layout) {
+  const device = rhi.device;
+  const format = tileset.texture.format;
+  const texture = device.createTexture({
+    label: 'view2d-tileset-padded', size: [layout.width, layout.height], format, mipLevelCount: layout.levels,
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
+  });
+  let built = PAD_BUILT.get(device);
+  if (!built) {
+    const module = device.createShaderModule({ label: 'view2d-pad', code: PAD_SHADER });
+    built = { module, pipelines: new Map() };
+    PAD_BUILT.set(device, built);
+  }
+  let pipeline = built.pipelines.get(format);
+  if (!pipeline) {
+    pipeline = device.createRenderPipeline({
+      label: 'view2d-pad', layout: 'auto',
+      vertex: { module: built.module, entryPoint: 'vs' },
+      fragment: { module: built.module, entryPoint: 'fs', targets: [{ format }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    built.pipelines.set(format, pipeline);
+  }
+  const tail = device.createBuffer({ label: 'view2d-pad', size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  rhi.queue.writeBuffer(tail, 0, new Float32Array([
+    map.tileSize[0], map.tileSize[1], layout.cell[0], layout.cell[1], layout.pad[0], layout.pad[1], map.margin, map.spacing, layout.columns, 0, 0, 0,
+  ]));
+  const group = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: tail } },
+      { binding: 1, resource: tileset.texture.createView({ baseMipLevel: 0, mipLevelCount: 1 }) },
+    ],
+  });
+  const encoder = device.createCommandEncoder({ label: 'view2d-pad' });
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [{ view: texture.createView({ baseMipLevel: 0, mipLevelCount: 1 }), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }],
+  });
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, group);
+  pass.draw(3);
+  pass.end();
+  rhi.queue.submit([encoder.finish()]);
+  tail.destroy();
+  generateMipmaps(rhi, texture);
+  return { texture, view: texture.createView() };
+}
+
+const PAD_BUILT = new WeakMap();

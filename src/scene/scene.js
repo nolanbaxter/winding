@@ -108,6 +108,8 @@ export function emitterRecord(options = {}) {
     /** For a 2D view: drawn in painter's order with sprites, as their layer is. */
     layer,
     owed: 0,
+    // Of what is owed, how much was burst rather than accrued by the rate.
+    burstOwed: 0,
     time: 0,
     seed: (nextEmitterSeed++ * 0x9e3779b9) >>> 0,
   };
@@ -1487,6 +1489,7 @@ export class Scene {
     if (current === undefined) throw new Error('setEmitter: this node has no emitter');
     const next = checked('setEmitter', () => emitterRecord({ ...current.options, ...changes }));
     next.owed = current.owed;
+    next.burstOwed = current.burstOwed;
     next.time = current.time;
     next.seed = current.seed;
     next.added = current.added;
@@ -1501,6 +1504,9 @@ export class Scene {
     if (record === undefined) throw new Error('burst: this node has no emitter');
     if (!(Number.isInteger(count) && count >= 0)) throw new Error(`burst: count must be a whole number, got ${count}`);
     record.owed += count;
+    // Kept apart from what the rate owes: a burst's particles hold slots of
+    // their own for as long as they may live (render/particles.js).
+    record.burstOwed += count;
   }
 
   /**

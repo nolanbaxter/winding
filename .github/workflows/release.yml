@@ -1,12 +1,14 @@
 # Release, derived from package.json.
 #
-# The whole release is a normal commit:
+# The whole release is a normal commit on develop, merged into main:
 #
-#   edit package.json + CHANGELOG.md
-#   git commit -m "Release 0.7.4: ..." && git push
+#   on develop: edit package.json + CHANGELOG.md
+#   git commit -m "Release 1.2.0: ..." && git push
+#   open a pull request from develop into main, and merge it once CI passes
 #
-# and this tags it, writes the GitHub release from the changelog, and publishes
-# to npm. Nothing to tag by hand, nothing to remember in order.
+# and the push to main the merge makes is what this runs on: it tags it, writes
+# the GitHub release from the changelog, and publishes to npm. Nothing to tag by
+# hand, nothing to remember in order. main takes changes only by pull request.
 #
 # ONE SOURCE OF TRUTH. This used to be two -- a tag and a version field -- with
 # a guard comparing them, which is the shape of a design that has a problem

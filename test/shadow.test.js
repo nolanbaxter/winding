@@ -12,7 +12,7 @@ import { mat4Create, mat4OrthographicReverseZ } from '../src/core/math/mat4.js';
 import { Camera } from '../src/scene/camera.js';
 import {
   cascadeSplits, frustumSliceSphere, MAX_CASCADES, ShadowMaps, stableShadowDistance,
-  localMargin, spotViewCount, LOCAL_VIEW_FLOATS,
+  localMargin, spotViewCount, LOCAL_VIEW_FLOATS, openSurface,
 } from '../src/render/shadows.js';
 import { Scene, LIGHT_FLOATS, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
 import { frustumCreate } from '../src/core/math/frustum.js';
@@ -733,6 +733,27 @@ test('past the device\'s array layers, directional cascades are refused by name'
   scene.refreshLights();
   const maps = nodeShadowMaps(8);
   assert.throws(() => maps.update(forwardCamera(), scene), /12 directional shadow cascades is past the 8/);
+});
+
+test('a surface is open where an edge has one triangle, welded by position first', () => {
+  // A plane of two triangles: its rim is open.
+  const plane = new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]);
+  assert.equal(openSurface(plane, new Uint32Array([0, 1, 2, 0, 2, 3])), true);
+  // A cube with every face's corners its own, as UV seams or flat normals
+  // split them: closed. Without one face: open.
+  const corners = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
+  const faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [2, 3, 7, 6], [1, 2, 6, 5], [0, 4, 7, 3]];
+  const cube = (count) => {
+    const positions = [], indices = [];
+    faces.slice(0, count).forEach((face) => {
+      const base = positions.length / 3;
+      for (const c of face) positions.push(...corners[c]);
+      indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    });
+    return [new Float32Array(positions), new Uint32Array(indices)];
+  };
+  assert.equal(openSurface(...cube(6)), false);
+  assert.equal(openSurface(...cube(5)), true);
 });
 
 
