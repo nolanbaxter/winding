@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/nolanbaxter/winding/discussions
+    about: How to do something with Winding, or an idea to talk over before it becomes a request.
+  - name: API reference
+    url: https://nolanbaxter.github.io/winding/docs/API.html
+    about: Every call, option and setting, with what it throws.
+  - name: Security issue
+    url: https://github.com/nolanbaxter/winding/security/advisories/new
+    about: Report privately, not in a public issue.

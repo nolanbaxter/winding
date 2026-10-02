@@ -4,6 +4,7 @@
 </picture>
 
 [![npm](https://img.shields.io/npm/v/winding-engine?color=%23cb3837&label=winding-engine)](https://www.npmjs.com/package/winding-engine)
+[![CI](https://github.com/nolanbaxter/winding/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nolanbaxter/winding/actions/workflows/ci.yml)
 [![live demo](https://img.shields.io/badge/demo-live-e07a5f)](https://nolanbaxter.github.io/winding/demo/)
 [![API reference](https://img.shields.io/badge/API-reference-2f6f4e)](docs/API.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -393,6 +394,12 @@ These are real and currently unaddressed.
   destroys itself, but nothing is rebuilt — recovering would mean holding a CPU copy of every GPU
   resource, textures' contents included, for the whole process lifetime. Create a new engine, or
   reload.
+
+## Contributing
+
+Bugs, ideas and pull requests are welcome. Work happens on the `develop` branch; `main` holds
+released code. [CONTRIBUTING.md](CONTRIBUTING.md) has how to run both test suites and what a change
+includes; questions go to [Discussions](https://github.com/nolanbaxter/winding/discussions).
 
 ## License
 

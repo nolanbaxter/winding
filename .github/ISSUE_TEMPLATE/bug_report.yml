@@ -1,0 +1,58 @@
+name: Bug report
+description: Something draws wrong, throws, or doesn't do what docs/API.md says.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what happened instead. A screenshot helps for anything drawn.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: The smallest code that shows it
+      description: A few lines with Winding, or a link to a page. A model or file it needs, attached or linked.
+      render: js
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Winding version
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      placeholder: Chrome 141, Edge 141, Safari 26, Firefox 145...
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and operating system
+      description: "chrome://gpu or about:support shows the GPU."
+      placeholder: Intel Iris Xe, Windows 11
+    validations:
+      required: true
+  - type: dropdown
+    id: gpu-suite
+    attributes:
+      label: The GPU test page
+      description: "Open https://nolanbaxter.github.io/winding/test/gpu.html, or run `npm run test:gpu` in a clone, and say how it went. It tells a driver problem from an engine one."
+      options:
+        - All passed
+        - Some failed (say which below)
+        - Did not run it
+    validations:
+      required: true
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output
+      description: Any error or warning in the browser's console, WebGPU validation errors included.
+      render: text

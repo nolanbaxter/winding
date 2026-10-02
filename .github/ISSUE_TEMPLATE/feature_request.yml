@@ -1,0 +1,22 @@
+name: Feature request
+description: Something Winding doesn't do yet, or a limitation in the README you'd like gone.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you're trying to make
+      description: The scene, game or tool, and where Winding falls short for it. What you need matters more than how it's built.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: The call, option or behaviour you have in mind, if you have one. How it might look in code.
+      render: js
+  - type: textarea
+    id: around
+    attributes:
+      label: What you do now
+      description: Any workaround, and other engines that do this well.
