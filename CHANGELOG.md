@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-02
+
+**Fewer pixels, and Gaussian splats.** Two additions from NVIDIA's open-source work and the
+splatting research: a 3D view drawn at a lower resolution and brought back up sharp, and captures
+of real places drawn alongside the scene.
+
 ### Added
 
 - **`renderer.resolution`**: the 3D view drawn at 0.5 to 1 of the canvas's width and height, and
@@ -2093,7 +2099,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/nolanbaxter/winding/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/nolanbaxter/winding/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/nolanbaxter/winding/compare/v0.14.0...v1.0.0
 [0.14.0]: https://github.com/nolanbaxter/winding/compare/v0.13.0...v0.14.0
