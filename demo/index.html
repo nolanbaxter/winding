@@ -36,7 +36,9 @@
   }
   .caption h1 { margin: 0 0 4px; font-size: 16px; }
   .caption p { margin: 0; color: var(--muted); font-size: 13.5px; }
-  .caption .meta { margin-top: 8px; font-size: 12.5px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .caption .meta { margin-top: 8px; font-size: 12.5px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  .caption label { color: var(--muted); }
+  .caption select { font: inherit; color: var(--ink); background: #1a1e26; border: 1px solid var(--line); border-radius: 6px; padding: 1px 4px; }
   .overlay { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
   .overlay .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; color: var(--muted); pointer-events: auto; max-width: min(560px, calc(100% - 32px)); }
   .overlay .card strong { color: var(--ink); }
@@ -64,7 +66,13 @@
   <div class="caption" id="caption" hidden>
     <h1 id="title"></h1>
     <p id="blurb"></p>
-    <div class="meta"><span id="hint"></span><a id="source" href="https://github.com/nolanbaxter/winding/blob/main/demo/scenes.js">How it's made</a></div>
+    <div class="meta">
+      <span id="hint"></span>
+      <label id="resolutionLabel" title="Draws the 3D view at fewer pixels, and brings it back up with NVIDIA Image Scaling">Resolution
+        <select id="resolution"><option value="1">100%</option><option value="0.75">75%</option><option value="0.5">50%</option></select>
+      </label>
+      <a id="source" href="https://github.com/nolanbaxter/winding/blob/main/demo/scenes.js">How it's made</a>
+    </div>
   </div>
   <div class="overlay" id="loading" hidden><div class="card" id="loadingText">Loading…</div></div>
   <div class="overlay" id="unsupported" hidden>
@@ -100,6 +108,7 @@ const ctx = {
   engine,
   load: (source, key = source) => once(`model:${key}`, async () => engine.load(await source)),
   font: (css) => once(`font:${css}`, () => engine.loadFont(css)),
+  splats: (url) => once(`splats:${url}`, () => engine.loadSplats(url)),
   texture: async (art) => engine.loadTexture(await createImageBitmap(art)),
   /** Pixel art, drawn texel by texel: `paint(set)` with set(x, y, '#rrggbb'). */
   pixels: async (w, h, paint) => {
@@ -145,6 +154,8 @@ async function show(id) {
   $('title').textContent = def.title;
   $('blurb').textContent = def.blurb;
   $('hint').textContent = def.kind === '2d' ? '' : 'Drag to orbit, scroll to zoom, right-drag to pan.';
+  // Resolution is the 3D view's: a 2D one draws without it.
+  $('resolutionLabel').hidden = def.kind === '2d';
   $('caption').hidden = false;
   document.title = `${def.title} · Winding demo`;
 
@@ -191,6 +202,8 @@ async function show(id) {
 }
 
 if (engine) {
+  // Kept across scenes; engine.run sees the change and draws again.
+  $('resolution').addEventListener('change', (event) => { engine.renderer.resolution = Number(event.target.value); });
   addEventListener('hashchange', () => show(location.hash.slice(1)));
   show(location.hash.slice(1));
 }

@@ -51,6 +51,8 @@ import { SkinPalette } from './skin.js';
 import { MorphStore } from './morph.js';
 import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
+import { Upscaler, MIN_RESOLUTION } from './upscale.js';
+import { SplatPass } from './splats.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW } from './gpudriven.js';
 import {
   updateWorldBounds, unionWorldBounds, farthestViewDepth, farthestDistance,
@@ -161,6 +163,14 @@ export class Renderer {
     this.rhi = rhi;
     this.maxDraws = maxDraws;
     this.exposure = exposure;
+    /**
+     * The share of the canvas's width and height a 3D view is drawn at, 0.5
+     * to 1, brought back up to the canvas by NVIDIA Image Scaling: see
+     * render/upscale.js. A plain field, like exposure.
+     */
+    this.resolution = 1;
+    /** The view drawn at that resolution, made when it is first needed. */
+    this._scaled = null;
 
     this.pipelines = new PipelineCache(rhi.device);
     const frameEntries = [
@@ -452,10 +462,12 @@ export class Renderer {
     this.fog = this._fogOption;
     this._fogData = new Float32Array(12);
     this.post = await PostStack.create(this.rhi, this.pipelines, this.postOptions);
+    this.upscaler = await Upscaler.create(this.rhi, this.pipelines);
     /** Lines for one frame, drawn over the finished picture; see debug.js. */
     this.debug = await DebugLines.create(this.rhi, this.pipelines);
     this.sprites = await SpritePass.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
     this.particles = await ParticleSystem.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
+    this.splats = await SplatPass.create(this.rhi, this.pipelines, HDR_FORMAT);
     this.dofPass = await DepthOfField.create(this.rhi, this.pipelines, HDR_FORMAT);
     this.view2d = await View2D.create(this.rhi, this.pipelines, this.particles);
     // ponytail: a HUD's emitters aren't drawn -- the particle system follows one
@@ -842,11 +854,16 @@ export class Renderer {
     if (aoRadius !== null && aoRadius !== undefined && !(aoRadius > 0 && Number.isFinite(aoRadius))) {
       throw new Error(`ao: radius must be positive, or null to fit the scene, got ${aoRadius} (renderer.ao = null turns it off)`);
     }
-    const width = target?.width ?? output?.width ?? rhi.width;
-    const height = target?.height ?? output?.height ?? rhi.height;
-    const depthView = target?.depthView ?? output?.depthView ?? rhi.depthView();
-    // A target keeps its own pyramid: sized to it, and never rebuilt for the canvas's.
-    const hzb = output?.hzb ?? this.hzb;
+    // A canvas frame at a lower resolution is drawn whole into a view of that
+    // size, as into a target, and brought up to the canvas at the end.
+    const scaled = target === null && output === null ? this._scaledView() : null;
+    const into = output ?? scaled;
+    const width = target?.width ?? into?.width ?? rhi.width;
+    const height = target?.height ?? into?.height ?? rhi.height;
+    const depthView = target?.depthView ?? into?.depthView ?? rhi.depthView();
+    // A target keeps its own pyramid: sized to it, and never rebuilt for the
+    // canvas's. The scaled view is the canvas's, and uses the canvas's.
+    const hzb = into?.hzb ?? this.hzb;
 
     // This scene's probes, uploaded again when its set of them changed. None
     // while capturing: the probe being captured would be read half-written.
@@ -1156,9 +1173,9 @@ export class Renderer {
 
     const graph = this.graph;
     // Pooled textures age by the frames of what they're drawn for: see RenderGraph.begin.
-    graph.begin(output ?? (target !== null ? CAPTURE : CANVAS));
+    graph.begin(into ?? (target !== null ? CAPTURE : CANVAS));
 
-    const surface = target === null ? graph.importTexture('surface', output?.view ?? rhi.currentColorView()) : null;
+    const surface = target === null ? graph.importTexture('surface', into?.view ?? rhi.currentColorView()) : null;
     // Imported but NOT external: the device owns the memory, and nothing reads
     // it after the frame, so the graph is free to derive `discard` for it.
     const depth = graph.importTexture('depth', depthView, { external: false });
@@ -1267,10 +1284,13 @@ export class Renderer {
     const transmissive = this._transmissiveCount > 0;
     // Sprites draw after the opaque scene and before anything blended, so
     // they push blended geometry out of the late pass too.
-    const sprites = this.sprites.prepare(scene, camera, environment, width, height, anyMoved);
+    // Sized in the canvas's pixels when scaled, so a sprite in pixels keeps its size on screen.
+    const sprites = this.sprites.prepare(scene, camera, environment, scaled ? rhi.width : width, scaled ? rhi.height : height, anyMoved);
     // Particles likewise; and during a probe capture they are seen, not moved.
     const emitters = this.particles.prepare(scene, camera, environment, target !== null);
-    this._blendInLate = !this._frameOIT && ambient === null && !transmissive && sprites === 0 && emitters === 0;
+    const clouds = this.splats.prepare(scene, camera, width, height);
+    this.stats.splats = this.splats.count;
+    this._blendInLate = !this._frameOIT && ambient === null && !transmissive && sprites === 0 && emitters === 0 && clouds === 0;
 
     // LATE. Whatever the fresh pyramid says is visible and was not drawn above,
     // then the blended geometry, which has to follow every opaque draw. No
@@ -1294,6 +1314,7 @@ export class Renderer {
     // glass shows what is behind it, and before blended geometry.
     this.sprites.addPass(graph, { sceneColor, depth });
     this.particles.addPasses(graph, { sceneColor, depth });
+    this.splats.addPasses(graph, { sceneColor, depth });
 
     // Transmission: the opaque scene copied down a mip chain, then the
     // transmissive surfaces, which read it.
@@ -1364,6 +1385,10 @@ export class Renderer {
       this.post.addPasses(graph, { sceneColor: lensed, surface, width, height, exposure: this.exposure });
       // Debug lines are the canvas's.
       if (output === null) this.debug.addPass(graph, { surface, depth, viewProjection: camera.viewProjection });
+      if (scaled !== null) {
+        const canvas = graph.importTexture('canvas', rhi.currentColorView({ linear: false }));
+        this.upscaler.addPasses(graph, { source: scaled, sourceResource: surface, surface: canvas, width: rhi.width, height: rhi.height });
+      }
     }
 
     graph.compile();
@@ -1494,6 +1519,36 @@ export class Renderer {
     pass.end();
   }
 
+  /**
+   * The view a canvas frame is drawn into at `resolution`, made again when
+   * the canvas or the resolution changes size; null at full size.
+   */
+  _scaledView() {
+    const resolution = this.resolution;
+    if (!(resolution >= MIN_RESOLUTION && resolution <= 1)) {
+      throw new Error(`resolution must be from ${MIN_RESOLUTION} to 1, got ${resolution}`);
+    }
+    const rhi = this.rhi;
+    const width = Math.max(1, Math.round(rhi.width * resolution));
+    const height = Math.max(1, Math.round(rhi.height * resolution));
+    if (width === rhi.width && height === rhi.height) {
+      this._dropScaled();
+      return null;
+    }
+    if (this._scaled?.width !== width || this._scaled?.height !== height) {
+      this._dropScaled();
+      this._scaled = new RenderTarget(rhi, width, height, { label: 'scaled' });
+    }
+    return this._scaled;
+  }
+
+  _dropScaled() {
+    if (this._scaled === null) return;
+    this.graph.forget(this._scaled);
+    this._scaled.destroy();
+    this._scaled = null;
+  }
+
   /** A target `width` x `height` to draw into: see RenderTarget. */
   async createTarget(width, height, options) {
     return new RenderTarget(this.rhi, width, height, options, await HierarchicalDepth.create(this.rhi, this.pipelines));
@@ -1519,6 +1574,8 @@ export class Renderer {
     this.clusters.destroy();
     this.hzb.destroy();
     this.post.destroy();
+    this.upscaler.destroy();
+    this._scaled?.destroy();
     this.frameBuffer.destroy();
     this.directionalBuffer.destroy();
     this.skinPalette.destroy();
@@ -1529,6 +1586,7 @@ export class Renderer {
     this.debug.destroy();
     this.sprites.destroy();
     this.particles.destroy();
+    this.splats.destroy();
     this.decals.destroy();
     this.dofPass.destroy();
     this.view2d.destroy();

@@ -25,6 +25,8 @@ import { createBuffer } from '../rhi/buffer.js';
 import { Environment } from '../render/ibl.js';
 import { parseHDR } from '../render/hdr.js';
 import { Renderer, RenderTarget } from '../render/renderer.js';
+import { Splats } from '../render/splats.js';
+import { parseSplats } from '../scene/splats.js';
 import { GLTFTextures } from '../render/textures.js';
 import { createTexture2D, uploadImage, generateMipmaps } from '../rhi/texture.js';
 import { Font } from '../render/text.js';
@@ -338,6 +340,30 @@ export class Winding {
   }
 
   /**
+   * A Gaussian splat capture, for scene.addSplats: a .ply as 3D Gaussian
+   * Splatting training writes it, or a .splat.
+   *
+   *   const room = await engine.loadSplats('room.ply');
+   *   scene.addSplats({ splats: room });
+   *
+   * `source` is a URL, an ArrayBuffer or a Uint8Array. `fetch` downloads a
+   * URL, as every loader's does. Returns { count, min, max }: how many
+   * splats, and the box around their centres. engine.unload() it when no
+   * scene draws it any more.
+   */
+  async loadSplats(source, { fetch = globalThis.fetch } = {}) {
+    this._assertAlive('loadSplats');
+    let bytes = source;
+    if (typeof source === 'string') {
+      const response = await fetch(source);
+      if (!response.ok) throw new Error(`loadSplats: ${source} returned ${response.status}`);
+      bytes = new Uint8Array(await response.arrayBuffer());
+      this._assertAlive('loadSplats');
+    }
+    return new Splats(this.gpu, parseSplats(bytes));
+  }
+
+  /**
    * Load a .glb/.gltf and get back something scene.add() can take.
    *
    * `source` is a URL string, an ArrayBuffer, or a Uint8Array. This is the only
@@ -559,7 +585,8 @@ export class Winding {
   /**
    * Free what any load call made: a model from load(), a texture from
    * loadTexture(), a font from loadFont(), a LUT from loadLUT(), an
-   * environment from loadEnvironment(). Freeing twice does nothing.
+   * environment from loadEnvironment(), splats from loadSplats(). Freeing
+   * twice does nothing.
    *
    * A model's buffers, textures, material ids and morph deltas: remove it
    * from every scene first, and this throws if any scene still draws it. A
@@ -577,9 +604,9 @@ export class Winding {
       // texture or a LUT is its GPU texture.
       // A target's pooled frame textures go with it.
       if (asset instanceof RenderTarget) this.renderer.graph.forget(asset);
-      if (asset instanceof Font || asset instanceof Environment || asset instanceof RenderTarget) asset.destroy();
+      if (asset instanceof Font || asset instanceof Environment || asset instanceof RenderTarget || asset instanceof Splats) asset.destroy();
       else if (typeof asset.texture?.destroy === 'function') asset.texture.destroy();
-      else throw new Error('unload: this is not something load, loadTexture, loadFont, loadLUT, loadEnvironment or createTarget returned');
+      else throw new Error('unload: this is not something load, loadTexture, loadFont, loadLUT, loadEnvironment, loadSplats or createTarget returned');
       asset.unloaded = true;
       return;
     }
@@ -772,7 +799,7 @@ export class Winding {
   _settings() {
     const r = this.renderer, p = r.post;
     return settingsSignature([
-      r.exposure, r.fog, r.dof, r.skybox, r.shadowDistance, r.lightDistance, r.ao, r.oit, r.debug.depthTest,
+      r.exposure, r.resolution, r.fog, r.dof, r.skybox, r.shadowDistance, r.lightDistance, r.ao, r.oit, r.debug.depthTest,
       p.threshold, p.knee, p.filterRadius, p.strength, p.levels, p.antialias, p.grading,
       // The shadow settings a frame reads; the rest are fixed at creation.
       r.shadows.lambda, r.shadows.casterExtent, r.shadows.normalBias,

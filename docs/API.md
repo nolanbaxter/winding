@@ -42,14 +42,14 @@ These hold everywhere, so one learned is one learned for good.
 <a id="contents"></a>
 ## Contents
 
-[Winding](#winding) · [Renderer settings](#renderer-settings) · [Debug lines](#debug-lines) · [Scene](#scene) · [Node](#node) · [Camera](#camera) · [Animation](#animation) · [Lights](#lights) · [Particles](#particles) · [Decals](#decals) · [Reflection probes](#reflection-probes) · [Sprites](#sprites) · [Text](#text) · [Shapes](#shapes) · [Paths](#paths) · [Tilemaps](#tilemaps) · [Camera2D](#camera2d) · [The 2D view](#the-2d-view) · [OrbitController](#orbitcontroller) · [StatsOverlay](#statsoverlay) · [Benchmark](#benchmark) · [Environment and HDR](#environment-and-hdr) · [Colour helpers](#colour-helpers) · [Math](#math) · [Renamed in 1.0](#renamed)
+[Winding](#winding) · [Renderer settings](#renderer-settings) · [Debug lines](#debug-lines) · [Scene](#scene) · [Node](#node) · [Camera](#camera) · [Animation](#animation) · [Lights](#lights) · [Particles](#particles) · [Gaussian splats](#splats) · [Decals](#decals) · [Reflection probes](#reflection-probes) · [Sprites](#sprites) · [Text](#text) · [Shapes](#shapes) · [Paths](#paths) · [Tilemaps](#tilemaps) · [Camera2D](#camera2d) · [The 2D view](#the-2d-view) · [OrbitController](#orbitcontroller) · [StatsOverlay](#statsoverlay) · [Benchmark](#benchmark) · [Environment and HDR](#environment-and-hdr) · [Colour helpers](#colour-helpers) · [Math](#math) · [Renamed in 1.0](#renamed)
 
 <a id="index"></a>
 ## Index
 
 Every call, setting and entry, A to Z by its name.
 
-**A** &nbsp; [`aabb`](#math-aabb) · [`scene.add()`](#scene-add) · [`scene.addDecal()`](#scene-adddecal) · [`scene.addEmitter()`](#scene-addemitter) · [`scene.addLight()`](#scene-addlight) · [`scene.addPath()`](#scene-addpath) · [`scene.addProbe()`](#scene-addprobe) · [`scene.addShape()`](#scene-addshape) · [`scene.addSprite()`](#scene-addsprite) · [`scene.addText()`](#scene-addtext) · [`scene.addTilemap()`](#scene-addtilemap) · [`scene.advance()`](#scene-advance) · [`node.alive`](#node-alive) · [`camera.ambient`](#camera2d-ambient) · [`camera.angle`](#camera2d-angle) · [`node.animation`](#node-animation) · [`node.animations`](#node-animations) · [`engine.renderer.post.antialias`](#post-antialias) · [`engine.renderer.ao`](#renderer-ao) · [`engine.debug.axes()`](#debug-axes)
+**A** &nbsp; [`aabb`](#math-aabb) · [`scene.add()`](#scene-add) · [`scene.addDecal()`](#scene-adddecal) · [`scene.addEmitter()`](#scene-addemitter) · [`scene.addLight()`](#scene-addlight) · [`scene.addPath()`](#scene-addpath) · [`scene.addProbe()`](#scene-addprobe) · [`scene.addShape()`](#scene-addshape) · [`scene.addSplats()`](#scene-addsplats) · [`scene.addSprite()`](#scene-addsprite) · [`scene.addText()`](#scene-addtext) · [`scene.addTilemap()`](#scene-addtilemap) · [`scene.advance()`](#scene-advance) · [`node.alive`](#node-alive) · [`camera.ambient`](#camera2d-ambient) · [`camera.angle`](#camera2d-angle) · [`node.animation`](#node-animation) · [`node.animations`](#node-animations) · [`engine.renderer.post.antialias`](#post-antialias) · [`engine.renderer.ao`](#renderer-ao) · [`engine.debug.axes()`](#debug-axes)
 
 **B** &nbsp; [`camera.background`](#camera2d-background) · [`new Benchmark()`](#benchmark) · [`scene.bounds()`](#scene-bounds) · [`engine.debug.box()`](#debug-box) · [`scene.burst()`](#scene-burst)
 
@@ -69,7 +69,7 @@ Every call, setting and entry, A to Z by its name.
 
 **K** &nbsp; [`engine.renderer.post.knee`](#post-knee)
 
-**L** &nbsp; [`engine.renderer.lightDistance`](#renderer-lightdistance) · [`engine.renderer.post.levels`](#post-levels) · [`scene.lightOf()`](#scene-lightof) · [`engine.debug.line()`](#debug-line) · [`linearToSrgb()`](#color-lineartosrgb) · [`lit`](#view2d-lighting) · [`engine.load()`](#engine-load) · [`engine.loadEnvironment()`](#engine-loadenvironment) · [`engine.loadFont()`](#engine-loadfont) · [`engine.loadLUT()`](#engine-loadlut) · [`engine.loadTexture()`](#engine-loadtexture)
+**L** &nbsp; [`engine.renderer.lightDistance`](#renderer-lightdistance) · [`engine.renderer.post.levels`](#post-levels) · [`scene.lightOf()`](#scene-lightof) · [`engine.debug.line()`](#debug-line) · [`linearToSrgb()`](#color-lineartosrgb) · [`lit`](#view2d-lighting) · [`engine.load()`](#engine-load) · [`engine.loadEnvironment()`](#engine-loadenvironment) · [`engine.loadFont()`](#engine-loadfont) · [`engine.loadLUT()`](#engine-loadlut) · [`engine.loadSplats()`](#engine-loadsplats) · [`engine.loadTexture()`](#engine-loadtexture)
 
 **M** &nbsp; [`mat4`](#math-mat4)
 
@@ -81,9 +81,9 @@ Every call, setting and entry, A to Z by its name.
 
 **Q** &nbsp; [`quat`](#math-quat)
 
-**R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.renderer.post.requestedLevels` (renamed)](#post-requestedlevels) · [`engine.rhi` (renamed)](#engine-rhi) · [`camera.rotation` (renamed)](#camera2d-rotation) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
+**R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.renderer.post.requestedLevels` (renamed)](#post-requestedlevels) · [`engine.renderer.resolution`](#renderer-resolution) · [`engine.rhi` (renamed)](#engine-rhi) · [`camera.rotation` (renamed)](#camera2d-rotation) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
 
-**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.debug.sphere()`](#debug-sphere) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
+**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.debug.sphere()`](#debug-sphere) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
 
 **T** &nbsp; [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
 
@@ -200,16 +200,16 @@ Notes: every call allocates, the same file included. Free a model you no longer 
 <a id="engine-unload"></a>
 ### `engine.unload(asset)` → `void`
 
-Frees the GPU memory of anything a load call returned: a model from [`load`](#engine-load), a texture from [`loadTexture`](#engine-loadtexture), a font from [`loadFont`](#engine-loadfont), a LUT from [`loadLUT`](#engine-loadlut), an environment from [`loadEnvironment`](#engine-loadenvironment), or a target from [`createTarget`](#engine-createtarget). Calling it twice does nothing.
+Frees the GPU memory of anything a load call returned: a model from [`load`](#engine-load), a texture from [`loadTexture`](#engine-loadtexture), a font from [`loadFont`](#engine-loadfont), a LUT from [`loadLUT`](#engine-loadlut), an environment from [`loadEnvironment`](#engine-loadenvironment), splats from [`loadSplats`](#engine-loadsplats), or a target from [`createTarget`](#engine-createtarget). Calling it twice does nothing.
 
-Throws: `'unload: mesh "<name>" is still in a scene; remove it first'` for a model any scene still draws; `'unload: this asset was loaded by another engine'`; `'unload: this is not something load, loadTexture, loadFont, loadLUT, loadEnvironment or createTarget returned'`.
+Throws: `'unload: mesh "<name>" is still in a scene; remove it first'` for a model any scene still draws; `'unload: this asset was loaded by another engine'`; `'unload: this is not something load, loadTexture, loadFont, loadLUT, loadEnvironment, loadSplats or createTarget returned'`.
 
 ```js
 scene.remove(helmetNode);
 engine.unload(helmet);
 ```
 
-Notes: only models are checked for use. A texture, font, LUT or environment is freed at once, so stop using it first (remove its sprites or text, clear `engine.grading`, move scenes to another environment).
+Notes: only models are checked for use. A texture, font, LUT, environment or splats is freed at once, so stop using it first (remove its sprites, text or splat nodes, clear `engine.grading`, move scenes to another environment).
 
 <a id="engine-loadtexture"></a>
 ### `engine.loadTexture(source, options)` → `Promise<Texture>`
@@ -291,6 +291,20 @@ Throws: `'loadEnvironment: <url> returned <status>'`; `'loadEnvironment: this en
 ```js
 const studio = await engine.loadEnvironment('studio.hdr', { size: 256 });
 const scene = engine.createScene({ environment: studio });
+```
+
+<a id="engine-loadsplats"></a>
+### `engine.loadSplats(source, { fetch })` → `Promise<Splats>`
+
+Loads a Gaussian splat capture for [`scene.addSplats`](#scene-addsplats). It reads a `.ply` as 3D Gaussian Splatting training writes it (binary, with `f_dc`, `opacity`, `scale` and `rot` properties), or a `.splat` (32 bytes a splat). Colour comes from the constant spherical-harmonic term; the higher terms are skipped, so colour does not change with the view.
+
+`source` is a URL, an `ArrayBuffer` or a `Uint8Array`. `fetch` replaces `fetch` for downloading `source`.
+
+Returns: `{ count, min, max }`: how many splats, and the corners of the box around their centres, in the capture's units. Free it with [`engine.unload`](#engine-unload) once no scene draws it.
+Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' format; only binary_little_endian is read'`; `'splats: this .ply is not a splat capture: no <properties>'`; `'splats: the .ply is cut short: …'`; `'splats: not a .ply, and <n> bytes is not a whole number of 32-byte .splat records'`; `'splats: splat <i> has a position that is not a number'`.
+
+```js
+const room = await engine.loadSplats('room.ply');
 ```
 
 Notes: the environment is yours. Free it with [`engine.unload`](#engine-unload) once no scene uses it.
@@ -565,6 +579,19 @@ Default `1` (the `exposure` option). Multiplies the scene's linear colour before
 ```js
 engine.renderer.exposure = 0.5;
 ```
+
+<a id="renderer-resolution"></a>
+### `engine.renderer.resolution` → `number`
+
+Default `1`. The share of the canvas's width and height the 3D view is drawn at, from `0.5` to `1`. NVIDIA Image Scaling then brings it up to the canvas size and sharpens it. At `0.75` the scene shades 44% fewer pixels, so on a GPU-bound scene the frame is cheaper. The scaler itself costs about 2 ms at 1920x1080 on integrated graphics (Intel Iris Xe), and less on a discrete GPU.
+
+Throws (on the next frame): `'resolution must be from 0.5 to 1, …'`.
+
+```js
+engine.renderer.resolution = 0.75;
+```
+
+Notes: only frames drawn to the canvas are scaled. A [target](#engine-createtarget) keeps the size it was made at. The HUD and the stats overlay are drawn at the canvas's full resolution, after scaling, so text stays crisp. Sprites sized in pixels keep their size on screen. The first time a lower resolution is set, the scaler builds in the background, and frames are stretched without sharpening until it is ready, as with [`ao`](#renderer-ao).
 
 <a id="renderer-fog"></a>
 ### `engine.renderer.fog` → `object | null`
@@ -1398,6 +1425,33 @@ scene.burst(puff, 50);
 ### `scene.particlesActive` → `boolean`
 
 Whether a particle may still be alive, or one is about to be born.
+
+<a id="splats"></a>
+## Gaussian splats
+
+A capture made by 3D Gaussian Splatting: up to millions of soft, coloured ellipsoids fitted to photographs. They are sorted back to front on the GPU every frame and blended over the scene. Load one with [`engine.loadSplats`](#engine-loadsplats).
+
+<a id="scene-addsplats"></a>
+### `scene.addSplats({ splats, position, parent })` → `Node`
+
+Adds a capture as a node. The node's position, rotation and scale place it, and one capture can be added any number of times. `position` defaults to `[0, 0, 0]`.
+
+Splats are lit by nothing: they show the colour the capture saw, decoded from sRGB and tonemapped with the rest of the frame. Geometry in front hides them. They write no depth, so they hide nothing, and they cast no shadows. They count in [`scene.bounds`](#scene-bounds) and [`scene.frame`](#scene-frame) by the box around their centres. They are not picked or raycast.
+
+Throws: `'addSplats: splats must be what engine.loadSplats returned'`; `'addSplats: these splats were unloaded'`. A frame drawing splats unloaded since they were added throws `'addSplats: these splats were unloaded; remove the node first'`.
+
+```js
+const room = await engine.loadSplats('room.ply');
+// Captures usually come with y down, as the photographs were: turn them upright.
+scene.addSplats({ splats: room }).setAxisAngle([1, 0, 0], Math.PI);
+```
+
+Notes: two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. Drawing is limited by fill rate: a capture filling the screen costs about 14 to 21 ms at 1280x720 on integrated graphics (a million splats, Intel Iris Xe), and the sort about 3 ms. [`renderer.resolution`](#renderer-resolution) cuts the fill.
+
+<a id="scene-splatsof"></a>
+### `scene.splatsOf(node)` → `{ splats } | null`
+
+The capture a node draws, or `null`.
 
 <a id="decals"></a>
 ## Decals

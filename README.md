@@ -188,7 +188,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 746 checks, Node, no browser
+npm test          # 751 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 52 checks on a real device
 ```
 
@@ -260,6 +260,10 @@ depth of field from a real lens model, fog integrated exactly along each view ra
 derived from the sky, bloom, and colour grading with white balance and `.cube` LUTs. See
 [Renderer settings](docs/API.md#renderer-exposure) and [`engine.grading`](docs/API.md#engine-grading).
 
+**Fewer pixels, brought back up.** [`renderer.resolution`](docs/API.md#renderer-resolution) draws the
+3D view at a fraction of the canvas's size, and NVIDIA Image Scaling, ported to WGSL, upscales and
+sharpens it, before the HUD, which stays at full resolution.
+
 **A still frame isn't drawn.** When nothing has moved, animated, emitted or changed, and neither the
 camera nor a setting has, [`engine.run`](docs/API.md#engine-run) skips the frame, so a still scene
 costs the GPU nothing and a laptop stays cool.
@@ -305,6 +309,11 @@ glTF defines it. A new scene has no lights; its environment lights it until you 
 frame rate; [decals](docs/API.md#scene-adddecal) that paint the base colour before lighting, so they're
 lit and shadowed as the surface is; and [reflection probes](docs/API.md#scene-addprobe),
 box-projected, so a room reflects the room and not the sky.
+
+**Gaussian splats.** A capture from 3D Gaussian Splatting, `.ply` or `.splat`, loaded with
+[`engine.loadSplats`](docs/API.md#engine-loadsplats) and placed as a node by
+[`scene.addSplats`](docs/API.md#scene-addsplats): culled and sorted back to front on the GPU every
+frame, a million splats in about 3 ms, and drawn behind the geometry in front of them.
 
 **Picking.** [`scene.pick`](docs/API.md#scene-pick) returns what's under the pointer, by bounding
 box, or by triangle for a model loaded with `retainGeometry`, skinned and morphed meshes as posed.

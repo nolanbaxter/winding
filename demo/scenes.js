@@ -179,6 +179,17 @@ export const SCENES = [
     },
   },
   {
+    id: 'splats',
+    title: 'Gaussian splats',
+    blurb: 'A cactus captured with 3D Gaussian Splatting: 452,000 soft ellipsoids, culled and sorted back to front on the GPU every frame. Scan by Steam Studio (steam-studio.jp), CC0. A 14 MB download the first time.',
+    async build(ctx) {
+      const scene = ctx.engine.createScene();
+      // The capture is y down, as the photographs were: turned upright.
+      scene.addSplats({ splats: await ctx.splats('cactus.splat') }).setAxisAngle([1, 0, 0], Math.PI);
+      return { scene, camera: camera3D(0.05), orbit: orbitFrom([0, 1.6, 3.2], [0, 0.7, 0]) };
+    },
+  },
+  {
     id: 'materials',
     title: 'Materials',
     blurb: 'Khronos\'s toy car: a clear-coated body, sheen on the seat fabric, and a windscreen that transmits and refracts what\'s behind it.',

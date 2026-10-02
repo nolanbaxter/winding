@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`renderer.resolution`**: the 3D view drawn at 0.5 to 1 of the canvas's width and height, and
+  brought back up by NVIDIA Image Scaling (NVScaler 1.0.3, MIT), ported to WGSL: a 6-tap filter
+  with edge-directed filters and an unsharp mask on luma. On Sponza at 1920x1080 on Intel Iris Xe,
+  the whole frame's GPU time at 0.75 goes from 10.9 ms to 9.2, and at 0.5 to 56% of full; NIS
+  costs about 2 ms of that. The HUD is drawn after, at full resolution.
+- **Gaussian splats**: `engine.loadSplats` reads a 3D Gaussian Splatting capture, a `.ply` as
+  training writes it or a `.splat`, and `scene.addSplats` places it as a node. Splats are culled and
+  given 16-bit depth keys on the GPU, put back to front by a one-pass counting sort there, and drawn
+  indirectly, blended over the scene and hidden by geometry in front. A million-splat capture sorts
+  in about 3 ms on Intel Iris Xe. They count in `scene.bounds` and `scene.frame`.
+
 ## [1.0.1] - 2026-09-29
 
 **A hunt for bugs, engine-wide.** Four reviews of everything the 2D audit hadn't covered -- loading,

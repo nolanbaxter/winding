@@ -1353,6 +1353,144 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return `${hard} edge pixels between the two colours without, ${soft} with`;
   });
 
+  await step('a lower resolution draws the view smaller, and NIS brings it up sharper than a stretch', async () => {
+    // The same hard edge as above, at full resolution, then at half: brought
+    // up by NIS, and stretched bilinearly (the scaler's pipeline hidden for
+    // the frame). Both leave some pixels between the two colours at twice the
+    // scale; a stretch leaves a ramp, many of them halfway, and NIS a step.
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 }, exposure: 4,
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    try {
+      probe.gpu.resize(320, 240);
+      const scene = probe.createScene();
+      scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
+        .setAxisAngle([0, 0, 1], 0.3).setScale(0.5, 0.5, 1);
+      const cam = new Camera({ fovY: 1.0, near: 0.1 });
+      cam.position.set([0, 0, 3]);
+      cam.target.set([0, 0, 0]);
+      const r = probe.renderer;
+      const frame = () => {
+        probe.renderFrame(scene, cam);
+        return probe.gpu.readPixels();
+      };
+      /** Pixels about halfway between the sky and the quad. */
+      const between = (pixels) => {
+        let n = 0;
+        for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 1] > 64 && pixels[i + 1] < 192) n++;
+        return n;
+      };
+      const lit = (pixels) => {
+        let n = 0;
+        for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 1] >= 128) n++;
+        return n;
+      };
+      const full = await frame();
+      r.resolution = 0.5;
+      probe.renderFrame(scene, cam);
+      await r.upscaler._scalerReady();
+      const nis = await frame();
+      if (!r.upscaler.scaled) throw new Error('the scaler never came up');
+      if (r._scaled.width !== 160 || r._scaled.height !== 120) throw new Error(`drawn at ${r._scaled.width}x${r._scaled.height}, not 160x120`);
+      const scaler = r.upscaler.scalePipeline;
+      r.upscaler.scalePipeline = undefined;
+      const stretched = await frame();
+      r.upscaler.scalePipeline = scaler;
+      r.resolution = 1;
+      const back = await frame();
+      if (r._scaled !== null) throw new Error('the scaled view outlived full resolution');
+
+      // The quad covers the same area at every resolution.
+      const area = [full, nis, stretched].map(lit);
+      if (area.some((a) => Math.abs(a - area[0]) > area[0] * 0.03)) throw new Error(`lit pixels ${area.join(' / ')}`);
+      const edges = [full, nis, stretched].map(between);
+      if (!(edges[1] < edges[2] * 0.5)) throw new Error(`edge pixels: full ${edges[0]}, NIS ${edges[1]}, stretched ${edges[2]}`);
+      if (between(back) !== edges[0]) throw new Error('full resolution did not come back as it was');
+      let refused = '';
+      r.resolution = 0.4;
+      try { probe.renderFrame(scene, cam); } catch (error) { refused = error.message; }
+      r.resolution = 1;
+      if (!refused.startsWith('resolution must be from 0.5 to 1')) throw new Error(`0.4 was not refused: ${refused}`);
+      return `edge pixels: full ${edges[0]}, NIS ${edges[1]}, stretched ${edges[2]}`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('splats draw back to front whatever order the file has them in, behind geometry in front', async () => {
+    // Two opaque splats on the view axis, red in front of blue, written to
+    // the file in both orders: the sort puts red over blue either way. Then
+    // a white quad in front of both hides them.
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    const record = (z, rgb) => {
+      const bytes = new Uint8Array(32);
+      const view = new DataView(bytes.buffer);
+      [0, 0, z, 0.4, 0.4, 0.4].forEach((v, i) => view.setFloat32(i * 4, v, true));
+      bytes.set([...rgb, 255], 24);
+      bytes.set([255, 128, 128, 128], 28);
+      return bytes;
+    };
+    const file = (...records) => {
+      const out = new Uint8Array(records.length * 32);
+      records.forEach((r, i) => out.set(r, i * 32));
+      return out;
+    };
+    try {
+      probe.gpu.resize(160, 120);
+      const red = record(1, [255, 0, 0]);
+      const blue = record(-1, [0, 0, 255]);
+      const cam = new Camera({ fovY: 0.8, near: 0.1 });
+      cam.position.set([0, 0, 5]);
+      cam.target.set([0, 0, 0]);
+      const centre = async (scene) => {
+        probe.renderFrame(scene, cam);
+        const pixels = await probe.gpu.readPixels({ x: 80, y: 60, width: 1, height: 1 });
+        return [...pixels.subarray(0, 3)];
+      };
+      const seen = [];
+      for (const bytes of [file(red, blue), file(blue, red)]) {
+        const splats = await probe.loadSplats(bytes);
+        const scene = probe.createScene();
+        scene.addSplats({ splats });
+        seen.push(await centre(scene));
+        // And behind a quad at z = 2, which hides them both.
+        scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
+          .setPosition(0, 0, 2).setScale(0.5, 0.5, 1);
+        seen.push(await centre(scene));
+        probe.unload(splats);
+        let refused = '';
+        try { probe.renderFrame(scene, cam); } catch (error) { refused = error.message; }
+        if (!/unloaded/.test(refused)) throw new Error(`an unloaded capture still drew: ${refused}`);
+      }
+      const [front, hidden, back, hidden2] = seen;
+      for (const [name, [r, g, b]] of [['red first', front], ['blue first', back]]) {
+        if (!(r > 150 && b < 30)) throw new Error(`${name} in the file: centre is ${r},${g},${b}, not red`);
+      }
+      for (const [r, g, b] of [hidden, hidden2]) {
+        if (!(r > 150 && g > 150 && b > 150)) throw new Error(`the quad in front did not hide the splats: ${r},${g},${b}`);
+      }
+      return `centre ${front.join(',')} and ${back.join(',')}; behind the quad ${hidden.join(',')}`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('grading: saturation, a white balance that neutralises its light, and a .cube LUT', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';

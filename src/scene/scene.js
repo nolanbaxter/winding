@@ -17,7 +17,7 @@ import { Camera } from './camera.js';
 import {
   updateWorldBounds, unionWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds,
 } from './bounds.js';
-import { aabbRayDistance, rayTriangleDistance } from '../core/math/aabb.js';
+import { aabbRayDistance, aabbTransform, aabbUnion, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
 import { unboundedLightRadius, uvTransformRows } from './gltf/parse.js';
 import { layoutText, SPREAD } from '../render/text.js';
@@ -725,6 +725,8 @@ export class Scene {
     this.sprites = new Map();
     /** Particle emitters (see addEmitter), by the entity each hangs off. */
     this.emitters = new Map();
+    /** Gaussian splat captures (see addSplats), by the entity each hangs off. */
+    this.splats = new Map();
     /** Decals (see addDecal), by the entity each hangs off, in the order added. */
     this.decals = new Map();
     /** Text (see addText), by the entity each hangs off. */
@@ -1151,6 +1153,7 @@ export class Scene {
       }
       this.sprites.delete(entity);
       this.emitters.delete(entity);
+      this.splats.delete(entity);
       this.decals.delete(entity);
       this.texts.delete(entity);
       this.tilemaps.delete(entity);
@@ -1313,6 +1316,8 @@ export class Scene {
   tilemapOf(node) { return copyOf(this.tilemaps, node); }
   /** An emitter's options, or null. A copy: change it through setEmitter. */
   emitterOf(node) { return copyOf(this.emitters, node); }
+  /** A splat node's options -- { splats } -- or null. */
+  splatsOf(node) { return copyOf(this.splats, node); }
   /** A decal's options, or null. A copy: change it through setDecal. */
   decalOf(node) { return copyOf(this.decals, node); }
 
@@ -1517,6 +1522,30 @@ export class Scene {
   /** Whether a particle may still be alive, or one is about to be born. */
   get particlesActive() {
     return this._particleClock < this._particlesUntil;
+  }
+
+  // ---------------------------------------------------------------- splats
+
+  /**
+   * A Gaussian splat capture, as a node: splats from engine.loadSplats,
+   * placed, turned and scaled by the node's transform. Returns the Node.
+   *
+   *   const room = await engine.loadSplats('room.ply');
+   *   scene.addSplats({ splats: room });
+   *
+   * Lit by nothing: drawn as the capture saw it, hidden by geometry in
+   * front of it, and casting no shadow. See render/splats.js.
+   */
+  addSplats({ splats, position = [0, 0, 0], parent = null } = {}) {
+    if (!(splats?.centers !== undefined && Number.isInteger(splats.count))) {
+      throw new Error('addSplats: splats must be what engine.loadSplats returned');
+    }
+    if (splats.unloaded) throw new Error('addSplats: these splats were unloaded');
+    this.changes++;
+    const node = this.createNode({ parent }, 'addSplats');
+    node.setPosition(...position);
+    this.splats.set(node.entity, { splats });
+    return node;
   }
 
   // ------------------------------------------------------------------ text
@@ -2328,7 +2357,16 @@ export class Scene {
    */
   bounds(outMin, outMax) {
     this._refreshBounds();
-    return unionWorldBounds(this.renderableCount, this.worldMin, this.worldMax, outMin, outMax);
+    let found = unionWorldBounds(this.renderableCount, this.worldMin, this.worldMax, outMin, outMax);
+    // Splat clouds by the boxes around their centres.
+    for (const [entity, { splats }] of this.splats) {
+      aabbTransform(SPLAT_MIN, SPLAT_MAX, splats.min, splats.max, this.transforms.world, handleIndex(entity) * 16);
+      if (!found) {
+        for (let i = 0; i < 3; i++) { outMin[i] = SPLAT_MIN[i]; outMax[i] = SPLAT_MAX[i]; }
+        found = true;
+      } else aabbUnion(outMin, outMax, SPLAT_MIN, SPLAT_MAX);
+    }
+    return found;
   }
 
   /**
@@ -2580,6 +2618,8 @@ function hitSprite(record, world, entity, dx, dy) {
 /** Scratch for frame(). Not re-entrant, and it never needs to be. */
 const FRAME_MIN = new Float32Array(3);
 const FRAME_MAX = new Float32Array(3);
+const SPLAT_MIN = new Float32Array(3);
+const SPLAT_MAX = new Float32Array(3);
 
 // Scratch for pick(). A scene is not raycast re-entrantly, and the result is
 // read before the next call.
