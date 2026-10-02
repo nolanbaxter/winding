@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-02
+
+**Four limitations gone.** Smoke sorted particle by particle, tilemaps that hold up zoomed out,
+shadows from open surfaces, and text in the world's shaped scripts -- each shown wrong in 1.1.1
+before it was fixed, none of it adding a dependency.
+
 ### Added
 
 - **Alpha particles are sorted.** A `blend: 'alpha'` emitter's live particles are put far to near on
@@ -2158,7 +2164,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/nolanbaxter/winding/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/nolanbaxter/winding/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nolanbaxter/winding/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/nolanbaxter/winding/compare/v1.0.0...v1.0.1
