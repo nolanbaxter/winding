@@ -26,6 +26,7 @@ import { Environment } from '../render/ibl.js';
 import { parseHDR } from '../render/hdr.js';
 import { Renderer, RenderTarget } from '../render/renderer.js';
 import { Splats } from '../render/splats.js';
+import { openSurface } from '../render/shadows.js';
 import { parseSplats } from '../scene/splats.js';
 import { GLTFTextures } from '../render/textures.js';
 import { createTexture2D, uploadImage, generateMipmaps } from '../rhi/texture.js';
@@ -497,6 +498,8 @@ export class Winding {
             skinBuffer: null,
             indexCount: primitive.indexCount,
             bounds: primitive.bounds,
+            /** Whether an edge has one triangle: the shadow pass draws it whole. See openSurface. */
+            open: openSurface(primitive.positions, primitive.indices),
             // How far each target reaches, which is all a bound needs. The deltas
             // themselves are a GPU buffer; this is the one number the CPU keeps.
             morphExtent: primitive.morph?.extent ?? null,

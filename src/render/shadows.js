@@ -365,6 +365,67 @@ export function stableShadowDistance(reach, floor) {
   return Math.max(2 ** Math.ceil(Math.log2(needed)), floor);
 }
 
+/**
+ * Whether a mesh has an edge that only one triangle uses: an open surface,
+ * like a plane, a roof of one sheet, a terrain tile. The shadow pass draws a
+ * closed one's back faces, which keeps the faces it shades free of acne; an
+ * open one may have no back face toward the light, so it is drawn whole.
+ * Vertices are welded by position first: a closed mesh split along its UV
+ * seams, or for flat normals, is still closed.
+ */
+export function openSurface(positions, indices) {
+  // Typed hash tables, open addressing: the strings and Maps this began with
+  // took 400 ms on Sponza's 262k triangles.
+  const bits = new Uint32Array(positions.buffer, positions.byteOffset, positions.length);
+  const vertices = positions.length / 3;
+  const weld = new Uint32Array(vertices);
+  let size = 1 << Math.ceil(Math.log2(vertices * 2 + 2));
+  const table = new Int32Array(size).fill(-1);
+  // Minus zero is zero: a seam on an axis is not a hole.
+  const plain = (b) => (b === 0x80000000 ? 0 : b);
+  for (let v = 0; v < vertices; v++) {
+    const x = plain(bits[v * 3]), y = plain(bits[v * 3 + 1]), z = plain(bits[v * 3 + 2]);
+    let h = (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) & (size - 1);
+    for (;;) {
+      const at = table[h];
+      if (at < 0) {
+        table[h] = v;
+        weld[v] = v;
+        break;
+      }
+      if (plain(bits[at * 3]) === x && plain(bits[at * 3 + 1]) === y && plain(bits[at * 3 + 2]) === z) {
+        weld[v] = weld[at];
+        break;
+      }
+      h = (h + 1) & (size - 1);
+    }
+  }
+  // Each edge by its two welded ends, lower first; counted to two.
+  const triangles = Math.floor(indices.length / 3);
+  size = 1 << Math.ceil(Math.log2(triangles * 3 * 2 + 2));
+  const lo = new Int32Array(size).fill(-1);
+  const hi = new Int32Array(size);
+  const uses = new Uint8Array(size);
+  const count = (a, b) => {
+    if (a > b) { const t = a; a = b; b = t; }
+    let h = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663)) & (size - 1);
+    for (;;) {
+      if (lo[h] < 0) { lo[h] = a; hi[h] = b; uses[h] = 1; return; }
+      if (lo[h] === a && hi[h] === b) { if (uses[h] < 2) uses[h]++; return; }
+      h = (h + 1) & (size - 1);
+    }
+  };
+  for (let t = 0; t < triangles * 3; t += 3) {
+    const a = weld[indices[t]], b = weld[indices[t + 1]], c = weld[indices[t + 2]];
+    if (a === b || b === c || c === a) continue;   // degenerate: no edges to speak of
+    count(a, b);
+    count(b, c);
+    count(c, a);
+  }
+  for (let h = 0; h < size; h++) if (uses[h] === 1) return true;
+  return false;
+}
+
 export class ShadowMaps {
   static async create(rhi, pipelines, drawLayout, options = {}, materialLayout = null) {
     const maps = new ShadowMaps(rhi, options);
@@ -576,11 +637,11 @@ export class ShadowMaps {
       label: `${descriptor.label}-mirrored`,
       primitive: { ...descriptor.primitive, frontFace: 'cw' },
     });
-    // And all four culling nothing, for double-sided materials. Front-face
-    // culling assumes a closed surface, whose back faces stand in for its
-    // front; a double-sided material says its surface has two sides and is
-    // usually open -- a leaf, a sail, a sheet -- so culling the side facing
-    // the light took the whole shadow with it.
+    // And all four culling nothing, for double-sided materials and open
+    // surfaces (openSurface). Front-face culling assumes a closed surface,
+    // whose back faces stand in for its front; an open one -- a leaf, a sail,
+    // a sheet, a roof of one plane -- may have nothing facing away from the
+    // light, so culling the side facing it took the whole shadow with it.
     const twoSided = (descriptor) => ({
       ...descriptor,
       label: `${descriptor.label}-double-sided`,
@@ -1115,7 +1176,9 @@ export class ShadowMaps {
       if (alpha && materials.alphaModes[gpu.batchMaterial[b]] === ALPHA_MASK) continue;
       const primitive = gpu.batchPrimitive[b];
       const skinned = gpu.batchSkinned[b];
-      const doubleSided = (materials.variants[gpu.batchMaterial[b]] & VARIANT_DOUBLE_SIDED) !== 0;
+      // Both sides for a double-sided material, and for an open surface:
+      // culling the side facing the light took its whole shadow.
+      const doubleSided = (materials.variants[gpu.batchMaterial[b]] & VARIANT_DOUBLE_SIDED) !== 0 || primitive.open === true;
       const variant = (doubleSided ? 4 : 0) + skinned * 2 + gpu.batchMirrored[b];
       if (variant !== boundVariant) {
         pass.setPipeline(this._pipelines.get(this.descriptors[variant]));

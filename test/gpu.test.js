@@ -1792,6 +1792,145 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report;
   });
 
+  await step('a roof of one plane, its front to the sun, shades the floor, and the floor shades none of itself', async () => {
+    // Two single-sided quads facing up: a roof a metre above a floor, the sun
+    // straight down. The shadow pass drew back faces only, and a plane facing
+    // the sun has none toward it: no shadow. Open surfaces are drawn whole --
+    // and the floor, drawn whole too, must not shadow its own lit stretch.
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    try {
+      probe.gpu.resize(200, 150);
+      const scene = probe.createScene();
+      const quad = await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1] }));
+      scene.add(quad).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
+      scene.add(quad).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(0.6, 0.6, 1).setPosition(0, 1, 0);
+      scene.addLight({ type: 'directional', direction: [0, -1, 0], intensity: 3, castShadow: true });
+      const cam = new Camera({ fovY: 1.0, near: 0.05 });
+      cam.position.set([0, 0.5, 3]);
+      cam.target.set([0, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels();
+      const vp = cam.viewProjection;
+      const at = ([x, y, z]) => {
+        const cx = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+        const cy = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
+        const w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+        const px = Math.round((cx / w * 0.5 + 0.5) * 200), py = Math.round((0.5 - cy / w * 0.5) * 150);
+        return pixels[(py * 200 + px) * 4];
+      };
+      const under = at([0, 0, 0]);
+      const lit = [[-2, 0, 1], [2, 0, 1], [-1.5, 0, 1.6], [1.5, 0, 1.6], [0, 0, 1.8]].map(at);
+      if (!(under < 40)) throw new Error(`under the roof the floor is ${under}: the roof cast no shadow`);
+      if (!(Math.min(...lit) > 150 && Math.max(...lit) - Math.min(...lit) < 20)) {
+        throw new Error(`the open floor away from the roof reads ${lit.join(', ')}: it shadows itself`);
+      }
+      return `under the roof ${under}; the open floor ${lit.join(', ')}`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('a burst lives its lifetime through the next burst', async () => {
+    // A burst-only emitter, bursting twice a second apart, ten-second
+    // lifetimes, moved between: both particles show. Its ring was sized for
+    // one burst, and the second overwrote the first.
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    try {
+      probe.gpu.resize(160, 120);
+      const scene = probe.createScene();
+      const cam = new Camera({ fovY: 0.8, near: 0.1 });
+      cam.position.set([0, 0, 5]);
+      cam.target.set([0, 0, 0]);
+      const emitter = scene.addEmitter({ position: [-1, 0, 0], lifetime: 10, size: 0.8, color: [1, 1, 1, 1] });
+      scene.burst(emitter, 1);
+      scene.advance(0.001);
+      probe.renderFrame(scene, cam);
+      scene.advance(1);
+      probe.renderFrame(scene, cam);
+      emitter.setPosition(1, 0, 0);
+      scene.burst(emitter, 1);
+      scene.advance(0.001);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels();
+      // x = -1 and 1 at five units, through a 0.8 rad field of view: 28 px either side.
+      const first = pixels[(60 * 160 + 52) * 4], second = pixels[(60 * 160 + 108) * 4];
+      if (!(first > 150 && second > 150)) throw new Error(`the first burst ${first}, the second ${second}: the second burst overwrote the first`);
+      // Another scene drawn next, with an emitter that has emitted nothing:
+      // none of this scene's particles show in it, though its emitter's
+      // entity is numbered as this one's was.
+      const other = probe.createScene();
+      other.addEmitter({ position: [1, 0, 0], lifetime: 10, size: 0.8, color: [1, 1, 1, 1] });
+      probe.renderFrame(other, cam);
+      const [leaked] = await probe.gpu.readPixels({ x: 52, y: 60, width: 1, height: 1 });
+      if (leaked > 30) throw new Error(`a particle of the last scene showed in the next one: ${leaked}`);
+      return `both bursts show: ${first} and ${second}; none in the next scene`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('an alpha emitter draws its particles far to near, whatever order they were born in', async () => {
+    // Two particles of one emitter on the view axis: the near one born first,
+    // the far one five seconds later -- so birth order draws the far one over
+    // it. Their ages tell them apart: red at birth, blue at the end of ten
+    // seconds, so near is nearly blue and far half red.
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    try {
+      probe.gpu.resize(160, 120);
+      const scene = probe.createScene();
+      const cam = new Camera({ fovY: 0.8, near: 0.1 });
+      cam.position.set([0, 0, 5]);
+      cam.target.set([0, 0, 0]);
+      const emitter = scene.addEmitter({
+        position: [0, 0, 1], lifetime: 10, size: 1.5, color: [1, 0, 0, 1], colorEnd: [0, 0, 1, 1], blend: 'alpha',
+      });
+      const centre = async () => {
+        probe.renderFrame(scene, cam);
+        return [...(await probe.gpu.readPixels({ x: 80, y: 60, width: 1, height: 1 })).subarray(0, 3)];
+      };
+      // A particle is born at a moment within its frame's step, so each is
+      // born on a step of a millisecond, and time passes on frames of its own.
+      scene.burst(emitter, 1);
+      scene.advance(0.001);
+      await centre();
+      scene.advance(5);
+      await centre();
+      emitter.setPosition(0, 0, -2);
+      scene.burst(emitter, 1);
+      scene.advance(0.001);
+      await centre();
+      scene.advance(4.9);
+      const [r, , b] = await centre();
+      const live = probe.renderer.particles.sorted;
+      if (live !== 1) throw new Error(`${live} emitters were sorted, not the one alpha emitter`);
+      if (!(b > r * 3)) throw new Error(`the centre is ${r},_,${b}: the far particle, born later, drew over the near one`);
+      return `centre ${r},_,${b}: the near particle in front`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('particles follow their solved paths at any frame rate, and are drawn while they live', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';
@@ -1808,9 +1947,9 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     cam.target.set([0, 0, 0]);
 
     /** Every live particle of one emitter, read back from the pool. */
-    const read = async (node) => {
+    const read = async (node, scene) => {
       const system = probe.renderer.particles;
-      const ring = system.rings.get(node.entity);
+      const ring = system.rings.get(scene.emitters.get(node.entity).seed);
       const bytes = ring.capacity * 32;
       const buffer = probe.gpu.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const encoder = probe.gpu.device.createCommandEncoder();
@@ -1837,7 +1976,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         scene.advance(dt);
         probe.renderFrame(scene, cam);
       }
-      return read(node);
+      return read(node, scene);
     };
     const worst = (live, expect) => Math.max(...live.map((p) => Math.abs(p.position[1] - expect)));
 
@@ -1866,7 +2005,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     };
     for (let k = 0; k < 5; k++) { scene.advance(0.1); probe.renderFrame(scene, cam); }
     const drawn = await lit();
-    const alive = (await read(stream)).length;
+    const alive = (await read(stream, scene)).length;
     scene.setEmitter(stream, { rate: 0 });
     for (let k = 0; k < 12; k++) { scene.advance(0.1); probe.renderFrame(scene, cam); }
     const after = await lit();
@@ -2136,6 +2275,49 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     if (wrong.length > 0) throw new Error(`${report}; strip ${wrong[0][0]} drew ${wrong[0][1]}`);
     if (edge[2] > 2) throw new Error(report);
     return report;
+  });
+
+  await step('a tilemap zoomed far out is filtered, not shimmering, and takes nothing from the next tile', async () => {
+    // A 16-texel tile of single-texel checks beside a solid green tile, mapped
+    // 40 x 30 and shown at an eighth of its size: each screen pixel spans 8 x 8
+    // checks. Read at full size only, each pixel is one check, black or white;
+    // mipped, an even grey -- and with no green, which an unpadded mip would
+    // have taken from the neighbouring tile.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas);
+    try {
+      const art = new OffscreenCanvas(32, 16);
+      const g = art.getContext('2d');
+      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) { g.fillStyle = (x + y) % 2 ? '#fff' : '#000'; g.fillRect(x, y, 1, 1); }
+      g.fillStyle = '#0f0';
+      g.fillRect(16, 0, 16, 16);
+      const tileset = await probe.loadTexture(await art.convertToBlob(), { pixelated: true });
+      const scene = probe.createScene();
+      const map = scene.addTilemap({ tileset, tileSize: [16, 16], columns: 40, rows: 30, tiles: new Array(1200).fill(1) });
+      map.setScale(0.125, 0.125, 1);
+      probe.renderFrame(scene, new Camera2D({ background: [0, 0, 0, 1] }));
+      const pixels = await probe.gpu.readPixels();
+      const { width: W, pixelRatio: r } = probe.gpu;
+      let lo = 255, hi = 0, tint = 0;
+      // Inside the map, which covers 80 x 60 CSS pixels from the corner.
+      for (let y = 10; y < 50; y += 3) {
+        for (let x = 10; x < 70; x += 3) {
+          const o = (Math.floor(y * r) * W + Math.floor(x * r)) * 4;
+          lo = Math.min(lo, pixels[o]);
+          hi = Math.max(hi, pixels[o]);
+          tint = Math.max(tint, pixels[o + 1] - pixels[o]);
+        }
+      }
+      if (hi - lo > 40) throw new Error(`zoomed out, the map ranges from ${lo} to ${hi}: aliased, not filtered`);
+      if (tint > 12) throw new Error(`zoomed out, the map is ${tint} greener than it is red: it took in the next tile`);
+      return `an even ${lo} to ${hi}, ${tint} green`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
   });
 
   await step('a tilemap draws its tiles, flipped as Tiled flips them, shows through where empty, and uploads one changed tile', async () => {
@@ -2612,10 +2794,11 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report;
   });
 
-  await step('a double-sided surface casts whichever side faces the light', async () => {
+  await step('a double-sided or open surface casts whichever side faces the light', async () => {
     // A quad above a floor, lit from above, FACING the light. The shadow pass
-    // draws back faces, so single-sided it casts nothing -- the limit the
-    // README states -- and double-sided it must cast.
+    // draws a closed mesh's back faces; a quad is open, so it is drawn whole
+    // single-sided as double-sided, and casts the same shadow either way.
+    // Single-sided, it cast nothing until 1.2.
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';
     canvas.style.height = '240px';
@@ -2645,7 +2828,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     probe.destroy();
     canvas.remove();
     const report = `shadow pixels with the lit side up: ${single} single-sided, ${double} double-sided`;
-    if (!(single === 0 && double > 500)) throw new Error(report);
+    if (!(single > 500 && single === double)) throw new Error(report);
     return report;
   });
 

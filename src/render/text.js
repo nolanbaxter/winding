@@ -121,8 +121,29 @@ const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u3000-\u303f\
 const NO_BREAK_BEFORE = new Set([...'、。，．：；？！）」』】〕〉》〗〙〛ーぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ々ゝゞヽヾ…‥・']);
 const NO_BREAK_AFTER = new Set([...'（「『【〔〈《〖〘〚']);
 
-/** A word cut where a line may break inside it: between CJK characters. Graphemes each. */
+// Scripts a character at a time cannot draw: Arabic's letters join and change
+// shape with their neighbours, the Indic scripts' combine and reorder, Hebrew
+// and Arabic run right to left. A word in one is drawn whole, as the browser
+// shapes it when it draws text -- one glyph in the atlas, so no shaping
+// engine is needed. Ligatures in Latin text are not formed.
+const SHAPED = new RegExp(`[${['Arabic', 'Hebrew', 'Syriac', 'Thaana', 'Nko', 'Devanagari', 'Bengali', 'Gurmukhi', 'Gujarati',
+  'Oriya', 'Tamil', 'Telugu', 'Kannada', 'Malayalam', 'Sinhala', 'Thai', 'Lao', 'Tibetan', 'Myanmar', 'Khmer', 'Mongolian']
+  .map((script) => `\\p{Script=${script}}`).join('')}]`, 'u');
+const RTL = /[\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
+// Thai, Lao, Khmer and Myanmar put no spaces between words: where a word
+// ends, and a line may break, is the browser's word segmenter's to say.
+const words = typeof Intl?.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'word' }) : null;
+
+/**
+ * A word cut where a line may break inside it: between CJK characters, and
+ * between the words of a shaped script. Each piece a list of glyphs: graphemes,
+ * or for a shaped script the word whole.
+ */
 function pieces(word) {
+  if (!SIMPLE.test(word) && SHAPED.test(word)) {
+    if (words === null) return [[word]];
+    return [...words.segment(word)].map(({ segment }) => [segment]);
+  }
   const chars = graphemes(word);
   if (SIMPLE.test(word) || !chars.some((ch) => CJK.test(ch))) return [chars];
   const out = [[chars[0]]];
@@ -196,6 +217,13 @@ export function layoutText(text, metrics, { align = 'left', lineHeight, anchor =
     }
     lines.push(line ?? []);
   }
+  // A line that starts, at its first letter, in a right-to-left script runs
+  // right to left: its words in reverse, each word still drawn as it reads --
+  // a shaped one by the browser, any other left to right.
+  for (let i = 0; i < lines.length; i++) {
+    const first = lines[i].find((ch) => /\p{L}/u.test(ch));
+    if (first !== undefined && RTL.test(first)) lines[i] = rightToLeft(lines[i]);
+  }
   const widths = lines.map(measure);
   const step = lineHeight ?? metrics.ascent + metrics.descent;
   const blockWidth = Number.isFinite(width) ? width : Math.max(0, ...widths);
@@ -226,6 +254,26 @@ export function layoutText(text, metrics, { align = 'left', lineHeight, anchor =
     box.y -= oy;
   }
   return { boxes, block: [-ox, -blockHeight - oy, blockWidth - ox, -oy] };
+}
+
+/** A line's glyphs with its words, the runs between spaces, in reverse order. */
+function rightToLeft(line) {
+  const runs = [[]];
+  for (const ch of line) {
+    if (ch === ' ') runs.push([]);
+    else runs[runs.length - 1].push(ch);
+  }
+  return runs.reverse().flatMap((run, k) => (k === 0 ? run : [' ', ...run]));
+}
+
+/** Every glyph layoutText could ask for in `text`: what a font has to rasterise. */
+export function glyphsOf(text) {
+  const out = new Set();
+  for (const paragraph of String(text).split('\n')) {
+    if (paragraph.includes(' ')) out.add(' ');
+    for (const word of paragraph.split(' ')) for (const piece of pieces(word)) for (const glyph of piece) out.add(glyph);
+  }
+  return out;
 }
 
 // ----------------------------------------------------------------- fonts
@@ -295,11 +343,10 @@ export class Font {
     this.texture = { texture, view: texture.createView(), width: atlasSize, height: atlasSize, sdf: true };
   }
 
-  /** Rasterise any characters (graphemes) of `text` not yet in the atlas. */
+  /** Rasterise any glyphs of `text` not yet in the atlas: graphemes, and shaped words whole (see SHAPED). */
   ensure(text) {
-    for (const ch of new Set(graphemes(text))) {
-      if (ch === '\n' || this.metrics.glyphs.has(ch)) continue;
-      this._add(ch);
+    for (const glyph of glyphsOf(text)) {
+      if (!this.metrics.glyphs.has(glyph)) this._add(glyph);
     }
   }
 

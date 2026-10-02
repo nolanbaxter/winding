@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Alpha particles are sorted.** A `blend: 'alpha'` emitter's live particles are put far to near on
+  the GPU every frame -- keyed by log depth, a counting sort, an indirect draw -- so dense smoke no
+  longer shows a far particle over a near one, and dead slots are not drawn at all. About 0.2 ms
+  for an emitter of a thousand on Iris Xe.
+- **Tilemaps are mipmapped.** Each tileset is copied with every tile alone in a cell, its edges
+  stretched out, and mipped down to tiles two texels across, so a map zoomed far out is filtered
+  instead of shimmering, and no tile takes in its neighbour.
+- **Open surfaces cast shadows from either side.** A mesh with an edge only one triangle uses --
+  a plane, a roof of one sheet -- is drawn whole into shadow maps; closed meshes keep their
+  back faces, and with them freedom from acne. Found at load, about 40 ms for Sponza.
+- **Text in shaped scripts.** Arabic, Hebrew, the Indic scripts, Thai and others are drawn a word
+  at a time, shaped by the browser; Thai, Lao, Khmer and Burmese break between words though they
+  have no spaces; a line that starts right-to-left runs right to left.
+
+### Fixed
+
+- **A burst-only emitter that burst again lost the particles of the last burst** while they had
+  seconds to live: its ring held one burst, and a grown ring started its next births over the
+  oldest live particle.
+- **An emitter in the next scene drawn could take over another scene's particles**, still alive,
+  when the two emitters' nodes had the same number in their scenes.
+
 ## [1.1.1] - 2026-10-02
 
 **A hunt through 1.1.** The resolution scaler and splats, reviewed three times over, each bug shown

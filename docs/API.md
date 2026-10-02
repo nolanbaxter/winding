@@ -1314,6 +1314,7 @@ const torch = scene.addLight({ direction: [0, 0, -1], parent: hand });   // a sp
 Notes:
 - A directional light with no `direction` shines along -Z. Give it one, or turn its node.
 - Passing `direction` without `type` makes a spot. For a directional light, say `type: 'directional'`.
+- Shadows are drawn from a closed mesh's back faces, which keeps its lit faces free of acne. A mesh with an open edge -- a plane, a roof of one sheet -- is drawn whole, so it casts whichever side faces the light, as a double-sided material does.
 - Shadows, by type: a directional light gets up to four cascaded shadow maps that follow the camera. A spot gets one shadow view down its cone, or six (like a point light) when `outerAngle` is wider than 45 degrees. A point light gets six, one per cube face. A point or spot light draws no shadow maps while its radius sphere is off screen. Maps are redrawn only when something within the light's reach moves.
 - 2D: through a `Camera2D`, point and spot lights also light every sprite, shape, path, text or tilemap made with `lit: true`, fading to nothing at `radius` (in the view's units). Give `position: [x, y]` and, for a spot, `direction: [x, y]`. Directional lights and shadows do not apply in 2D. Where no light reaches, the camera's `ambient` lights it.
 
@@ -1378,7 +1379,7 @@ Adds a particle emitter as a node. Particles leave along its `direction`, turned
 | `color` | `[1, 1, 1, 1]` | At birth. Linear in 3D, and may exceed 1 to glow. sRGB in a 2D view. |
 | `colorEnd` | `color` | At death. |
 | `texture` | `null` | From [`engine.loadTexture`](#engine-loadtexture). Without one, a soft round dot. |
-| `blend` | `'additive'` | `'additive'` (needs no draw order) or `'alpha'`. Particles within one `'alpha'` emitter are not sorted. |
+| `blend` | `'additive'` | `'additive'` (needs no draw order) or `'alpha'`, whose particles are sorted far to near on the GPU every frame in 3D. |
 | `layer` | `0` | 2D only: its place in the painter's order with sprites. |
 | `position` | `[0, 0, 0]` | In the parent's space. |
 | `parent` | `null` | Node to attach it to. |
@@ -1704,8 +1705,9 @@ hud.addText({ font, text: 'HULL', size: 11, pivot: [0, 0], position: [22, 19] })
 
 Notes:
 - In 3D text is unlit and fogged; in 2D it follows `lit`.
-- Lines break on single spaces, on `\n`, and between any two Chinese or Japanese characters—but not before a closing mark such as `。` or after an opening one, as a browser breaks them.
+- Lines break on single spaces, on `\n`, and between any two Chinese or Japanese characters—but not before a closing mark such as `。` or after an opening one, as a browser breaks them—and between the words of Thai, Lao, Khmer and Burmese, which are written without spaces.
 - A character is what a reader counts as one: a letter and its accents, a flag, an emoji and its skin tone are each one glyph. An emoji is drawn in the text's colour, not its own.
+- Scripts whose letters join, change shape or reorder—Arabic, Hebrew, the Indic scripts, Thai and the rest—are drawn a word at a time, shaped by the browser as it draws text. A line whose first letter is right-to-left (Arabic, Hebrew) runs right to left: its words in reverse, each read as written. This is not the full bidirectional algorithm: numbers and Latin words inside it stay in place as words, and `align` is not reversed. Latin ligatures are not formed.
 - Pairs are kerned as the font kerns them ("AV" sits closer than "AH").
 - The outline is drawn in the font's distance field, which reaches 7 texels past each letter at its raster size: `strokeWidth` is at most 7/64 of an em for a font loaded at 64px, so 2.2 pixels for 20px text. Load the font larger for a wider outline. An outline is drawn outside the letters, where a shape's is inside its edge: inside, it would eat thin strokes.
 - The font is rasterised at the size its CSS names. Text stays sharp above that size and down to about an eighth of it; smaller shimmers. Load the font near the size it is mostly seen at.
@@ -1919,7 +1921,7 @@ Notes:
 - Tile ids: `0` is empty, `1` is the tileset's first tile, `2` the next, and so on.
 - The top three bits flip a tile as Tiled does: horizontally (2^31), vertically (2^30) and diagonally (2^29). Tiled's layer data works as is when the map uses one tileset starting at id 1. For a later tileset, subtract its `firstgid - 1` from the id and keep the flip bits.
 - The tileset holds as many tiles as fit its grid: whole tiles across times whole tiles down, after `margin` and `spacing`.
-- A tilemap has no mipmaps, so zoomed far out it can shimmer.
+- Zoomed out, a tilemap is filtered, not shimmering: it draws from a copy of its tileset with each tile in a cell of its own and its edges stretched out, mipped down to tiles two texels across, so no tile takes in its neighbour. The copy is made the first time the map is drawn, about four times the tileset's size. Tiles under four texels across, and tilesets whose copy would pass 8192 texels, are read as they are, with no mipmaps.
 
 <a id="scene-settilemap"></a>
 ### `scene.setTilemap(node, changes)`

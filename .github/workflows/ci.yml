@@ -6,14 +6,14 @@
 #
 # The GPU suite is NOT here and cannot be. It needs a real adapter, and a
 # headless runner has none -- `npm run test:gpu` serves the page and a human
-# opens it. So a green tick here means the 403 Node checks passed, and says
+# opens it. So a green tick here means the Node checks passed, and says
 # nothing about WGSL. Worth knowing, given that everything this engine got
 # wrong this year was invisible to exactly these suites.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
 jobs:

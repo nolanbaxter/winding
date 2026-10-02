@@ -4,7 +4,7 @@ import { EXTENSION_TEXTURES } from '../src/scene/gltf/images.js';
 import { SHEEN_ALBEDO, SHEEN_TABLE_SIZE, sheenAlbedo, sheenTablePoint } from '../src/render/sheen.js';
 import { fogCoefficients, packFog, FOG_WGSL, VISIBILITY_CONTRAST } from '../src/render/fog.js';
 import { packProbes, FACE_CAMERAS, PROBE_FLOATS } from '../src/render/probes.js';
-import { distanceField, layoutText, SPREAD } from '../src/render/text.js';
+import { distanceField, layoutText, glyphsOf, SPREAD } from '../src/render/text.js';
 import { parseCube, whiteBalanceMatrix, planckianXY, packGrading } from '../src/render/grading.js';
 import { lensCoefficients } from '../src/render/dof.js';
 import { textRecord } from '../src/scene/scene.js';
@@ -1189,6 +1189,26 @@ test('text kerns pairs, breaks Chinese and Japanese between characters, and coun
   glyphs.set('e\u0301', glyph(1));   // e + combining acute
   glyphs.set('👍🏽', glyph(1));
   assert.deepEqual(layoutText('e\u0301👍🏽', metrics).boxes.map((g) => g.char), ['e\u0301', '👍🏽']);
+});
+
+test('a word in a shaped script is one glyph, Thai breaks between its words, and a right-to-left line runs right to left', () => {
+  // Arabic joins its letters, Devanagari combines them: drawn whole, as the
+  // browser shapes them, so each word is one glyph. Latin stays a letter each.
+  assert.deepEqual([...glyphsOf('Hi مرحبا بالعالم नमस्ते')], [' ', 'H', 'i', 'مرحبا', 'بالعالم', 'नमस्ते']);
+  // Thai has no spaces: the word segmenter cuts it, one glyph a word.
+  assert.deepEqual([...glyphsOf('สวัสดีครับ')], ['สวัสดี', 'ครับ']);
+
+  const glyph = (advance) => ({ advance, left: 0, width: advance, height: 1, descent: 0 });
+  const glyphs = new Map([[' ', { advance: 0.25, left: 0, width: 0, height: 0, descent: 0 }]]);
+  for (const g of ['مرحبا', 'بالعالم', 'H', 'i', 'สวัสดี', 'ครับ']) glyphs.set(g, glyph(2));
+  const metrics = { ascent: 0.8, descent: 0.2, glyphs };
+  // Right to left: the first word on the right. A Latin word inside keeps
+  // its letters left to right.
+  const arabic = layoutText('مرحبا بالعالم Hi', metrics, { anchor: [0, 1] });
+  assert.deepEqual(arabic.boxes.map((g) => [g.char, g.x]), [['H', 0], ['i', 2], ['بالعالم', 4.25], ['مرحبا', 6.5]]);
+  // A line may break between Thai words, though no space is written.
+  const lineOf = (layout) => layout.boxes.map((g) => Math.round(-g.y));
+  assert.deepEqual(lineOf(layoutText('สวัสดีครับ', metrics, { anchor: [0, 1], width: 3 })), [1, 2]);
 });
 
 test('a text takes a loadFont font, rasterises what it uses, and names a bad option', () => {

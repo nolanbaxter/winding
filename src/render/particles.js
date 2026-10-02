@@ -14,8 +14,19 @@
 // drag, the familiar v0 t + a t^2 / 2. So a particle follows the same path at
 // 30 frames a second as at 144.
 //
-// Drawn after sprites, before glass: alpha emitters far to near, their
-// particles in birth order, then additive ones, which need no order.
+// Drawn after sprites, before glass: alpha emitters far to near, then
+// additive ones, which need no order. An alpha emitter's own particles are
+// sorted far to near on the GPU every frame, as splats are (render/splats.js):
+// the live ones keyed by depth, put in order by a counting sort, and drawn
+// indirectly, so dead slots are not drawn at all. Twelve bits of log depth
+// are enough for smoke -- a key a third of a percent of the distance wide --
+// and keep the sort's own pass over its buckets small for every emitter.
+// Measured on Iris Xe: 0.18 ms for an emitter of a thousand particles, 0.7
+// ms for ten thousand, about half of it their atomics meeting in the few
+// buckets one emitter's depth spans; 65536 buckets made it worse, the scan
+// over them costing more than the spread saved. Two alpha emitters are each
+// sorted on their own, so where they overlap they do not interleave. A 2D view draws particles in birth order: they
+// are flat.
 
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
@@ -30,6 +41,11 @@ import { FOG_WGSL } from './fog.js';
 export const PARTICLE_BYTES = 32;
 const EMITTER_BYTES = 192;
 const WORKGROUP = 64;
+/** Depth buckets for an alpha emitter's sort: 12 bits of log depth. */
+const BUCKETS = 4096;
+/** The log2 of the depths the buckets span, a millimetre to a thousand kilometres. */
+const LOG_NEAR = -10;
+const LOG_FAR = 20;
 
 const EMITTER_WGSL = /* wgsl */ `
 struct Particle {
@@ -150,6 +166,83 @@ fn simulate(@builtin(global_invocation_id) id : vec3<u32>) {
 }
 `;
 
+const SORT_SHADER = /* wgsl */ `
+${EMITTER_WGSL}
+struct View {
+  eye     : vec4<f32>,
+  forward : vec4<f32>,
+};
+
+struct DrawArgs {
+  vertexCount   : u32,
+  instanceCount : atomic<u32>,
+  firstVertex   : u32,
+  firstInstance : u32,
+};
+
+const BUCKETS = ${BUCKETS}u;
+
+@group(0) @binding(0) var<uniform> emitter : Emitter;
+@group(0) @binding(1) var<storage, read> pool : array<Particle>;
+@group(0) @binding(2) var<storage, read_write> keys : array<u32>;
+@group(0) @binding(3) var<storage, read_write> visible : array<u32>;
+@group(0) @binding(4) var<storage, read_write> counts : array<atomic<u32>, BUCKETS>;
+@group(0) @binding(5) var<storage, read_write> cursors : array<atomic<u32>, BUCKETS>;
+@group(0) @binding(6) var<storage, read_write> order : array<u32>;
+@group(0) @binding(7) var<storage, read_write> args : DrawArgs;
+@group(0) @binding(8) var<uniform> view : View;
+
+/** Each live particle, appended with its key: far first. */
+@compute @workgroup_size(${WORKGROUP})
+fn makeKeys(@builtin(global_invocation_id) id : vec3<u32>) {
+  let i = id.x;
+  if (i >= emitter.capacity) { return; }
+  let slot = emitter.offset + i;
+  let p = pool[slot];
+  if (p.age >= p.lifetime) { return; }
+  let depth = max(dot(p.position - view.eye.xyz, view.forward.xyz), 1e-6);
+  let bucket = u32(clamp((log2(depth) - ${LOG_NEAR}.0) * f32(BUCKETS - 1u) / ${LOG_FAR - LOG_NEAR}.0, 0.0, f32(BUCKETS - 1u)));
+  let key = BUCKETS - 1u - bucket;
+  let at = atomicAdd(&args.instanceCount, 1u);
+  keys[emitter.offset + at] = key;
+  visible[emitter.offset + at] = slot;
+  atomicAdd(&counts[key], 1u);
+}
+
+var<workgroup> sums : array<u32, 256>;
+
+/** Where each bucket starts, and the counts zeroed for the next emitter. */
+@compute @workgroup_size(256)
+fn scanCounts(@builtin(local_invocation_index) t : u32) {
+  let first = t * ${BUCKETS / 256}u;
+  var total = 0u;
+  for (var b = 0u; b < ${BUCKETS / 256}u; b++) { total += atomicLoad(&counts[first + b]); }
+  sums[t] = total;
+  workgroupBarrier();
+  for (var step = 1u; step < 256u; step <<= 1u) {
+    var add = 0u;
+    if (t >= step) { add = sums[t - step]; }
+    workgroupBarrier();
+    sums[t] += add;
+    workgroupBarrier();
+  }
+  var at = sums[t] - total;
+  for (var b = 0u; b < ${BUCKETS / 256}u; b++) {
+    let n = atomicLoad(&counts[first + b]);
+    atomicStore(&cursors[first + b], at);
+    atomicStore(&counts[first + b], 0u);
+    at += n;
+  }
+}
+
+@compute @workgroup_size(${WORKGROUP})
+fn place(@builtin(global_invocation_id) id : vec3<u32>) {
+  let i = id.x;
+  if (i >= atomicLoad(&args.instanceCount)) { return; }
+  order[emitter.offset + atomicAdd(&cursors[keys[emitter.offset + i]], 1u)] = visible[emitter.offset + i];
+}
+`;
+
 const DRAW_SHADER = /* wgsl */ `
 ${FRAME_WGSL}
 ${FOG_WGSL}
@@ -166,6 +259,8 @@ struct Camera {
 @group(0) @binding(3) var          envSampler : sampler;
 @group(1) @binding(0) var<uniform> emitter    : Emitter;
 @group(1) @binding(1) var<storage, read> pool : array<Particle>;
+// An alpha emitter's live particles, far to near: slots in the pool.
+@group(1) @binding(2) var<storage, read> order : array<u32>;
 @group(2) @binding(0) var          image      : texture_2d<f32>;
 @group(2) @binding(1) var          imageSampler : sampler;
 
@@ -180,8 +275,11 @@ struct Out {
 };
 
 @vertex
-fn vs(@builtin(vertex_index) index : u32, @builtin(instance_index) slot : u32) -> Out {
+fn vs(@builtin(vertex_index) index : u32, @builtin(instance_index) instance : u32) -> Out {
   var out : Out;
+  // Additive: every slot of the ring, in place. Alpha: the sorted live ones.
+  var slot = instance;
+  if (!ADDITIVE) { slot = order[emitter.offset + instance]; }
   let p = pool[slot];
   // A dead slot: all six corners outside the depth range, so nothing is drawn.
   if (p.age >= p.lifetime) {
@@ -318,8 +416,9 @@ export function packEmitter(out, o, record, world, m, ring, births, dt, seed, fl
 export class ParticleSystem {
   static async create(rhi, pipelines, frameBuffer, colorFormat) {
     const device = rhi.device;
-    const [simulateShader, drawShader, draw2DShader] = await Promise.all([
+    const [simulateShader, sortShader, drawShader, draw2DShader] = await Promise.all([
       compileShader(device, SIMULATE_SHADER, 'particles-simulate.wgsl'),
+      compileShader(device, SORT_SHADER, 'particles-sort.wgsl'),
       compileShader(device, DRAW_SHADER, 'particles-draw.wgsl'),
       compileShader(device, DRAW_2D_SHADER, 'particles-draw-2d.wgsl'),
     ]);
@@ -344,8 +443,22 @@ export class ParticleSystem {
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: EMITTER_BYTES } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
+    const storage = (binding, type = 'storage', extra = {}) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type, ...extra } });
+    const sortLayout = device.createBindGroupLayout({
+      label: 'particles-sort',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: EMITTER_BYTES } },
+        storage(1, 'read-only-storage'), storage(2), storage(3), storage(4), storage(5), storage(6),
+        storage(7, 'storage', { hasDynamicOffset: true, minBindingSize: 16 }),
+        { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      ],
+    });
+    const sortPipelineLayout = createPipelineLayout(device, { 0: sortLayout }, 'particles-sort');
+    const sorter = (entry) => pipelines.compute({ label: `particles-${entry}`, layout: sortPipelineLayout, shader: sortShader, entry });
+    const sort = { keys: sorter('makeKeys'), scan: sorter('scanCounts'), place: sorter('place') };
     const imageLayout = device.createBindGroupLayout({
       label: 'particles-image',
       entries: [
@@ -397,7 +510,7 @@ export class ParticleSystem {
       };
     }
     await pipelines.warm(Object.values(descriptors));
-    return new ParticleSystem(rhi, pipelines, { simulate, descriptors, simulateLayout, frameLayout, emitterLayout, imageLayout, flatLayout }, frameBuffer);
+    return new ParticleSystem(rhi, pipelines, { simulate, sort, sortLayout, descriptors, simulateLayout, frameLayout, emitterLayout, imageLayout, flatLayout }, frameBuffer);
   }
 
   constructor(rhi, pipelines, built, frameBuffer) {
@@ -407,8 +520,15 @@ export class ParticleSystem {
     this._frameBuffer = frameBuffer;
     this.alignment = rhi.limits.minUniformBufferOffsetAlignment;
     this.stride = Math.ceil(EMITTER_BYTES / this.alignment) * this.alignment;
-    /** Each emitter's ring, by its entity: { offset, capacity, head }. */
+    /**
+     * Each emitter's ring, by its seed: { offset, capacity, head }. Not by
+     * its entity: every scene numbers its own, so an emitter in the next
+     * scene drawn could share one with this scene's, and took over its ring
+     * and the particles still alive in it. A seed is the emitter's alone,
+     * and setEmitter keeps it.
+     */
     this.rings = new Map();
+    this._seeds = new Set();
     this.pool = null;
     this.poolSize = 0;
     this._uniform = null;
@@ -429,7 +549,21 @@ export class ParticleSystem {
     this._frame = 0;
     this._environment = null;
     this._simulate = (pass) => this._encodeSimulate(pass);
+    this._sortPass = (pass) => this._encodeSort(pass);
     this._draw = (pass) => this._encodeDraw(pass);
+    // The sort's buckets, shared: alpha emitters sort one after another, and
+    // each scan leaves the counts zeroed for the next.
+    this._counts = createBuffer(rhi, { label: 'particles-counts', size: BUCKETS * 4, usage: GPUBufferUsage.STORAGE });
+    this._cursors = createBuffer(rhi, { label: 'particles-cursors', size: BUCKETS * 4, usage: GPUBufferUsage.STORAGE });
+    this._view = createBuffer(rhi, { label: 'particles-view', size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this._viewData = new Float32Array(8);
+    /** Each alpha emitter's indirect draw, a stride apart: bound by dynamic offset. */
+    this.argsStride = Math.max(16, rhi.limits.minStorageBufferOffsetAlignment);
+    this._args = null;
+    this._argsCapacity = 0;
+    this._argsStaging = new Uint32Array(0);
+    /** Alpha emitters this frame, each sorted. */
+    this.sorted = 0;
     /** Emitters this frame, and whether any moves anything. */
     this.count = 0;
   }
@@ -455,21 +589,41 @@ export class ParticleSystem {
       const dt = frozen ? 0 : record.time;
       record.owed -= births;
       record.time -= dt;
-      let ring = this.rings.get(entity);
-      const needed = ringCapacity(record, births);
+      let ring = this.rings.get(record.seed);
+      // Particles from earlier bursts that may still be alive hold their
+      // slots too. Sized by the rate alone, a burst-only emitter's ring held
+      // one burst, and the next overwrote particles with seconds to live.
+      const clock = (ring?.clock ?? 0) + dt;
+      const held = ring?.held ?? [];
+      let holding = 0;
+      for (let k = held.length - 1; k >= 0; k--) {
+        if (held[k].until <= clock) held.splice(k, 1);
+        else holding += held[k].count;
+      }
+      const bursting = Math.min(record.burstOwed, births);
+      record.burstOwed -= bursting;
+      const needed = ringCapacity(record, births) + holding;
       if (ring === undefined) {
         // placed: how many of its slots the current pool holds. None yet.
-        ring = { offset: 0, placed: 0, capacity: needed, head: 0 };
-        this.rings.set(entity, ring);
+        ring = { offset: 0, placed: 0, capacity: needed, head: 0, clock: 0, held };
+        this.rings.set(record.seed, ring);
         relayout = true;
       } else if (ring.capacity < needed) {
-        // Grown at the end: the head and every live particle keep their slots.
+        // Grown at the end: every live particle keeps its slot, and births
+        // go on into the new ones. The head stayed where it was, which after
+        // a wrap is the oldest particle still alive, and the next birth took it.
+        ring.head = ring.capacity;
         ring.capacity = grownCapacity(ring.capacity, needed);
         relayout = true;
       }
+      ring.clock = clock;
+      if (bursting > 0) held.push({ count: bursting, until: clock + record.lifetime[1] });
       list.push({ entity, record, ring, births: Math.min(births, ring.capacity), dt });
     }
-    for (const entity of this.rings.keys()) if (!scene.emitters.has(entity)) { this.rings.delete(entity); relayout = true; }
+    const seeds = this._seeds;
+    seeds.clear();
+    for (const item of list) seeds.add(item.record.seed);
+    for (const seed of this.rings.keys()) if (!seeds.has(seed)) { this.rings.delete(seed); relayout = true; }
     if (relayout) this._layout(list);
 
     for (const item of list) item.m = handleIndex(item.entity) * 16;
@@ -505,6 +659,32 @@ export class ParticleSystem {
       item.ring.head = (item.ring.head + item.births) % item.ring.capacity;
     });
     this.rhi.queue.writeBuffer(this._uniform, 0, this._staging, 0, bytes);
+    // Each alpha emitter in 3D is sorted: its draw's count starts at zero, for
+    // the sort's key pass to count its live particles into.
+    this.sorted = 0;
+    if (camera.is2D !== true) {
+      for (const item of list) item.sortIndex = item.record.blend === 'alpha' ? this.sorted++ : -1;
+      if (this.sorted > 0) {
+        const words = this.sorted * this.argsStride / 4;
+        if (words * 4 > this._argsCapacity) {
+          this._args?.destroy();
+          this._argsCapacity = grownCapacity(this._argsCapacity, words * 4);
+          this._args = createBuffer(this.rhi, {
+            label: 'particles-args', size: this._argsCapacity, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+          });
+          this._argsStaging = new Uint32Array(this._argsCapacity / 4);
+          this._sortGroup = null;
+        }
+        for (let k = 0; k < this.sorted; k++) this._argsStaging[k * this.argsStride / 4] = 6;
+        this.rhi.queue.writeBuffer(this._args, 0, this._argsStaging, 0, words);
+        const v = this._viewData;
+        v.set(camera.position, 0);
+        v[4] = -camera.view[2];
+        v[5] = -camera.view[6];
+        v[6] = -camera.view[10];
+        this.rhi.queue.writeBuffer(this._view, 0, v);
+      }
+    }
     if (camera.is2D === true) {
       this.rhi.queue.writeBuffer(this._flatBuffer, 0, camera.viewProjection);
     } else {
@@ -548,15 +728,27 @@ export class ParticleSystem {
     });
     this.pool = pool;
     this.poolSize = size;
+    // A slot of each for every slot of the pool: an alpha emitter sorts in its ring's stretch.
+    for (const name of ['_keys', '_visible', '_order']) {
+      this[name]?.destroy();
+      this[name] = createBuffer(this.rhi, { label: `particles${name}`, size: Math.max(size, 1) * 4, usage: GPUBufferUsage.STORAGE });
+    }
     this._groups = null;
+    this._sortGroup = null;
   }
 
   /** The two passes: births and motion, then the draw that reads them. */
   addPasses(graph, { sceneColor, depth }) {
     const pool = this.addSimulation(graph);
     if (pool === null) return;
+    const reads = [pool];
+    if (this.sorted > 0) {
+      const order = graph.importBuffer('particles-order', this._order);
+      graph.addPass({ name: 'particles:sort', type: 'compute', reads: [pool], writes: [order], execute: this._sortPass });
+      reads.push(order);
+    }
     graph.addPass({
-      name: 'particles', reads: [pool], color: [{ resource: sceneColor }], depth: { resource: depth }, execute: this._draw,
+      name: 'particles', reads, color: [{ resource: sceneColor }], depth: { resource: depth }, execute: this._draw,
     });
   }
 
@@ -604,6 +796,7 @@ export class ParticleSystem {
         entries: [
           { binding: 0, resource: { buffer: this._uniform, size: EMITTER_BYTES } },
           { binding: 1, resource: { buffer: this.pool } },
+          { binding: 2, resource: { buffer: this._order } },
         ],
       }),
     };
@@ -617,6 +810,35 @@ export class ParticleSystem {
       if (item.dt === 0 && item.births === 0) continue;
       pass.setBindGroup(0, simulate, [item.slot * this.stride]);
       pass.dispatchWorkgroups(Math.ceil(item.ring.capacity / WORKGROUP));
+    }
+  }
+
+  _encodeSort(pass) {
+    this._sortGroup ??= this.rhi.device.createBindGroup({
+      label: 'particles-sort',
+      layout: this.sortLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this._uniform, size: EMITTER_BYTES } },
+        { binding: 1, resource: { buffer: this.pool } },
+        { binding: 2, resource: { buffer: this._keys } },
+        { binding: 3, resource: { buffer: this._visible } },
+        { binding: 4, resource: { buffer: this._counts } },
+        { binding: 5, resource: { buffer: this._cursors } },
+        { binding: 6, resource: { buffer: this._order } },
+        { binding: 7, resource: { buffer: this._args, size: 16 } },
+        { binding: 8, resource: { buffer: this._view } },
+      ],
+    });
+    for (const item of this._list) {
+      if (item.sortIndex < 0) continue;
+      const groups = Math.ceil(item.ring.capacity / WORKGROUP);
+      pass.setBindGroup(0, this._sortGroup, [item.slot * this.stride, item.sortIndex * this.argsStride]);
+      pass.setPipeline(this.sort.keys);
+      pass.dispatchWorkgroups(groups);
+      pass.setPipeline(this.sort.scan);
+      pass.dispatchWorkgroups(1);
+      pass.setPipeline(this.sort.place);
+      pass.dispatchWorkgroups(groups);
     }
   }
 
@@ -646,7 +868,8 @@ export class ParticleSystem {
       }
       pass.setBindGroup(1, emitter, [item.slot * this.stride]);
       pass.setBindGroup(2, this._imageGroup(item.record.texture));
-      pass.draw(6, item.ring.capacity, 0, item.ring.offset);
+      if (item.sortIndex >= 0) pass.drawIndirect(this._args, item.sortIndex * this.argsStride);
+      else pass.draw(6, item.ring.capacity, 0, item.ring.offset);
     }
   }
 
@@ -671,6 +894,10 @@ export class ParticleSystem {
   destroy() {
     this.pool?.destroy();
     this._uniform?.destroy();
+    for (const buffer of [this._keys, this._visible, this._order, this._args]) buffer?.destroy();
+    this._counts.destroy();
+    this._cursors.destroy();
+    this._view.destroy();
     this._cameraBuffer.destroy();
     this._flatBuffer.destroy();
   }

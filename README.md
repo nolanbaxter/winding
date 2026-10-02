@@ -188,7 +188,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 751 checks, Node, no browser
+npm test          # 753 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 52 checks on a real device
 ```
 
@@ -304,7 +304,8 @@ glTF defines it. A new scene has no lights; its environment lights it until you 
 
 **Sprites, text, particles, decals and reflection probes**, each a node:
 [sprites](docs/API.md#scene-addsprite) that face the camera or stand upright;
-[text](docs/API.md#scene-addtext) in any CSS font, sharp at any size as a distance field;
+[text](docs/API.md#scene-addtext) in any CSS font, sharp at any size as a distance field, with
+Arabic, Hebrew, Indic and Thai shaped as the browser shapes them;
 [particles](docs/API.md#scene-addemitter) simulated on the GPU along solved paths, the same at any
 frame rate; [decals](docs/API.md#scene-adddecal) that paint the base colour before lighting, so they're
 lit and shadowed as the surface is; and [reflection probes](docs/API.md#scene-addprobe),
@@ -358,13 +359,9 @@ These are real and currently unaddressed.
 - **No transparency path is exact per fragment.** Sorting is exact for separated convex objects and
   wrong for interpenetrating ones; OIT needs no order and is approximate everywhere. Being exact
   means depth peeling, which is a pass per layer.
-- **Particles within one alpha-blended emitter aren't sorted.** They draw in the order they were
-  born, so a dense cloud of `blend: 'alpha'` smoke can show a nearer particle under a farther one.
-  Additive particles, the default, need no order. Sorting them would mean a GPU sort every frame.
-- **An open single-sided surface with its front to the light casts no shadow.** The shadow pass
-  draws back faces, which keeps closed meshes free of acne. A single plane has no back face on the
-  light's side, so a flat roof made of one plane casts nothing. Mark such a material double-sided,
-  or give the mesh a back.
+- **Two alpha-blended emitters don't interleave.** Each one's particles are sorted far to near on
+  the GPU, but the emitters are drawn one after the other, nearest last, so where two clouds of
+  `blend: 'alpha'` smoke overlap, one is drawn wholly over the other.
 - **Transmissive surfaces see only the opaque scene behind them.** Glass behind glass is not seen
   through the nearer pane, and a blended object behind glass is not seen at all. Showing either
   means copying the scene again per layer.
@@ -387,12 +384,11 @@ These are real and currently unaddressed.
   for hundreds of points; an outline of thousands, like a coastline, would want triangulating
   instead. An open line is drawn in pieces of 16 segments, so a long one is cheap, but a see-through
   line is blended twice where it crosses a distant stretch of itself.
-- **Text is laid out a character at a time**, kerned and broken as the browser would, but not shaped:
-  Arabic, Hebrew and Indic scripts, and ligatures, need a shaping engine this doesn't bring.
+- **Right-to-left text is reversed by line, not by the full bidirectional algorithm.** Arabic and
+  Hebrew words are shaped by the browser and laid out right to left, but numbers and Latin words
+  inside them stay in place as words, and Latin ligatures are not formed.
 - **A 2D sprite is picked by its quad**, clear pixels included: knowing which pixels are clear
   would mean keeping a CPU copy of every texture.
-- **Tilemaps read the full-size tileset only.** Mipmaps would blend neighbouring tiles together,
-  so a map zoomed far out shimmers.
 - **Device loss ends the session.** `onDeviceLost` fires with enough to act on and the engine
   destroys itself, but nothing is rebuilt — recovering would mean holding a CPU copy of every GPU
   resource, textures' contents included, for the whole process lifetime. Create a new engine, or

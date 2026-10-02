@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 
 import { Scene, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
 import { packSprites, SPRITE_FLOATS, SpritePass } from '../src/render/sprites.js';
-import { order2D, write2D, View2D, SPRITE2D_FLOATS } from '../src/render/view2d.js';
+import { order2D, write2D, View2D, SPRITE2D_FLOATS, tileLayout } from '../src/render/view2d.js';
 import { Camera2D } from '../src/scene/camera2d.js';
 import { spriteSheet, shapeRadius } from '../src/scene/scene.js';
 import { ringCapacity, packEmitter } from '../src/render/particles.js';
@@ -1931,7 +1931,19 @@ test('a tilemap draws in its layer as a run of its own, one quad over the map', 
   scene.update();
   write2D(out, 0, scene.transforms.world, spaced.entity, scene.tilemaps.get(spaced.entity), null);
   assert.equal(out[18], 3, 'three tiles fit between the margins');
-  vecClose(out.subarray(20, 22), [1, 2], 1e-6, 'margin and spacing ride along');
+  // Drawn from a padded copy: mips down to a tile two texels high need 4
+  // texels round each tile, and cells a multiple of 4: 24 x 16, the tile 4 in.
+  assert.equal(out[19], 1, 'padded');
+  vecClose(out.subarray(20, 24), [24, 16, 4, 4], 1e-6, 'cell size, and where the tile starts in it');
+  assert.deepEqual(tileLayout(scene.tilemaps.get(spaced.entity)), {
+    padded: true, columns: 3, rows: 3, cell: [24, 16], pad: [4, 4], levels: 3, width: 72, height: 48,
+  });
+  // Tiles too small to mip are read as they are: margin and spacing ride along.
+  const tiny = scene.addTilemap({ tileset, tileSize: [2, 1], columns: 1, rows: 1, margin: 1, spacing: 2 });
+  scene.update();
+  write2D(out, 0, scene.transforms.world, tiny.entity, scene.tilemaps.get(tiny.entity), null);
+  assert.equal(out[19], 0, 'not padded');
+  vecClose(out.subarray(20, 24), [4, 3, 1, 1], 1e-6, 'a tile and its gap a cell, from the margin');
   assert.throws(() => scene.addTilemap({ tileset, tileSize: [16, 8], columns: 1, rows: 1, margin: 0.5 }), /whole texels/);
 });
 
