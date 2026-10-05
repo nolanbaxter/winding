@@ -29,3 +29,6 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
+      # The types, against the docs' examples. TypeScript is fetched for this
+      # step alone; the package still depends on nothing.
+      - run: npx -y -p typescript@7 tsc --noEmit --strict --target es2022 --module nodenext --lib es2022,dom test/types.ts

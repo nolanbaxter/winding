@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-05
+
+**Types.** Winding ships TypeScript types, written by hand from the API reference and checked
+against its examples in CI, so an editor knows every call and option -- still with no dependency
+and no build step.
+
+### Added
+
+- **TypeScript types.** `src/winding.d.ts` and `src/bench.d.ts` ship with the package, written by
+  hand from the API reference: every export, every option, and an overload so `scene.pick` returns a
+  3D hit for a `Camera` and a 2D one for a `Camera2D`. They need no `@webgpu/types`, and merge with
+  it where a project has it. CI type-checks the reference's examples against them, and a Node check
+  fails if a public method is added without a type.
+
+### Fixed
+
+- **Docs.** `engine.loadSplats` said its result was an environment. `scene.bounds` and
+  `scene.frame` said only meshes count; splat clouds do too.
+
 ## [1.2.0] - 2026-10-02
 
 **Four limitations gone.** Smoke sorted particle by particle, tilemaps that hold up zoomed out,
@@ -2164,7 +2183,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/nolanbaxter/winding/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nolanbaxter/winding/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/nolanbaxter/winding/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nolanbaxter/winding/compare/v1.0.1...v1.1.0

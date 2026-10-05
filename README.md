@@ -111,7 +111,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.2.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/winding.js';
 </script>
 ```
 
@@ -125,14 +125,19 @@ npm install winding-engine
 import { Winding, Camera } from 'winding-engine';
 ```
 
+**TypeScript** needs nothing more: the package ships its types (`src/winding.d.ts` and
+`src/bench.d.ts`), written by hand beside the JavaScript rather than built from it, and checked in CI
+against the [API reference](docs/API.md)'s examples. They also give plain-JavaScript editors
+completion and hover help.
+
 **As an import map**, which gets you bare specifiers with no bundler and no install:
 
 ```html
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.2.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.2.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/"
   }
 }
 </script>
@@ -189,7 +194,7 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 753 checks, Node, no browser
+npm test          # 755 checks, Node, no browser
 npm run test:gpu  # serves the page; open test/gpu.html for 52 checks on a real device
 ```
 
