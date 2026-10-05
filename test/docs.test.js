@@ -16,6 +16,8 @@ import { Camera } from '../src/scene/camera.js';
 import { Camera2D } from '../src/scene/camera2d.js';
 import { OrbitController } from '../src/app/controllers.js';
 import { StatsOverlay } from '../src/app/overlay.js';
+import * as winding from '../src/winding.js';
+import * as bench from '../src/bench.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -75,6 +77,54 @@ test('the index lists every entry', () => {
   const entries = [...API.matchAll(/<a id="([^"]+)"><\/a>\s*\n###/g)].map((m) => m[1]);
   const missing = entries.filter((id) => !listed.has(id));
   assert.deepEqual(missing, [], `not in the index: ${missing.join(', ')}`);
+});
+
+console.log('\nsrc/winding.d.ts');
+
+const TYPES = readFileSync(new URL('../src/winding.d.ts', import.meta.url), 'utf8')
+  + readFileSync(new URL('../src/bench.d.ts', import.meta.url), 'utf8');
+
+/** Public, but not for users, so not typed: each named with why. */
+const UNTYPED = new Map([
+  ['Scene.morphWeights', 'the renderer reads a morph target set through it'],
+  ['Scene.applyMorphBounds', 'the renderer pads bounds for morphs with it'],
+  ['Scene.refreshLights', 'the renderer copies light positions out of transforms with it'],
+  ['Environment.convolve', 'a probe is prefiltered through it once captured'],
+  ['Benchmark.frameStart', "the renderer's profiling hook"],
+  ['Benchmark.mark', "the renderer's profiling hook"],
+  ['Benchmark.frameEnd', "the renderer's profiling hook"],
+  ['boundBy', "Benchmark.format's helper"],
+  ['summarize', "Benchmark.report's helper"],
+]);
+
+/** The body of `export class name { ... }`, to its closing brace. */
+function classBody(name) {
+  const start = TYPES.indexOf(`export class ${name} `);
+  assert.ok(start >= 0, `no class ${name}`);
+  return TYPES.slice(start, TYPES.indexOf('\n}', start));
+}
+
+test('every export is typed', () => {
+  const missing = [...Object.keys(winding), ...Object.keys(bench)].filter((name) => !UNTYPED.has(name)
+    && !new RegExp(`export (class|function) ${name}\\b`).test(TYPES));
+  assert.deepEqual(missing, [], `not typed: ${missing.join(', ')}`);
+});
+
+test('every public method and getter is typed', () => {
+  const classes = {
+    Winding, Scene, Node, Camera, Camera2D, OrbitController, StatsOverlay,
+    Environment: winding.Environment, Benchmark: bench.Benchmark,
+  };
+  const missing = [];
+  for (const [name, cls] of Object.entries(classes)) {
+    const body = classBody(name);
+    const statics = Object.getOwnPropertyNames(cls).filter((m) => !['length', 'name', 'prototype'].includes(m));
+    for (const m of [...Object.getOwnPropertyNames(cls.prototype), ...statics]) {
+      if (m === 'constructor' || m.startsWith('_') || UNTYPED.has(`${name}.${m}`)) continue;
+      if (!new RegExp(`\\n  (static |readonly |get |set )*${m}\\??[(:<]`).test(body)) missing.push(`${name}.${m}`);
+    }
+  }
+  assert.deepEqual(missing, [], `not typed: ${missing.join(', ')}`);
 });
 
 console.log(`\n${passed} checks passed\n`);

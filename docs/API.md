@@ -8,6 +8,10 @@ it throws. Look a call up in the [index](#index) below, or search this page for 
 import { Winding, Camera, Camera2D } from 'winding-engine';
 ```
 
+TypeScript types come with the package, so an editor shows these calls' options as you type. The
+option shapes have names you can import, such as `SpriteOptions`, `Texture` and `Hit`:
+`import type { SpriteOptions } from 'winding-engine'`.
+
 <a id="conventions"></a>
 ## Conventions
 
@@ -307,7 +311,7 @@ Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' 
 const room = await engine.loadSplats('room.ply');
 ```
 
-Notes: the environment is yours. Free it with [`engine.unload`](#engine-unload) once no scene uses it.
+Notes: every call allocates, the same file included. One `Splats` can be drawn by many nodes, in many scenes.
 
 <a id="engine-run"></a>
 ### `engine.run(scene, camera, { update, frame, hud })` → `void`
@@ -928,16 +932,16 @@ engine.renderFrame(scene, camera);
 <a id="scene-bounds"></a>
 ### `scene.bounds(outMin, outMax)` → `boolean`
 
-Writes the world-space box around every mesh in the scene into `outMin` and `outMax` (each a 3-element array). Brings transforms up to date first.
+Writes the world-space box around every mesh and splat cloud in the scene into `outMin` and `outMax` (each a 3-element array). Brings transforms up to date first.
 
-Returns: `true`, or `false` if the scene has no meshes, in which case `outMin` and `outMax` are left alone.
+Returns: `true`, or `false` if the scene has no meshes or splats, in which case `outMin` and `outMax` are left alone.
 
 ```js
 const min = vec3Create(), max = vec3Create();
 if (scene.bounds(min, max)) console.log(min, max);
 ```
 
-Notes: only meshes from [`scene.add`](#scene-add) count. Sprites, text, particles and lights do not.
+Notes: meshes from [`scene.add`](#scene-add) count, and splat clouds from [`scene.addSplats`](#scene-addsplats), by the box around their centres. Sprites, text, particles and lights do not.
 
 <a id="scene-frame"></a>
 ### `scene.frame(camera, options)` → `boolean`
@@ -949,7 +953,7 @@ Moves a camera so the whole scene fills the view, keeping the direction it alrea
 | `margin` | `1` | Multiplies the fitting distance. `1` fits exactly; `1.2` leaves more room. |
 | `aspect` | `camera.aspect` | Width over height of the view. |
 
-Returns: `true`, or `false` if the scene has no meshes, having moved nothing.
+Returns: `true`, or `false` if the scene has no meshes or splats, having moved nothing.
 
 ```js
 scene.frame(camera, { aspect: canvas.clientWidth / canvas.clientHeight });

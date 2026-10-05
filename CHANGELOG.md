@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TypeScript types.** `src/winding.d.ts` and `src/bench.d.ts` ship with the package, written by
+  hand from the API reference: every export, every option, and an overload so `scene.pick` returns a
+  3D hit for a `Camera` and a 2D one for a `Camera2D`. They need no `@webgpu/types`, and merge with
+  it where a project has it. CI type-checks the reference's examples against them, and a Node check
+  fails if a public method is added without a type.
+
+### Fixed
+
+- **Docs.** `engine.loadSplats` said its result was an environment. `scene.bounds` and
+  `scene.frame` said only meshes count; splat clouds do too.
+
 ## [1.2.0] - 2026-10-02
 
 **Four limitations gone.** Smoke sorted particle by particle, tilemaps that hold up zoomed out,

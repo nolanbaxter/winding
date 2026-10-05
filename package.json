@@ -31,6 +31,7 @@
   ],
   "type": "module",
   "main": "./src/winding.js",
+  "types": "./src/winding.d.ts",
   "exports": {
     ".": "./src/winding.js",
     "./*": "./src/*"
