@@ -111,7 +111,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.2.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/winding.js';
 </script>
 ```
 
@@ -136,8 +136,8 @@ completion and hover help.
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.2.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.2.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/"
   }
 }
 </script>
