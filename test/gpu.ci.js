@@ -2,9 +2,10 @@
 //
 // Serves the repo, opens test/gpu.html in Chrome with no window, waits for the
 // page's own verdict (globalThis.__gpuTest, set by finish() in gpu.test.js) and
-// exits 0 only if every check passed. CI runs it on a runner with no GPU, where
-// Chrome falls back to SwiftShader, its own software device: slow, but it
-// compiles and runs every shader, which is the point of the suite.
+// exits 0 only if every check passed. CI runs it on a runner with no GPU:
+// Chrome needs Mesa's Vulkan driver installed to start under these flags, and
+// WebGPU then comes up on SwiftShader, Chrome's own software device. Slow, but
+// it compiles and runs every shader, which is the point of the suite.
 //
 // No Puppeteer: Chrome is driven over its DevTools protocol with Node's own
 // WebSocket (Node 22+), so nothing is installed and nothing is downloaded.
@@ -50,7 +51,10 @@ const chrome = spawn(chromePath, [
   '--disable-renderer-backgrounding',
   '--window-size=800,600',
   'about:blank',
-], { stdio: 'ignore' });
+], { stdio: ['ignore', 'ignore', 'pipe'] });
+// Kept, and shown only if Chrome never gets going: otherwise it is noise.
+let chromeLog = '';
+chrome.stderr.on('data', (chunk) => { chromeLog = (chromeLog + chunk).slice(-4000); });
 
 let exitCode = 1;
 try {
@@ -71,7 +75,8 @@ async function runSuite() {
   const port = await until(() => {
     const file = join(profile, 'DevToolsActivePort');
     return existsSync(file) && Number(readFileSync(file, 'utf8').split('\n')[0]);
-  }, 30_000, 'Chrome never opened its DevTools port');
+  }, 30_000, () => `Chrome never opened its DevTools port. It said:
+${chromeLog}`);
 
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const page = targets.find((t) => t.type === 'page');
@@ -113,7 +118,7 @@ async function until(fn, ms, message) {
   for (;;) {
     const value = await fn();
     if (value) return value;
-    if (Date.now() > end) throw new Error(message);
+    if (Date.now() > end) throw new Error(typeof message === 'function' ? message() : message);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 }

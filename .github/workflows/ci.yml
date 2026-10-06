@@ -41,4 +41,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      # Chrome will not start under the WebGPU flags without a Vulkan driver,
+      # even though WebGPU itself then runs on SwiftShader.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
       - run: node test/gpu.ci.js
