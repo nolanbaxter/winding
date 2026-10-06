@@ -1632,6 +1632,155 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
   });
 
+  await step('a .sog and a .spz load in the browser: images exact, zip entries deflated, gzip unpacked', async () => {
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    const { decodeImageBytes } = await import('../src/rhi/texture.js');
+    const squeeze = async (bytes, format) => new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream(format))).arrayBuffer());
+    const CRC = Array.from({ length: 256 }, (_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+    const crc32 = (bytes) => {
+      let c = 0xffffffff;
+      for (const b of bytes) c = CRC[(c ^ b) & 255] ^ (c >>> 8);
+      return (c ^ 0xffffffff) >>> 0;
+    };
+    /** An RGBA PNG: lossless, as a .sog's WebP is, so the same bytes come back. */
+    const png = async (width, height, rgba) => {
+      const raw = new Uint8Array(height * (width * 4 + 1));
+      for (let y = 0; y < height; y++) raw.set(rgba.subarray(y * width * 4, (y + 1) * width * 4), y * (width * 4 + 1) + 1);
+      const chunk = (type, data) => {
+        const out = new Uint8Array(12 + data.length);
+        const view = new DataView(out.buffer);
+        view.setUint32(0, data.length);
+        out.set(new TextEncoder().encode(type), 4);
+        out.set(data, 8);
+        view.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+        return out;
+      };
+      const header = new Uint8Array(13);
+      new DataView(header.buffer).setUint32(0, width);
+      new DataView(header.buffer).setUint32(4, height);
+      header.set([8, 6, 0, 0, 0], 8);
+      const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header),
+        chunk('IDAT', await squeeze(raw, 'deflate')), chunk('IEND', new Uint8Array(0))];
+      return new Uint8Array(await new Blob(parts).arrayBuffer());
+    };
+    /** A zip of deflated entries. */
+    const zip = async (files) => {
+      const encoder = new TextEncoder();
+      const parts = [];
+      const directory = [];
+      let offset = 0;
+      for (const [name, data] of Object.entries(files)) {
+        const packed = await squeeze(data, 'deflate-raw');
+        const nameBytes = encoder.encode(name);
+        const local = new Uint8Array(30 + nameBytes.length);
+        const lv = new DataView(local.buffer);
+        lv.setUint32(0, 0x04034b50, true);
+        lv.setUint16(8, 8, true);
+        lv.setUint32(18, packed.length, true);
+        lv.setUint32(22, data.length, true);
+        lv.setUint16(26, nameBytes.length, true);
+        local.set(nameBytes, 30);
+        const central = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(central.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(10, 8, true);
+        cv.setUint32(20, packed.length, true);
+        cv.setUint32(24, data.length, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint32(42, offset, true);
+        central.set(nameBytes, 46);
+        parts.push(local, packed);
+        directory.push(central);
+        offset += local.length + packed.length;
+      }
+      const end = new Uint8Array(22);
+      const ev = new DataView(end.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(10, directory.length, true);
+      ev.setUint32(12, directory.reduce((n, d) => n + d.length, 0), true);
+      ev.setUint32(16, offset, true);
+      return new Uint8Array(await new Blob([...parts, ...directory, end]).arrayBuffer());
+    };
+    const cam = new Camera({ fovY: 0.8, near: 0.1 });
+    cam.position.set([0, 0, 5]);
+    cam.target.set([0, 0, 0]);
+    const centre = async (splats) => {
+      const scene = probe.createScene();
+      scene.addSplats({ splats });
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels({ x: 80, y: 60, width: 1, height: 1 });
+      return [...pixels.subarray(0, 3)];
+    };
+    try {
+      probe.gpu.resize(160, 120);
+      // Pixels a 2D canvas would change: colour under an alpha below 255.
+      const odd = new Uint8Array([200, 100, 50, 7, 0, 255, 128, 128, 13, 77, 250, 1, 255, 255, 255, 0]);
+      const decoded = await decodeImageBytes(probe.gpu, await png(2, 2, odd));
+      const exact = decoded.width === 2 && decoded.height === 2 && decoded.rgba.every((v, k) => v === odd[k]);
+
+      // A .sog of one opaque green splat at the origin: codebooks of zeros but
+      // for an entry or two, so each index picks its value outright.
+      const SH_C0 = 0.28209479177387814;
+      const book = (entries) => Array.from({ length: 256 }, (_, i) => entries[i] ?? 0);
+      const image = (r, g, b, a) => png(1, 1, new Uint8Array([r, g, b, a]));
+      // The middle of a range of -1 to 1 is 0, between stored 32767 and 32768.
+      const mid = 32768;
+      const sog = await zip({
+        'meta.json': new TextEncoder().encode(JSON.stringify({
+          version: 2, count: 1,
+          means: { mins: [-1, -1, -1], maxs: [1, 1, 1], files: ['means_l.webp', 'means_u.webp'] },
+          scales: { codebook: book({ 1: Math.log(0.4) }), files: ['scales.webp'] },
+          quats: { files: ['quats.webp'] },
+          sh0: { codebook: book({ 1: 0.5 / SH_C0, 2: -0.5 / SH_C0 }), files: ['sh0.webp'] },
+        })),
+        'means_l.webp': await image(mid & 255, mid & 255, mid & 255, 255),
+        'means_u.webp': await image(mid >> 8, mid >> 8, mid >> 8, 255),
+        'quats.webp': await image(128, 128, 128, 252),
+        'scales.webp': await image(1, 1, 1, 255),
+        'sh0.webp': await image(2, 1, 2, 255),
+      });
+      const sogSplats = await probe.loadSplats(sog);
+      const sogSeen = await centre(sogSplats);
+
+      // A .spz, version 3, of one opaque blue splat at the origin, gzipped.
+      const raw = new Uint8Array(16 + 9 + 1 + 3 + 3 + 4);
+      const rv = new DataView(raw.buffer);
+      rv.setUint32(0, 0x5053474e, true);
+      rv.setUint32(4, 3, true);
+      rv.setUint32(8, 1, true);
+      raw[13] = 12;
+      raw[25] = 255;                                     // alpha
+      const none = Math.round(0.5 * 255 - (0.5 / SH_C0) * 0.15 * 255);
+      raw.set([none, none, 255], 26);                    // colour: blue
+      raw.set([137, 137, 137], 29);                      // scale: e^(137/16 - 10), about 0.24
+      rv.setUint32(32, (3 << 30) >>> 0, true);           // w the largest, x y z zero
+      const spzSplats = await probe.loadSplats(await squeeze(raw, 'gzip'));
+      const spzSeen = await centre(spzSplats);
+      probe.unload(sogSplats);
+      probe.unload(spzSplats);
+
+      const report = `a PNG with alpha came back ${exact ? 'exactly' : `as ${[...decoded.rgba].join(',')}`}; `
+        + `.sog centre ${sogSeen.join(',')}, .spz centre ${spzSeen.join(',')}`;
+      if (!(exact && sogSeen[1] > 150 && sogSeen[0] < 30 && sogSeen[2] < 30 && spzSeen[2] > 150 && spzSeen[0] < 30)) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('grading: saturation, a white balance that neutralises its light, and a .cube LUT', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';

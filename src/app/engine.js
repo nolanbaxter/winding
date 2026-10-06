@@ -27,9 +27,9 @@ import { parseHDR } from '../render/hdr.js';
 import { Renderer, RenderTarget } from '../render/renderer.js';
 import { Splats } from '../render/splats.js';
 import { openSurface } from '../render/shadows.js';
-import { parseSplats } from '../scene/splats.js';
+import { readSplats } from '../scene/splats.js';
 import { GLTFTextures } from '../render/textures.js';
-import { createTexture2D, uploadImage, generateMipmaps } from '../rhi/texture.js';
+import { createTexture2D, uploadImage, generateMipmaps, decodeImageBytes } from '../rhi/texture.js';
 import { Font } from '../render/text.js';
 import { parseCube, uploadLUT } from '../render/grading.js';
 import { packSkinVertices } from '../render/vertex.js';
@@ -362,7 +362,7 @@ export class Winding {
       bytes = new Uint8Array(await response.arrayBuffer());
       this._assertAlive('loadSplats');
     }
-    const data = parseSplats(bytes);
+    const data = await readSplats(bytes, { decodeImage: (image) => decodeImageBytes(this.gpu, image) });
     // The pipeline for its harmonics, built before it can be drawn.
     await this.renderer.splats.ready(data.degree);
     this._assertAlive('loadSplats');

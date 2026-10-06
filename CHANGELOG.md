@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the draw (205k splats, 720p, Iris Xe: 2.19 -> 4.65 ms); as a pass, 1.4 ms while the view moves,
   0.16 ms while it is still. Each degree is an override constant, so a capture without them pays
   nothing. `loadSplats` returns the capture's `degree`.
+- **`.spz` and `.sog` captures load.** `engine.loadSplats` reads Niantic's `.spz` (versions 1 to 3,
+  gunzipped by the browser's `DecompressionStream`, turned from its y-up axes to the `.ply`'s) and
+  PlayCanvas's `.sog` (version 2: a zip read by hand, entries stored or deflated, its WebP images
+  decoded exactly through WebGPU, since a 2D canvas premultiplies alpha and would change the
+  bytes). Both with their harmonics. Still no dependency. `.spz` version 4 is zstd, which no
+  browser unpacks, and says so.
 
 - **Auto exposure.** [`renderer.autoExposure`](docs/API.md#renderer-autoexposure) (`true`, or
   `{ min, max, brighten, darken }`) sets the exposure from the image: a 64-bin histogram of log

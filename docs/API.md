@@ -301,18 +301,30 @@ const scene = engine.createScene({ environment: studio });
 <a id="engine-loadsplats"></a>
 ### `engine.loadSplats(source, { fetch })` → `Promise<Splats>`
 
-Loads a Gaussian splat capture for [`scene.addSplats`](#scene-addsplats). It reads a `.ply` as 3D Gaussian Splatting training writes it (binary, with `f_dc`, `opacity`, `scale` and `rot` properties), or a `.splat` (32 bytes a splat). A `.ply` with higher spherical harmonics (`f_rest_*`, to degree 3) keeps them, so colour changes with the view as it did in the photographs: a sheen, a reflection. They are kept as half floats, 20 to 92 bytes a splat by degree.
+Loads a Gaussian splat capture for [`scene.addSplats`](#scene-addsplats). It reads four formats, told apart by their bytes, not their names:
+
+| Format | What it is |
+|---|---|
+| `.ply` | As 3D Gaussian Splatting training writes it: binary, with `f_dc`, `opacity`, `scale` and `rot` properties. |
+| `.splat` | 32 bytes a splat, the compact web format. No harmonics. |
+| `.spz` | Niantic's, versions 1 to 3: gzipped and quantised, about a tenth of a `.ply`. Unpacked by the browser's own `DecompressionStream`, and turned from its y-up axes to the `.ply`'s, so it lands as its `.ply` would. |
+| `.sog` | PlayCanvas's, version 2: a zip of lossless WebP images and `meta.json`, about a fifteenth of a `.ply`. A loose `meta.json` and its images are not read: zip them. |
+
+A capture with higher spherical harmonics (a `.ply`'s `f_rest_*`, and the same in a `.spz` or `.sog`, to degree 3) keeps them, so colour changes with the view as it did in the photographs: a sheen, a reflection. They are kept as half floats, 20 to 92 bytes a splat by degree.
 
 `source` is a URL, an `ArrayBuffer` or a `Uint8Array`. `fetch` replaces `fetch` for downloading `source`.
 
 Returns: `{ count, min, max, degree }`: how many splats, the corners of the box around their centres in the capture's units, and the degree of its harmonics, 0 to 3. Free it with [`engine.unload`](#engine-unload) once no scene draws it.
-Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' format; only binary_little_endian is read'`; `'splats: this .ply is not a splat capture: no <properties>'`; `'splats: the .ply is cut short: …'`; `'splats: not a .ply, and <n> bytes is not a whole number of 32-byte .splat records'`; `'splats: splat <i> has a position that is not a number'`; `'splats: a compressed .ply (from SuperSplat) is not read; …'`; `'splats: this is a zip -- a .sog, perhaps -- which is not read; …'`; `'splats: this is gzipped -- a .spz, perhaps -- which is not read; …'`; `'splats: <n> splats need <bytes> bytes in one buffer, past this device's <limit>; …'`.
+Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' format; only binary_little_endian is read'`; `'splats: this .ply is not a splat capture: no <properties>'`; `'splats: the .ply is cut short: …'`; `'splats: not a .ply, and <n> bytes is not a whole number of 32-byte .splat records'`; `'splats: splat <i> has a position that is not a number'`; `'splats: a compressed .ply (from SuperSplat) is not read; …'`; `'splats: a .spz of version 4, compressed with zstd, which browsers cannot unpack; …'`; `'splats: gzipped, but not a .spz'`; `'splats: the .spz is cut short: …'`; `'splats: a .sog of version <n>; version 2 is read …'`; `'splats: the .sog has no <file>'`; `'splats: <image> has <n> pixels, for <count> splats'`; `'splats: a zip64 .sog is not read'`; `'splats: <n> splats need <bytes> bytes in one buffer, past this device's <limit>; …'`.
 
 ```js
 const room = await engine.loadSplats('room.ply');
 ```
 
-Notes: every call allocates, the same file included. One `Splats` can be drawn by many nodes, in many scenes.
+Notes:
+- Every call allocates, the same file included. One `Splats` can be drawn by many nodes, in many scenes.
+- A `.spz` saved antialiased (Mip-Splatting) is drawn as any other; its antialiasing is not applied.
+- A `.spz` with harmonics of degree 4 keeps the first three degrees.
 
 <a id="engine-run"></a>
 ### `engine.run(scene, camera, { update, frame, hud })` → `void`

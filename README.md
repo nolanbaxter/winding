@@ -322,7 +322,8 @@ frame rate; [decals](docs/API.md#scene-adddecal) that paint the base colour befo
 lit and shadowed as the surface is; and [reflection probes](docs/API.md#scene-addprobe),
 box-projected, so a room reflects the room and not the sky.
 
-**Gaussian splats.** A capture from 3D Gaussian Splatting, `.ply` or `.splat`, loaded with
+**Gaussian splats.** A capture from 3D Gaussian Splatting — `.ply`, `.splat`, or the compressed
+`.spz` and `.sog`, unpacked with the browser's own decompression — loaded with
 [`engine.loadSplats`](docs/API.md#engine-loadsplats) and placed as a node by
 [`scene.addSplats`](docs/API.md#scene-addsplats): culled and sorted back to front on the GPU whenever
 the view moves, a million splats in about 2 ms, and drawn behind the geometry in front of them.
