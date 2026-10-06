@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-06
+
+**Faster where it was slow, measured.** A speed audit of the engine against other engines'
+techniques, each change A/B'd on Sponza, a million splats or 100,000 objects before it was
+kept: splats too small to see are left out, the sun's shadows stay cached while the camera
+moves, a frame where a few things move touches only those, and crowded lights shade faster.
+Drawing tiny particles as points was measured slower and dropped.
+
+### Added
+
+- **Splats too faint and small to show are left out.** [`renderer.splatCull`](docs/API.md#renderer-splatcull)
+  (default `0.5`): a splat whose opacity times the pixels it covers is under it is left out of the
+  sort and the draw, which a sub-pixel splat costs a quad of all the same. A million splats seen
+  whole at 720p on Iris Xe: 27.4 -> 16.8 ms, 0.06% of channels moved by more than 8 levels; a
+  capture seen close: unchanged. `0` draws every splat as before.
+
 ### Changed
 
 - **The sun's shadows are redrawn far less while the camera moves.** A cascade's box was snapped
@@ -28,12 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first. Lights are now read four at a time, their indices and then their positions, before any
   is tested. 256 lights in Sponza at 720p on Iris Xe, forward pass: 17.3 -> 14.1 ms at 3 m radius,
   10.0 -> 8.9 ms at 2 m, unchanged at 1 m and with few lights. The picture is the same.
-
-- **Splats too faint and small to show are left out.** [`renderer.splatCull`](docs/API.md#renderer-splatcull)
-  (default `0.5`): a splat whose opacity times the pixels it covers is under it is left out of the
-  sort and the draw, which a sub-pixel splat costs a quad of all the same. A million splats seen
-  whole at 720p on Iris Xe: 27.4 -> 16.8 ms, 0.06% of channels moved by more than 8 levels; a
-  capture seen close: unchanged. `0` draws every splat as before.
 
 ## [1.4.0] - 2026-10-06
 
@@ -2288,7 +2298,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/nolanbaxter/winding/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/nolanbaxter/winding/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/nolanbaxter/winding/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nolanbaxter/winding/compare/v1.1.1...v1.2.0
