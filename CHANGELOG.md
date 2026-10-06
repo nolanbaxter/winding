@@ -21,7 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PlayCanvas's `.sog` (version 2: a zip read by hand, entries stored or deflated, its WebP images
   decoded exactly through WebGPU, since a 2D canvas premultiplies alpha and would change the
   bytes). Both with their harmonics. Still no dependency. `.spz` version 4 is zstd, which no
-  browser unpacks, and says so.
+  browser unpacks, and says so. Checked on real files: Niantic's own sample `.spz`, and a `.sog`
+  and a version 3 `.spz` written by `splat-transform` from a `.ply`, each splat within the format's
+  own quantisation of the `.ply`'s. A `.spz` written without coordinates, as `splat-transform`
+  writes them, comes out the other way up: the spec says RUB, and the header cannot say otherwise.
 
 - **Auto exposure.** [`renderer.autoExposure`](docs/API.md#renderer-autoexposure) (`true`, or
   `{ min, max, brighten, darken }`) sets the exposure from the image: a 64-bin histogram of log

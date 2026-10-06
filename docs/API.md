@@ -323,6 +323,7 @@ const room = await engine.loadSplats('room.ply');
 
 Notes:
 - Every call allocates, the same file included. One `Splats` can be drawn by many nodes, in many scenes.
+- A `.spz` is read as Niantic's spec has it: stored y up (RUB), and turned to the `.ply`'s axes, so it needs the same half turn about x a `.ply` does. Some tools write a `.spz` without that conversion, in the `.ply`'s axes as they are -- PlayCanvas's `splat-transform` does -- and the header does not say which. Such a capture comes out the other way up: it stands upright without the half turn.
 - A `.spz` saved antialiased (Mip-Splatting) is drawn as any other; its antialiasing is not applied.
 - A `.spz` with harmonics of degree 4 keeps the first three degrees.
 
