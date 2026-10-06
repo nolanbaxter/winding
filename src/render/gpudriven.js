@@ -770,8 +770,12 @@ export class GpuDriven {
     this.stats.transparent = this.transparentCount;
   }
 
-  /** Upload this frame's transforms, bounds and reset argument buffer. */
-  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets, morph, projectionScale = 1) {
+  /**
+   * Upload this frame's transforms, bounds and reset argument buffer. `items`:
+   * the renderables that moved, ascending (Scene.movedRenderables), or null to
+   * look at every one.
+   */
+  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets, morph, projectionScale = 1, items = null) {
     // A DIFFERENT scene needs rebuilding even when its revision happens to
     // match, and it usually does: every scene's first add() takes it to 1. The
     // check used to be on the revision alone, so rendering a second scene
@@ -803,11 +807,15 @@ export class GpuDriven {
     // Nothing moved and nothing deforms: there is nothing to rewrite, and the
     // scan to find that out was 0.8 ms a frame at 100,000 renderables.
     const scan = full || scene.transforms.movedPending || scene.skins.length > 0 || scene.morphs.length > 0;
-    for (let i = 0; scan && i < count; i++) {
+    // Only what moved, when that is listed and nothing deforms.
+    const listed = !full && items !== null && scene.skins.length === 0 && scene.morphs.length === 0;
+    const n = listed ? items.length : count;
+    for (let k = 0; scan && k < n; k++) {
+      const i = listed ? items[k] : k;
       // Skinned and morphed boxes come from joints and weights, which change
       // without the mesh's own node moving -- the usual rig. Gated on the node
       // alone, a character walked off its box and was culled where it stood.
-      if (!full && moved[scene.renderableMatrixSlot[i]] === 0
+      if (!listed && !full && moved[scene.renderableMatrixSlot[i]] === 0
         && scene.renderableSkin[i] < 0 && scene.renderableMorph[i] < 0) continue;
 
       const drawFloat = i * (DRAW_DATA_BYTES / 4);

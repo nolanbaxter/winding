@@ -38,6 +38,7 @@ const INTERNAL = new Map([
   ['scene-morphweights', 'the renderer reads a morph target set through it'],
   ['scene-applymorphbounds', 'the renderer pads bounds for morphs with it'],
   ['scene-refreshlights', 'the renderer copies light positions out of transforms with it'],
+  ['scene-movedrenderables', 'the renderer bounds and uploads only what moved with it'],
 ]);
 
 /** Every public method and getter a class's instances have, as `prefix-name` anchors. */
@@ -89,6 +90,7 @@ const UNTYPED = new Map([
   ['Scene.morphWeights', 'the renderer reads a morph target set through it'],
   ['Scene.applyMorphBounds', 'the renderer pads bounds for morphs with it'],
   ['Scene.refreshLights', 'the renderer copies light positions out of transforms with it'],
+  ['Scene.movedRenderables', 'the renderer bounds and uploads only what moved with it'],
   ['Environment.convolve', 'a probe is prefiltered through it once captured'],
   ['Benchmark.frameStart', "the renderer's profiling hook"],
   ['Benchmark.mark', "the renderer's profiling hook"],

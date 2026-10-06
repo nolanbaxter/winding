@@ -87,7 +87,7 @@ Every call, setting and entry, A to Z by its name.
 
 **R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.renderer.post.requestedLevels` (renamed)](#post-requestedlevels) · [`engine.renderer.resolution`](#renderer-resolution) · [`engine.rhi` (renamed)](#engine-rhi) · [`camera.rotation` (renamed)](#camera2d-rotation) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
 
-**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
+**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`engine.renderer.splatCull`](#renderer-splatcull) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
 
 **T** &nbsp; [`engine.renderer.taa`](#renderer-taa) · [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
 
@@ -694,6 +694,20 @@ engine.renderer.ao = null;
 Throws (on the next frame): `'ao: radius must be positive, or null to fit the scene, …'`.
 
 Notes: the first time it is turned on, its pipelines build in the background. Frames draw without it until they are ready, a fraction of a second. After that, switching costs nothing. The same holds for [`oit`](#renderer-oit) and [`post.antialias`](#post-antialias).
+
+<a id="renderer-splatcull"></a>
+### `engine.renderer.splatCull` → `number`
+
+Default `0.5`. The least a [Gaussian splat](#splats) may add to the picture and still be drawn: its opacity times the pixels it covers. Splats under it are left out of the sort and the draw. Seen from afar most of a capture's splats are smaller than a pixel, and each still costs a quad to draw; seen up close they are large, and few are left out. `0` draws every splat.
+
+```js
+engine.renderer.splatCull = 0;     // every splat, whatever it adds
+engine.renderer.splatCull = 1;     // faster from afar; fine detail up close thins a little
+```
+
+Throws (on the next frame): `'splatCull must be 0 or more, got …'`.
+
+Notes: measured at 1280x720 on integrated graphics (Intel Iris Xe). A million splats seen whole: sort and draw 27.4 ms with nothing left out, 16.8 at the default, 13.5 at `1`, and 0.06% of colour channels moved by more than 8 levels at the default. A capture seen close: no faster, and 0.12% moved. Changing it sorts each capture again.
 
 <a id="renderer-taa"></a>
 ### `engine.renderer.taa` → `boolean`
@@ -1531,7 +1545,7 @@ const room = await engine.loadSplats('room.ply');
 scene.addSplats({ splats: room }).setAxisAngle([1, 0, 0], Math.PI);
 ```
 
-Notes: a capture's harmonics are worked out once a visible splat whenever it is sorted again, so a still view barely pays for them: for 205,000 splats of degree 3 on integrated graphics (Intel Iris Xe), about 1.4 ms in the frames the view moves, and 0.16 ms in the draw otherwise. Two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. On integrated graphics (Intel Iris Xe, a million splats, 1280x720) the draw costs about 10 ms for a capture seen whole, and more up close, where splats fill the screen; [`renderer.resolution`](#renderer-resolution) cuts that part. The sort costs about 2 ms, and nothing while the view is still.
+Notes: a capture's harmonics are worked out once a visible splat whenever it is sorted again, so a still view barely pays for them: for 205,000 splats of degree 3 on integrated graphics (Intel Iris Xe), about 1.4 ms in the frames the view moves, and 0.16 ms in the draw otherwise. Two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. Splats too faint and small to show are left out: see [`renderer.splatCull`](#renderer-splatcull). On integrated graphics (Intel Iris Xe, a million splats, 1280x720) the draw costs about 10 ms for a capture seen whole, and more up close, where splats fill the screen; [`renderer.resolution`](#renderer-resolution) cuts that part. The sort costs about 2 ms, and nothing while the view is still.
 
 <a id="scene-splatsof"></a>
 ### `scene.splatsOf(node)` → `{ splats } | null`

@@ -29,7 +29,6 @@ export const NO_PARENT = -1;
  */
 export function composeRange(columns, base, start, end) {
   const { order, parent, dirty, recomputed, moved } = columns;
-  const { local, world, position, rotation, scale } = columns;
 
   for (let k = start; k < end; k++) {
     const e = order[base + k];
@@ -43,21 +42,27 @@ export function composeRange(columns, base, start, end) {
       continue;
     }
 
-    if (dirty[e] === 1) {
-      mat4FromQuatPosScale(local, rotation, position, scale, e * 16, e * 4, e * 3, e * 3);
-      dirty[e] = 0;
-    }
-
-    if (p === NO_PARENT) {
-      mat4Copy(world, local, e * 16, e * 16);
-    } else {
-      // Affine: both are built from translation, rotation and scale.
-      mat4MultiplyAffine(world, world, local, e * 16, p * 16, e * 16);
-    }
-
-    recomputed[e] = 1;
+    composeNode(columns, e, p);
     moved[e] = 1;
   }
+}
+
+/** Node e's world matrix, its local one first if that is dirty; p is its parent. */
+export function composeNode(columns, e, p) {
+  const { dirty, local, world, position, rotation, scale } = columns;
+  if (dirty[e] === 1) {
+    mat4FromQuatPosScale(local, rotation, position, scale, e * 16, e * 4, e * 3, e * 3);
+    dirty[e] = 0;
+  }
+
+  if (p === NO_PARENT) {
+    mat4Copy(world, local, e * 16, e * 16);
+  } else {
+    // Affine: both are built from translation, rotation and scale.
+    mat4MultiplyAffine(world, world, local, e * 16, p * 16, e * 16);
+  }
+
+  columns.recomputed[e] = 1;
 }
 
 /** Rebuild the column views a worker needs from the raw shared buffers. */

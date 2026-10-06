@@ -68,6 +68,14 @@ const CLOUD_FLOATS = 37;
 const CLOUD_BYTES = 240;
 /** Frames a node's sort buffers outlive the last frame that drew it. */
 const KEEP_FRAMES = 120;
+/**
+ * The default cull, in opacity x pixels: see makeKeys. Measured at 1280x720
+ * (Iris Xe): a million splats seen whole, sort and draw 27.4 -> 16.8 ms, 0.06%
+ * of channels moved by more than 8 levels; a capture seen close, where splats
+ * are large and few are culled, no faster and 0.12% moved. At 1 the far one
+ * halved but fine detail up close thinned visibly.
+ */
+export const SPLAT_CULL = 0.5;
 
 const CLOUD_WGSL = /* wgsl */ `
 struct Cloud {
@@ -79,7 +87,41 @@ struct Cloud {
   count      : u32,
   model      : mat4x4<f32>,   // for fog, which is in world space
   eye        : vec3<f32>,     // the camera, in the capture's own space, for its harmonics
+  cull       : f32,           // the least a splat may add to the image and be drawn: opacity x pixels
 };
+`;
+
+/**
+ * Splat i's footprint on screen, as a 2D covariance in pixels (xx, xy, yy),
+ * before the third of a pixel the draw adds. The EWA projection, J W S W^T J^T:
+ * the projection's derivative at the centre, constant for an orthographic
+ * camera; for a perspective one, with the centre held inside a little more
+ * than the view, as 3DGS does, so a splat beside it does not stretch without
+ * bound. Needs the covariances and the cloud bound.
+ */
+const FOOTPRINT_WGSL = /* wgsl */ `
+fn footprint(i : u32, view : vec4<f32>) -> vec3<f32> {
+  let o = i * 6u;
+  let sigma = mat3x3<f32>(
+    covariances[o], covariances[o + 1u], covariances[o + 2u],
+    covariances[o + 1u], covariances[o + 3u], covariances[o + 4u],
+    covariances[o + 2u], covariances[o + 4u], covariances[o + 5u],
+  );
+  let p = cloud.projection;
+  let fx = p[0][0] * cloud.viewport.x * 0.5;
+  let fy = p[1][1] * cloud.viewport.y * 0.5;
+  var J = mat3x3<f32>(vec3<f32>(fx, 0.0, 0.0), vec3<f32>(0.0, fy, 0.0), vec3<f32>(0.0));
+  if (p[3][3] == 0.0) {
+    let d = -view.z;
+    let x = clamp(view.x / d, -1.3 / p[0][0], 1.3 / p[0][0]) * d;
+    let y = clamp(view.y / d, -1.3 / p[1][1], 1.3 / p[1][1]) * d;
+    J = mat3x3<f32>(vec3<f32>(fx / d, 0.0, 0.0), vec3<f32>(0.0, fy / d, 0.0), vec3<f32>(fx * x / (d * d), fy * y / (d * d), 0.0));
+  }
+  let mv = cloud.modelView;
+  let T = J * mat3x3<f32>(mv[0].xyz, mv[1].xyz, mv[2].xyz);
+  let cov = T * sigma * transpose(T);
+  return vec3<f32>(cov[0][0], cov[0][1], cov[1][1]);
+}
 `;
 
 const SORT_SHADER = /* wgsl */ `
@@ -101,6 +143,9 @@ const BUCKETS = ${BUCKETS}u;
 @group(0) @binding(5) var<storage, read_write> cursors : array<atomic<u32>, BUCKETS>;
 @group(0) @binding(6) var<storage, read_write> order : array<u32>;
 @group(0) @binding(7) var<storage, read_write> args : DrawArgs;
+@group(0) @binding(8) var<storage, read> covariances : array<f32>;
+
+${FOOTPRINT_WGSL}
 
 /** A thread's splat: a grid of workgroups wraps past the 65535 a dimension allows. */
 fn splatOf(id : vec3<u32>, groups : vec3<u32>) -> u32 {
@@ -121,7 +166,16 @@ fn makeKeys(@builtin(global_invocation_id) id : vec3<u32>, @builtin(num_workgrou
   // so the whole quad would be clipped.
   if (view.z >= 0.0 || clip.z > w || abs(clip.x) > 1.3 * w || abs(clip.y) > 1.3 * w) { return; }
   // Too faint to reach 1/255 anywhere: the draw would discard all of it.
-  if (unpack4x8unorm(center.w).a * 255.0 <= 1.0) { return; }
+  let alpha = unpack4x8unorm(center.w).a;
+  if (alpha * 255.0 <= 1.0) { return; }
+  // Too little to see: its opacity over its area -- the Gaussian's integral,
+  // 2 pi sqrt(det), as the draw sizes it -- is the most it can add to the
+  // picture, and a splat under a pixel's worth costs a quad all the same.
+  if (cloud.cull > 0.0) {
+    let f = footprint(i, view);
+    let area = 6.2831853 * sqrt(max((f.x + 0.3) * (f.z + 0.3) - f.y * f.y, 0.0));
+    if (alpha * area < cloud.cull) { return; }
+  }
   // Far first: the farthest key is the smallest.
   let bucket = u32(clamp((-view.z - cloud.depthMin) * cloud.depthScale, 0.0, f32(BUCKETS - 1u)));
   let key = BUCKETS - 1u - bucket;
@@ -177,6 +231,8 @@ ${FOG_WGSL}
 @group(0) @binding(4) var<storage, read> shaded : array<u32>;
 @group(1) @binding(0) var<uniform> frame : Frame;
 
+${FOOTPRINT_WGSL}
+
 /** Whether the capture has harmonics, so the colour is the shade pass's. */
 override SHADED : bool = false;
 @group(1) @binding(1) var irradiance : texture_cube<f32>;
@@ -204,33 +260,12 @@ fn vs(@builtin(vertex_index) corner : u32, @builtin(instance_index) instance : u
   let view = modelView * vec4<f32>(bitcast<vec3<f32>>(center.xyz), 1.0);
   let clip = cloud.projection * view;
 
-  let o = i * 6u;
-  let sigma = mat3x3<f32>(
-    covariances[o], covariances[o + 1u], covariances[o + 2u],
-    covariances[o + 1u], covariances[o + 3u], covariances[o + 4u],
-    covariances[o + 2u], covariances[o + 4u], covariances[o + 5u],
-  );
-  // The projection's derivative at the centre, in pixels: constant for an
-  // orthographic camera; for a perspective one, with the centre held inside
-  // a little more than the view, as 3DGS does, so a splat beside it does
-  // not stretch without bound.
-  let p = cloud.projection;
-  let fx = p[0][0] * cloud.viewport.x * 0.5;
-  let fy = p[1][1] * cloud.viewport.y * 0.5;
-  var J = mat3x3<f32>(vec3<f32>(fx, 0.0, 0.0), vec3<f32>(0.0, fy, 0.0), vec3<f32>(0.0));
-  if (p[3][3] == 0.0) {
-    let d = -view.z;
-    let x = clamp(view.x / d, -1.3 / p[0][0], 1.3 / p[0][0]) * d;
-    let y = clamp(view.y / d, -1.3 / p[1][1], 1.3 / p[1][1]) * d;
-    J = mat3x3<f32>(vec3<f32>(fx / d, 0.0, 0.0), vec3<f32>(0.0, fy / d, 0.0), vec3<f32>(fx * x / (d * d), fy * y / (d * d), 0.0));
-  }
-  let T = J * mat3x3<f32>(modelView[0].xyz, modelView[1].xyz, modelView[2].xyz);
-  let cov = T * sigma * transpose(T);
+  let f = footprint(i, view);
   // Plus a third of a pixel each way: a splat smaller than a pixel still
   // covers one, as 3DGS trains them to.
-  let a = cov[0][0] + 0.3;
-  let b = cov[0][1];
-  let c = cov[1][1] + 0.3;
+  let a = f.x + 0.3;
+  let b = f.y;
+  let c = f.z + 0.3;
 
   // The ellipse's axes: the 2D covariance's eigenvectors, each as long as
   // the square root of twice its eigenvalue.
@@ -394,6 +429,7 @@ export class SplatPass {
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
         storage(1, 'read-only-storage'), storage(2), storage(3), storage(4), storage(5), storage(6), storage(7),
+        storage(8, 'read-only-storage'),
       ],
     });
     const shadeLayout = device.createBindGroupLayout({
@@ -474,6 +510,8 @@ export class SplatPass {
     this.count = 0;
     /** Clouds the last frame sorted; the rest kept the order they had. */
     this.sorted = 0;
+    /** The least a splat may add to the picture, opacity x pixels, and be drawn; see makeKeys. */
+    this.cull = SPLAT_CULL;
     this._sort = (pass) => this._encodeSort(pass);
     this._draw = (pass) => this._encodeDraw(pass);
   }
@@ -536,11 +574,14 @@ export class SplatPass {
       f.set(scene.transforms.world.subarray(handleIndex(entity) * 16, handleIndex(entity) * 16 + 16), 40);
       // The eye, in the capture's space: where (view x model)^-1 takes the view's origin.
       if (splats.degree > 0 && mat4Invert(this._viewModel, modelView) !== null) f.set(this._viewModel.subarray(12, 15), 56);
+      f[59] = this.cull;
       this.rhi.queue.writeBuffer(state.cloud, 0, this._cloud);
       // Sorted again only when something it is sorted by changed. What it
       // was sorted for is kept when the sort is recorded, not here: a frame
       // that throws before then must not leave it looking sorted.
-      const sort = !sameFloats(state.last, f, CLOUD_FLOATS);
+      // A new cull threshold changes which splats are in it, as a move does.
+      const sort = !sameFloats(state.last, f, CLOUD_FLOATS) || state.cull !== this.cull;
+      state.cull = this.cull;
       if (sort) {
         state.next.set(f.subarray(0, CLOUD_FLOATS));
         this.rhi.queue.writeBuffer(state.args, 0, this._args);
@@ -601,7 +642,7 @@ export class SplatPass {
     state.sortGroup = device.createBindGroup({
       label: 'splats-sort',
       layout: this.sortLayout,
-      entries: entries([state.cloud, splats.centers, state.keys, state.visible, state.counts, state.cursors, state.order, state.args]),
+      entries: entries([state.cloud, splats.centers, state.keys, state.visible, state.counts, state.cursors, state.order, state.args, splats.covariances]),
     });
     state.drawGroup = device.createBindGroup({
       label: 'splats-draw',

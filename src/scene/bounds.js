@@ -76,14 +76,18 @@ export class BoxList {
  * Bounds columns are 3 floats per renderable; `dirty` is indexed by matrix
  * slot, and null updates everything. `record`, a BoxList, gets each updated
  * box as it was and as it is -- what a cached shadow map needs to know.
+ * `items`, the renderables that moved (Scene.movedRenderables), updates those
+ * without looking at the rest.
  */
 export function updateWorldBounds(
-  count, localMin, localMax, worldMin, worldMax, matrices, matrixSlot, dirty = null, record = null,
+  count, localMin, localMax, worldMin, worldMax, matrices, matrixSlot, dirty = null, record = null, items = null,
 ) {
   let updated = 0;
-  for (let i = 0; i < count; i++) {
+  const n = items === null ? count : items.length;
+  for (let k = 0; k < n; k++) {
+    const i = items === null ? k : items[k];
     const slot = matrixSlot[i];
-    if (dirty !== null && dirty[slot] === 0) continue;
+    if (items === null && dirty !== null && dirty[slot] === 0) continue;
 
     const o = i * 3;
     record?.push(worldMin, worldMax, o);
@@ -122,6 +126,44 @@ export function unionWorldBounds(count, worldMin, worldMax, outMin, outMax) {
     if (worldMax[o] > outMax[0]) outMax[0] = worldMax[o];
     if (worldMax[o + 1] > outMax[1]) outMax[1] = worldMax[o + 1];
     if (worldMax[o + 2] > outMax[2]) outMax[2] = worldMax[o + 2];
+  }
+  return true;
+}
+
+/** `items`' world boxes, min then max, into `out`: read before they move, for moveUnion. */
+export function saveBoxes(items, worldMin, worldMax, out) {
+  out.length = items.length * 6;
+  for (let k = 0; k < items.length; k++) {
+    const o = items[k] * 3;
+    for (let a = 0; a < 3; a++) {
+      out[k * 6 + a] = worldMin[o + a];
+      out[k * 6 + 3 + a] = worldMax[o + a];
+    }
+  }
+  return out;
+}
+
+/**
+ * The union kept up to date by the few boxes that moved, from where they
+ * were (`before`, saveBoxes) to where they are. False, having changed
+ * nothing, when one drew back from a face of the union it was on: whether
+ * anything else still holds that face, only a full pass can say.
+ */
+export function moveUnion(items, before, worldMin, worldMax, outMin, outMax) {
+  for (let k = 0; k < items.length; k++) {
+    const o = items[k] * 3;
+    for (let a = 0; a < 3; a++) {
+      const low = before[k * 6 + a];
+      const high = before[k * 6 + 3 + a];
+      if ((low <= outMin[a] && worldMin[o + a] > low) || (high >= outMax[a] && worldMax[o + a] < high)) return false;
+    }
+  }
+  for (const i of items) {
+    const o = i * 3;
+    for (let a = 0; a < 3; a++) {
+      if (worldMin[o + a] < outMin[a]) outMin[a] = worldMin[o + a];
+      if (worldMax[o + a] > outMax[a]) outMax[a] = worldMax[o + a];
+    }
   }
   return true;
 }
