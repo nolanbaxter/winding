@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Splats too faint and small to show are left out.** [`renderer.splatCull`](docs/API.md#renderer-splatcull)
+  (default `0.5`): a splat whose opacity times the pixels it covers is under it is left out of the
+  sort and the draw, which a sub-pixel splat costs a quad of all the same. A million splats seen
+  whole at 720p on Iris Xe: 27.4 -> 16.8 ms, 0.06% of channels moved by more than 8 levels; a
+  capture seen close: unchanged. `0` draws every splat as before.
+
 ## [1.4.0] - 2026-10-06
 
 **Better pictures, measured.** Temporal antialiasing, soft shadows from a light's size, auto

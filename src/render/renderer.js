@@ -52,7 +52,7 @@ import { MorphStore } from './morph.js';
 import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { Upscaler, MIN_RESOLUTION } from './upscale.js';
-import { SplatPass } from './splats.js';
+import { SplatPass, SPLAT_CULL } from './splats.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW } from './gpudriven.js';
 import {
   updateWorldBounds, unionWorldBounds, farthestViewDepth, farthestDistance,
@@ -312,6 +312,12 @@ export class Renderer {
      * light's size as it is. Off, the soft code is compiled back out.
      */
     this.softShadows = true;
+    /**
+     * The least a Gaussian splat may add to the picture -- its opacity times
+     * the pixels it covers -- and still be drawn. Splats under it are left out
+     * of the sort and the draw: far from a capture, most are. 0 draws them all.
+     */
+    this.splatCull = SPLAT_CULL;
     /**
      * Temporal antialiasing (render/taa.js), off by default. On, it takes the
      * place of FXAA on frames drawn to the canvas; its pass builds the first
@@ -1339,6 +1345,9 @@ export class Renderer {
     const sprites = this.sprites.prepare(scene, camera, environment, scaled ? rhi.width : width, scaled ? rhi.height : height, anyMoved);
     // Particles likewise; and during a probe capture they are seen, not moved.
     const emitters = this.particles.prepare(scene, camera, environment, target !== null);
+    const cull = this.splatCull;
+    if (!(cull >= 0 && Number.isFinite(cull))) throw new Error(`splatCull must be 0 or more, got ${cull}`);
+    this.splats.cull = cull;
     const clouds = this.splats.prepare(scene, camera, environment, width, height);
     this.stats.splats = this.splats.count;
     this._blendInLate = !this._frameOIT && ambient === null && !transmissive && sprites === 0 && emitters === 0 && clouds === 0;

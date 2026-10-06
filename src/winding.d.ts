@@ -257,6 +257,7 @@ export interface Renderer {
   oit: boolean;
   softShadows: boolean;
   taa: boolean;
+  splatCull: number;
   readonly shadows: ShadowMaps;
   skybox: boolean;
   shadowDistance: number | null;

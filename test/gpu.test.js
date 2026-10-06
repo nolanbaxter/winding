@@ -1729,6 +1729,60 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
   });
 
+  await step('splats too faint and small to matter are left out, unless splatCull is 0', async () => {
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    // One .splat record: position, scale, colour and opacity, no turn.
+    const record = (x, scale, alpha) => {
+      const bytes = new Uint8Array(32);
+      const view = new DataView(bytes.buffer);
+      [x, 0, 0, scale, scale, scale].forEach((v, i) => view.setFloat32(i * 4, v, true));
+      bytes.set([255, 255, 255, alpha], 24);
+      bytes.set([255, 128, 128, 128], 28);
+      return bytes;
+    };
+    try {
+      probe.gpu.resize(160, 120);
+      // A faint speck a hundredth of a pixel across, and a large opaque splat beside it.
+      const file = new Uint8Array(64);
+      // Opacity 50 / 255 over the 1.9 pixels the draw gives anything: 0.37 of a pixel, under 0.5.
+      file.set(record(0, 0.0005, 50), 0);
+      file.set(record(1, 0.2, 255), 32);
+      const splats = await probe.loadSplats(file);
+      const scene = probe.createScene();
+      scene.addSplats({ splats });
+      const cam = new Camera({ fovY: 0.8, near: 0.1 });
+      cam.position.set([0, 0, 5]);
+      cam.target.set([0, 0, 0]);
+      const at = async () => {
+        probe.renderFrame(scene, cam);
+        const px = await probe.gpu.readPixels();
+        const value = (x, y) => px[(y * 160 + x) * 4];
+        return { speck: value(80, 60), big: value(80 + Math.round(1 / (2 * 5 * Math.tan(0.4)) * 120), 60) };
+      };
+      const culled = await at();
+      probe.renderer.splatCull = 0;
+      const all = await at();
+      let refused = '';
+      probe.renderer.splatCull = -1;
+      try { probe.renderFrame(scene, cam); } catch (error) { refused = error.message; }
+      probe.renderer.splatCull = 0.5;
+      const report = `speck ${culled.speck} at the default, ${all.speck} at splatCull 0; the large splat ${culled.big} and ${all.big}; -1: ${refused}`;
+      if (!(culled.speck === 0 && all.speck > 0 && culled.big > 150 && all.big === culled.big && /splatCull must be 0 or more/.test(refused))) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a capture with harmonics changes colour with the view, in its own space, to degree 3', async () => {
     const SKY = [0, 0, 0];
     const canvas = document.createElement('canvas');
