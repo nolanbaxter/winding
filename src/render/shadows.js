@@ -52,6 +52,8 @@ export const MAX_CASCADES = 4;
 
 /** One local shadow view as the forward shader reads it: a mat4 and a vec4. */
 export const LOCAL_VIEW_FLOATS = 20;
+/** The grid a cascade's box is snapped to, in texels: see _fitCascade. */
+const CASCADE_SNAP = 16;
 
 /**
  * How far past its own edge each local view reaches, as a tangent scale: the
@@ -1054,19 +1056,29 @@ export class ShadowMaps {
     const cy = v[1] * sphere[0] + v[5] * sphere[1] + v[9] * sphere[2] + v[13];
     const cz = v[2] * sphere[0] + v[6] * sphere[1] + v[10] * sphere[2] + v[14];
 
-    // Snap to whole texels. Without this the box slides by fractions of a texel
-    // every frame, every texel samples a slightly different patch of world, and
-    // shadow edges crawl even when nothing in the scene is moving.
+    // Snap to a grid of whole texels. Without this the box slides by fractions
+    // of a texel every frame, every texel samples a slightly different patch of
+    // world, and shadow edges crawl even when nothing in the scene is moving.
     //
-    // Snapping moves the box by up to a texel, so a box exactly the sphere's
-    // size could leave up to one texel of the sphere uncovered -- fragments
-    // there fell outside the map and read as lit. The box is one texel wider
-    // on every side, with the texel sized so that it still spans the map:
-    // 2 (r + t) = size * t, so t = 2r / (size - 2).
-    const texelSize = (2 * radius) / (this.size - 2);
-    const half = radius + texelSize;
-    const snappedX = Math.floor(cx / texelSize) * texelSize;
-    const snappedY = Math.floor(cy / texelSize) * texelSize;
+    // The grid is CASCADE_SNAP texels, not one: a box that moved with every
+    // texel the camera crossed was a new matrix nearly every frame the camera
+    // moved, and a new matrix redraws the cascade -- 4.65 ms of Sponza's frame
+    // at 720p on Iris Xe. On a coarser grid the box holds still until the
+    // camera has moved that far, and the cache keeps it.
+    //
+    // Snapping moves the box by up to a grid step, so the box is a step wider
+    // on every side than the sphere, with the texel sized so that it still
+    // spans the map: 2 (r + n t) = size * t, so t = 2r / (size - 2n). At 2048
+    // and 16, texels 1.5% larger than snapping to one.
+    const texelSize = (2 * radius) / (this.size - 2 * CASCADE_SNAP);
+    const step = texelSize * CASCADE_SNAP;
+    const half = radius + step;
+    const snappedX = Math.floor(cx / step) * step;
+    const snappedY = Math.floor(cy / step) * step;
+    // The depth range too, on the same step, and a step deeper each way: it
+    // moved with every millimetre the camera did, and was a new matrix every
+    // frame by itself.
+    const snappedZ = Math.round(cz / step) * step;
 
     // The light looks down -Z, so a point at light-space z has distance -z.
     //
@@ -1076,8 +1088,8 @@ export class ShadowMaps {
     // distance. This used to be clamped to at least 0.01, a perspective habit
     // an orthographic box has no use for -- and that clamp cut every one of
     // those casters out of the map. Nothing above the floor cast a shadow.
-    const nearDistance = -(cz + radius) - radius * this.casterExtent;
-    const farDistance = -(cz - radius);
+    const nearDistance = -(snappedZ + radius + step) - radius * this.casterExtent;
+    const farDistance = -(snappedZ - radius - step);
 
     mat4OrthographicReverseZ(
       this._projection,
