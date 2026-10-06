@@ -9,7 +9,7 @@ import { Camera } from '../src/scene/camera.js';
 import { quatCreate, quatSetAxisAngle } from '../src/core/math/quat.js';
 import { vec3Create } from '../src/core/math/vec3.js';
 import { Scene } from '../src/scene/scene.js';
-import { updateWorldBounds, applyMorphBounds } from '../src/scene/bounds.js';
+import { updateWorldBounds, applyMorphBounds, saveBoxes, moveUnion } from '../src/scene/bounds.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -61,6 +61,81 @@ test('a child composes against its parent', () => {
 
   store.update();
   posClose(store, child, [10, 5, 0]);
+});
+
+test('a few moved nodes compose from the list to what a whole compose gives, subtrees and all', () => {
+  // 100 roots, each with a child, each with a grandchild. A root, its own
+  // grandchild and an unrelated leaf move: few enough to compose listed.
+  const build = () => {
+    const { ids, store } = makeScene(512);
+    const nodes = [];
+    for (let r = 0; r < 100; r++) {
+      const root = ids.alloc();
+      store.add(root, { position: [r, 0, 0] });
+      const child = ids.alloc();
+      store.add(child, { position: [0, 1, 0], parent: root });
+      const leaf = ids.alloc();
+      store.add(leaf, { position: [0, 0, 1], parent: child });
+      nodes.push(root, child, leaf);
+    }
+    return { store, nodes };
+  };
+  const move = (store, nodes) => {
+    store.setPosition(nodes[3 * 7 + 2], 0, 0, 5);
+    store.setPosition(nodes[3 * 7], 50, 2, 0);
+    store.setScale(nodes[3 * 40 + 2], 2, 2, 2);
+  };
+  const listed = build();
+  listed.store.update();
+  listed.store.clearMoved();
+  move(listed.store, listed.nodes);
+  assert.equal(listed.store.update(), 4, 'the root, its child and grandchild, and the other leaf');
+  const slots = listed.nodes.map((e) => handleIndex(e));
+  assert.deepEqual([...listed.store.movedList].sort((a, b) => a - b),
+    [slots[21], slots[22], slots[23], slots[122]].sort((a, b) => a - b));
+  assert.equal(listed.store.movedAll, false);
+
+  const whole = build();
+  move(whole.store, whole.nodes);
+  whole.store.update();
+  assert.equal(whole.store.movedAll, true);
+  for (const k of [21, 22, 23, 24, 25, 122, 121]) {
+    vecClose(worldPos(listed.store, listed.nodes[k]), worldPos(whole.store, whole.nodes[k]), EPS, `node ${k}`);
+  }
+  posClose(listed.store, listed.nodes[23], [50, 3, 5], 'the moved grandchild under its moved root');
+
+  listed.store.clearMoved();
+  assert.ok(listed.store.moved.every((m) => m === 0), 'clearing the list clears every flag it set');
+});
+
+test('the union follows a few moved boxes, and gives up when one leaves a face it held', () => {
+  // Three boxes along x, [0,1], [4,5] and [9,10], all on the floor at y = 0.
+  const worldMin = Float32Array.from([0, 0, 0, 4, 0, 0, 9, 0, 0]);
+  const worldMax = Float32Array.from([1, 1, 1, 5, 1, 1, 10, 1, 1]);
+  const union = () => ({ min: Float32Array.from([0, 0, 0]), max: Float32Array.from([10, 1, 1]) });
+  const move = (i, dx) => { worldMin[i * 3] += dx; worldMax[i * 3] += dx; };
+
+  // The middle one out past the end: the union grows to it.
+  let u = union();
+  let before = saveBoxes([1], worldMin, worldMax, []);
+  move(1, 8);
+  assert.equal(moveUnion([1], before, worldMin, worldMax, u.min, u.max), true);
+  assert.deepEqual([...u.max], [13, 1, 1]);
+  move(1, -8);
+
+  // The first one inward, off the x = 0 face: only a full pass knows the new edge.
+  u = union();
+  before = saveBoxes([0], worldMin, worldMax, []);
+  move(0, 2);
+  assert.equal(moveUnion([0], before, worldMin, worldMax, u.min, u.max), false);
+  assert.deepEqual([...u.min, ...u.max], [0, 0, 0, 10, 1, 1], 'left alone');
+  move(0, -2);
+
+  // Along the floor every box shares: still on it, so nothing to recompute.
+  u = union();
+  before = saveBoxes([1], worldMin, worldMax, []);
+  move(1, 1);
+  assert.equal(moveUnion([1], before, worldMin, worldMax, u.min, u.max), true);
 });
 
 test('parent scale and rotation apply to children', () => {

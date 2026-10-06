@@ -2356,10 +2356,12 @@ export class Scene {
    */
   _refreshBounds() {
     this.update();
-    updateWorldBounds(
-      this.renderableCount, this.localMin, this.localMax, this.worldMin, this.worldMax,
-      this.transforms.world, this.renderableMatrixSlot, this.transforms.moved,
-    );
+    if (this.transforms.movedPending) {
+      updateWorldBounds(
+        this.renderableCount, this.localMin, this.localMax, this.worldMin, this.worldMax,
+        this.transforms.world, this.renderableMatrixSlot, this.transforms.moved, null, this.movedRenderables(),
+      );
+    }
     // Picking has to see the pose too, or a click lands on where a character
     // was authored rather than where it is standing.
     if (this.skins.length > 0) {
@@ -2369,6 +2371,35 @@ export class Scene {
       );
     }
     if (this.morphs.length > 0) this.applyMorphBounds();
+  }
+
+  /**
+   * The renderables whose node is in the transforms' moved list, ascending,
+   * or null when it lists nothing (a whole compose ran) and `moved` has to be
+   * scanned instead. The slot-to-renderables map behind it is rebuilt when the
+   * renderables change, which is every add and remove and never a move.
+   */
+  movedRenderables() {
+    const t = this.transforms;
+    if (t.movedAll) return null;
+    if (this._bySlotRevision !== this.revision) {
+      const slots = t.capacity;
+      const start = (this._bySlotStart = new Uint32Array(slots + 1));
+      const list = (this._bySlot = new Uint32Array(this.renderableCount));
+      for (let i = 0; i < this.renderableCount; i++) start[this.renderableMatrixSlot[i] + 1]++;
+      for (let s = 0; s < slots; s++) start[s + 1] += start[s];
+      const cursor = start.slice(0, slots);
+      for (let i = 0; i < this.renderableCount; i++) list[cursor[this.renderableMatrixSlot[i]]++] = i;
+      this._bySlotRevision = this.revision;
+    }
+    const start = this._bySlotStart;
+    const out = (this._movedItems ??= []);
+    out.length = 0;
+    // A slot past the map was made after it, and has no renderable.
+    for (const slot of t.movedList) {
+      if (slot + 1 < start.length) for (let k = start[slot]; k < start[slot + 1]; k++) out.push(this._bySlot[k]);
+    }
+    return out.sort((a, b) => a - b);
   }
 
   /**

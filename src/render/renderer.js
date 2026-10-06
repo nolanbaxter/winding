@@ -55,7 +55,7 @@ import { Upscaler, MIN_RESOLUTION } from './upscale.js';
 import { SplatPass, SPLAT_CULL } from './splats.js';
 import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW } from './gpudriven.js';
 import {
-  updateWorldBounds, unionWorldBounds, farthestViewDepth, farthestDistance,
+  updateWorldBounds, unionWorldBounds, saveBoxes, moveUnion, farthestViewDepth, farthestDistance,
   updateSkinBounds, applySkinBounds, BoxList,
 } from '../scene/bounds.js';
 import { HierarchicalDepth } from './hzb.js';
@@ -367,6 +367,8 @@ export class Renderer {
     this._sceneMin = new Float32Array(3);
     this._sceneMax = new Float32Array(3);
     this._hasSceneBounds = false;
+    /** The listed movers' boxes before they moved: see moveUnion. */
+    this._boxesBefore = [];
     this._boundsRevision = -1;
     /**
      * What changed this frame for the point and spot shadow cache: every box
@@ -966,9 +968,13 @@ export class Renderer {
     const changes = this._shadowChanges;
     changes.boxes.clear();
     const record = scene.shadowCasters.size > 0 ? changes.boxes : null;
-    const moved = scene.transforms.movedPending ? updateWorldBounds(
+    // The renderables that moved, when few enough did to list -- or null, and
+    // every one is looked at -- and their boxes as they were, for the union.
+    const items = anyMoved ? scene.movedRenderables() : null;
+    const before = items !== null ? saveBoxes(items, scene.worldMin, scene.worldMax, this._boxesBefore) : null;
+    const moved = anyMoved ? updateWorldBounds(
       count, scene.localMin, scene.localMax, scene.worldMin, scene.worldMax,
-      scene.transforms.world, scene.renderableMatrixSlot, scene.transforms.moved, record,
+      scene.transforms.world, scene.renderableMatrixSlot, scene.transforms.moved, record, items,
     ) : 0;
 
     // Skinned renderables get their bounds replaced: the pass above gave them
@@ -1003,10 +1009,14 @@ export class Renderer {
 
     // The scene's own extent, which is what the shadow and cluster ranges are
     // derived from. Recomputed only when something moved or the contents
-    // changed -- a union cannot be updated in place, because a renderable that
-    // moves can shrink it as easily as grow it, but on a settled scene that
-    // means never paying for it at all.
-    if (moved > 0 || morphed > 0 || skinned > 0 || this._boundsRevision !== scene.revision) {
+    // changed -- a renderable that moves can shrink the union as easily as
+    // grow it, so it is recomputed whole, unless the few that moved can only
+    // have grown it (see moveUnion).
+    const changed = moved > 0 || morphed > 0 || skinned > 0 || this._boundsRevision !== scene.revision;
+    const kept = changed && before !== null && this._hasSceneBounds && morphed === 0 && skinned === 0
+      && this._boundsRevision === scene.revision
+      && moveUnion(items, before, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax);
+    if (changed && !kept) {
       this._hasSceneBounds = unionWorldBounds(
         count, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax,
       );
@@ -1025,7 +1035,7 @@ export class Renderer {
     // and the gather below is what decides those offsets.
     this.morph.update(scene);
     this.gpu.update(scene, this.frustum, hzb, camera.viewProjection, writeDrawData,
-      this.skinPalette.offsets, this.morph, camera.projection[5]);
+      this.skinPalette.offsets, this.morph, camera.projection[5], items);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
     p?.mark('draw data');
 
@@ -1047,10 +1057,7 @@ export class Renderer {
     // Both consumers of `moved` have now read it, so the record is spent.
     // Clearing here rather than in update() is what makes scene.update() safe
     // to call any number of times before a frame.
-    if (scene.transforms.movedPending) {
-      scene.transforms.moved.fill(0, 0, scene.transforms.capacity);
-      scene.transforms.movedPending = false;
-    }
+    if (scene.transforms.movedPending) scene.transforms.clearMoved();
 
     const tAfterUpload = now();
     p?.mark('skin + morph');
@@ -1619,10 +1626,7 @@ export class Renderer {
     const transforms = scene.transforms;
     const moved = transforms.movedPending ? transforms.moved : null;
     view.prepare(scene, camera, width, height, moved);
-    if (moved !== null) {
-      transforms.moved.fill(0, 0, transforms.capacity);
-      transforms.movedPending = false;
-    }
+    if (moved !== null) transforms.clearMoved();
     return recomposed;
   }
 

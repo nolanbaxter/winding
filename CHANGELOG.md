@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a grid step of margin, a cascade holds still until the camera has moved that far, and the cache
   keeps it. Sponza at 720p on Iris Xe, camera moving: cascades redrawn 4.00 -> 0.38 a frame, GPU
   10.7 -> 6.2 ms. Texels are 1.5% larger. Anything moving inside a cascade still redraws it at once.
+- **A frame where a few things move no longer looks at everything that didn't.** Composing
+  transforms, updating world boxes, the scene's extent and the draw-data upload each walked every
+  node or renderable to find the ones that moved. The transform store now lists what was marked
+  dirty and what moved, composing those and their subtrees, and the rest follow the list. The
+  extent is grown by the boxes that moved, recomputed whole only when one leaves a face of it.
+  100,000 objects with 2 moving: CPU 2.3 -> 1.2 ms a frame (transforms 0.41 -> 0.02, draw data
+  0.58 -> 0.06, bounds 0.77 -> 0.3). Past 4,096 movers, or an eighth of the nodes, it is the
+  whole pass as before.
 
 - **Splats too faint and small to show are left out.** [`renderer.splatCull`](docs/API.md#renderer-splatcull)
   (default `0.5`): a splat whose opacity times the pixels it covers is under it is left out of the

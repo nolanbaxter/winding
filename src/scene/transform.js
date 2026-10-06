@@ -24,11 +24,16 @@ import { handleIndex, NULL_HANDLE } from '../core/handle.js';
 import {
   sharedFloat32Array, sharedInt32Array, sharedUint32Array, sharedUint8Array,
 } from '../core/shared.js';
-import { composeRange, buffersFromColumns } from './transformJob.js';
+import { composeRange, composeNode, buffersFromColumns } from './transformJob.js';
 import { grownCapacity, growArray, growShared } from '../core/grow.js';
 import { JOB_COMPOSE_TRANSFORMS } from '../core/jobs.js';
 
 export const NO_PARENT = -1;
+/**
+ * The most dirty or moved nodes listed. Past it a frame composes, bounds and
+ * uploads everything, as it would anyway with that much moving.
+ */
+const LISTED_MOST = 4096;
 
 /** assertFinite for three loose numbers, without an array per call in someone's loop. */
 function finite3(what, x, y, z) {
@@ -83,6 +88,20 @@ export class TransformStore {
     this._anyDirty = false;
     /** Set when a compose moved anything; cleared by whoever clears `moved`. */
     this.movedPending = false;
+    /**
+     * The nodes marked dirty since the last compose, so one where a few moved
+     * composes those and what hangs off them, not every node to find them:
+     * 0.4 ms a frame at 100,000 nodes for two that moved. Past LISTED_MOST,
+     * the whole compose.
+     */
+    this._dirtyList = [];
+    /**
+     * The nodes `moved` holds, listed, for the bounds and the upload to walk
+     * instead of every renderable. Empty and `movedAll` set after a whole
+     * compose, which lists nothing: scan `moved` then.
+     */
+    this.movedList = [];
+    this.movedAll = false;
 
     /** Entity indices in depth order: every parent precedes every child. */
     this.order = sharedUint32Array(capacity);
@@ -102,6 +121,10 @@ export class TransformStore {
     this._depth = new Int32Array(capacity);
     this._chain = new Uint32Array(capacity);
     this._counts = new Int32Array(capacity + 1);
+    /** Each node's children, from _rebuildOrder: _children[_childStart[e] .. _childStart[e + 1]). */
+    this._childStart = new Uint32Array(capacity + 1);
+    this._children = new Uint32Array(capacity);
+    this._stack = new Uint32Array(capacity);
 
     /** Bumped by _grow. Workers holding older buffers are writing into limbo. */
     this.buffersRevision = 0;
@@ -134,8 +157,7 @@ export class TransformStore {
     this.parent[i] = NO_PARENT;
     this.used[i] = 1;
     this.born[i] = ++this._births;
-    this.dirty[i] = 1;
-    this._anyDirty = true;
+    this._mark(i);
     this.recomputed[i] = 0;
     this.orderDirty = true;
     if (i >= this._high) this._high = i + 1;
@@ -159,8 +181,7 @@ export class TransformStore {
     for (let c = 0; c < this._high; c++) {
       if (this.used[c] && this.parent[c] === i) {
         this.parent[c] = NO_PARENT;
-        this.dirty[c] = 1;
-        this._anyDirty = true;
+        this._mark(c);
       }
     }
 
@@ -231,8 +252,7 @@ export class TransformStore {
     }
 
     this.parent[i] = p;
-    this.dirty[i] = 1;
-    this._anyDirty = true;
+    this._mark(i);
     this.orderDirty = true;
   }
 
@@ -243,16 +263,14 @@ export class TransformStore {
     if (DEBUG) finite3('setPosition', x, y, z);
     const o = handleIndex(entity) * 3;
     this.position[o] = x; this.position[o + 1] = y; this.position[o + 2] = z;
-    this.dirty[handleIndex(entity)] = 1;
-    this._anyDirty = true;
+    this._mark(handleIndex(entity));
   }
 
   setScale(entity, x, y, z) {
     if (DEBUG) finite3('setScale', x, y, z);
     const o = handleIndex(entity) * 3;
     this.scale[o] = x; this.scale[o + 1] = y; this.scale[o + 2] = z;
-    this.dirty[handleIndex(entity)] = 1;
-    this._anyDirty = true;
+    this._mark(handleIndex(entity));
   }
 
   setRotation(entity, q) {
@@ -260,8 +278,23 @@ export class TransformStore {
     const o = handleIndex(entity) * 4;
     this.rotation[o] = q[0]; this.rotation[o + 1] = q[1];
     this.rotation[o + 2] = q[2]; this.rotation[o + 3] = q[3];
-    this.dirty[handleIndex(entity)] = 1;
+    this._mark(handleIndex(entity));
+  }
+
+  /** Node i needs composing. Listed the first time, while the list has room. */
+  _mark(i) {
+    if (this.dirty[i] === 0 && this._dirtyList.length <= LISTED_MOST) this._dirtyList.push(i);
+    this.dirty[i] = 1;
     this._anyDirty = true;
+  }
+
+  /** Clear `moved` once its consumers have read it: the listed nodes, or all of them. */
+  clearMoved() {
+    if (this.movedAll) this.moved.fill(0, 0, this.capacity);
+    else for (const e of this.movedList) this.moved[e] = 0;
+    this.movedList.length = 0;
+    this.movedAll = false;
+    this.movedPending = false;
   }
 
   /** Byte-free accessor: index into `world` for callers that read in place. */
@@ -280,6 +313,7 @@ export class TransformStore {
   update() {
     if (this.orderDirty) this._rebuildOrder();
     if (!this._settle()) return 0;
+    if (this._listed()) return this._composeListed();
     composeRange(this, 0, 0, this.orderCount);
     return this._composed();
   }
@@ -295,13 +329,60 @@ export class TransformStore {
       return false;
     }
     this._anyDirty = false;
+    // Consumed since the last compose: start a new record.
+    if (!this.movedPending) {
+      this.movedList.length = 0;
+      this.movedAll = false;
+    }
     return true;
   }
 
   _composed() {
+    this._dirtyList.length = 0;
     this.lastRecomputedCount = this._countRecomputed();
-    if (this.lastRecomputedCount > 0) this.movedPending = true;
+    if (this.lastRecomputedCount > 0) {
+      this.movedPending = true;
+      this.movedAll = true;
+    }
     return this.lastRecomputedCount;
+  }
+
+  /** Whether few enough are dirty to compose from the list. */
+  _listed() {
+    const n = this._dirtyList.length;
+    return n <= LISTED_MOST && n * 8 < this.orderCount;
+  }
+
+  /**
+   * The listed dirty nodes and their subtrees, each composed once: shallowest
+   * first, so one under a dirty ancestor is clean by the time it comes up.
+   * `recomputed` is set for these and left as it was elsewhere -- stale, and
+   * harmless: a whole compose rewrites each parent's before a child reads it.
+   */
+  _composeListed() {
+    const { dirty, parent, moved, _depth: depth, _childStart: start, _children: children, _stack: stack } = this;
+    const list = this._dirtyList.sort((a, b) => depth[a] - depth[b]);
+    let count = 0;
+    for (const root of list) {
+      // Composed already under an ancestor, or removed.
+      if (dirty[root] === 0) continue;
+      let top = 0;
+      stack[top++] = root;
+      while (top > 0) {
+        const e = stack[--top];
+        composeNode(this, e, parent[e]);
+        count++;
+        if (moved[e] === 0) {
+          moved[e] = 1;
+          if (!this.movedAll && this.movedList.push(e) > LISTED_MOST) this.movedAll = true;
+        }
+        for (let c = start[e]; c < start[e + 1]; c++) stack[top++] = children[c];
+      }
+    }
+    list.length = 0;
+    this.lastRecomputedCount = count;
+    if (count > 0) this.movedPending = true;
+    return count;
   }
 
   /**
@@ -313,6 +394,8 @@ export class TransformStore {
   updateParallel(jobs) {
     if (this.orderDirty) this._rebuildOrder();
     if (!this._settle()) return 0;
+    // A few nodes are quicker composed here than handed out level by level.
+    if (this._listed()) return this._composeListed();
 
     // Two reasons to republish, and both are easy to miss.
     //
@@ -381,6 +464,9 @@ export class TransformStore {
     this._depth = growArray(this._depth, capacity);
     this._chain = growArray(this._chain, capacity);
     this._counts = growArray(this._counts, capacity + 1);
+    this._childStart = growArray(this._childStart, capacity + 1);
+    this._children = growArray(this._children, capacity);
+    this._stack = growArray(this._stack, capacity);
 
     this.capacity = capacity;
     this.buffersRevision++;
@@ -439,6 +525,16 @@ export class TransformStore {
     for (let e = 0; e < high; e++) if (used[e]) this.order[counts[depth[e]]++] = e;
 
     this.orderCount = total;
+
+    // Each node's children, for _composeListed: counted, summed, placed.
+    const start = this._childStart;
+    const children = this._children;
+    start.fill(0, 0, high + 1);
+    for (let e = 0; e < high; e++) if (used[e] && parent[e] !== NO_PARENT) start[parent[e] + 1]++;
+    for (let e = 0; e < high; e++) start[e + 1] += start[e];
+    chain.set(start.subarray(0, high));
+    for (let e = 0; e < high; e++) if (used[e] && parent[e] !== NO_PARENT) children[chain[parent[e]]++] = e;
+
     this.orderDirty = false;
   }
 }
