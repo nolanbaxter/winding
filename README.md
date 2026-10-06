@@ -194,8 +194,9 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 755 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 52 checks on a real device
+npm test                   # 755 checks, Node, no browser
+npm run test:gpu           # serves the page; open test/gpu.html for 62 checks on your GPU
+npm run test:gpu:headless  # the same 62 in headless Chrome, as CI runs them
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
@@ -203,7 +204,10 @@ keys, the render graph, shadow fitting, clustering and the job system, and that 
 [API reference](docs/API.md) has an entry for every public call. They cannot touch WGSL, so the GPU
 suite boots the engine on a real device and checks that every shader compiles, every material
 pipeline permutation builds, 30 frames submit without the device complaining, and that a benchmark
-run times every CPU phase and GPU pass.
+run times every CPU phase and GPU pass. CI runs it too, on every push: in headless Chrome on a
+runner with no GPU, where SwiftShader, Chrome's software device, compiles and runs every shader.
+A pass there is a pass for the WGSL, not for every driver, so the page is still worth opening on
+real hardware.
 
 ## What it does
 

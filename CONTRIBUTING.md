@@ -25,8 +25,11 @@ npm run test:gpu
 
 Serves the repository at <http://localhost:8080>; open `/test/gpu.html` in a browser with WebGPU.
 It draws real frames and reads them back, and it is the only thing that tests WGSL and what
-reaches the screen, so CI cannot run it. Run it before any pull request that touches `src/render`
-or `src/rhi`, and say in the pull request that it passed.
+reaches the screen. CI runs it as well, in headless Chrome on a software GPU
+(`npm run test:gpu:headless` does the same on your machine), so a shader that fails to compile
+fails the pull request. A software GPU is not your GPU, though: run the page on real hardware
+before any pull request that touches `src/render` or `src/rhi`, and say in the pull request that
+it passed.
 
 ## What a change includes
 

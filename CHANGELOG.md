@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The GPU suite runs in CI.** `test/gpu.ci.js` (`npm run test:gpu:headless`) opens
+  `test/gpu.html` in headless Chrome, driven over the DevTools protocol with Node's own WebSocket,
+  so nothing is installed. CI runs it on every push, on a runner with no GPU, where SwiftShader
+  compiles and runs every shader: a WGSL mistake now fails the build instead of waiting for someone
+  to open the page.
+
+### Fixed
+
+- **A GPU check too strict about lines.** The 2D debug-circle check read the one pixel where two
+  of the circle's segments meet; which pixel a line's end covers is up to the implementation, and
+  SwiftShader chose the other one.
+
 ## [1.3.0] - 2026-10-05
 
 **Types.** Winding ships TypeScript types, written by hand from the API reference and checked

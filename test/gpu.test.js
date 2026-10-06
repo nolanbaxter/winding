@@ -2542,10 +2542,12 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     probe.destroy();
     canvas.remove();
     const show = (p) => `rgb(${p.join(',')})`;
-    // The circle's rightmost point is where two of its segments meet, and which
-    // pixel a line's end covers is the implementation's choice (SwiftShader and
-    // a real GPU differ), so the grey is looked for a pixel either side.
-    const circle = [219, 220, 221].map((x) => first(x, 170));
+    // The circle's rightmost point is where two of its segments meet, on a pixel
+    // centre, and which pixels a line's ends cover is the implementation's
+    // choice: SwiftShader leaves that one out. So the grey is looked for in the
+    // 5x5 pixels around it.
+    const circle = [];
+    for (let y = 168; y <= 172; y++) for (let x = 218; x <= 222; x++) circle.push(first(x, y));
     const read = {
       edge: first(80, 150), side: first(40, 170), inside: first(80, 170), gone: second(80, 150),
       circle: circle.find((p) => p.some((c) => c > 0)) ?? circle[1],
