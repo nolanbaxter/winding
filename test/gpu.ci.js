@@ -45,7 +45,7 @@ const chrome = spawn(chromePath, [
   '--enable-unsafe-webgpu',
   '--ignore-gpu-blocklist',
   ...(process.platform === 'linux'
-    ? ['--enable-features=Vulkan', '--use-angle=vulkan', '--disable-vulkan-surface'] : []),
+    ? ['--enable-features=Vulkan', '--use-angle=vulkan', '--disable-vulkan-surface', '--enable-unsafe-swiftshader'] : []),
   // A background tab is throttled, and this one is never in front.
   '--disable-background-timer-throttling',
   '--disable-renderer-backgrounding',
@@ -89,13 +89,18 @@ ${chromeLog}`);
     console.error(`page error: ${e.exception?.description ?? e.text}`);
   });
   await cdp.send('Runtime.enable');
-  await cdp.send('Page.navigate', { url: `http://localhost:${PORT}/test/gpu.html` });
+  // On a runner the software adapter can take a moment to appear after Chrome
+  // starts, and a page that asks too early gets none. Wait for it on a page of
+  // the same origin, so the suite starts on a GPU that is there.
+  await cdp.send('Page.navigate', { url: `http://localhost:${PORT}/serve.js` });
+  const adapter = await until(() => cdp.eval(`navigator.gpu?.requestAdapter().then((a) => a
+    && ([a.info.vendor, a.info.architecture, a.info.device, a.info.description].filter(Boolean).join(' ') || 'an unnamed adapter'))`),
+  60_000, () => `no WebGPU adapter after a minute. Chrome said:
+${chromeLog}`);
+  console.log(`adapter: ${adapter}`);
 
   const started = Date.now();
-  const adapter = await cdp.eval(`navigator.gpu?.requestAdapter().then((a) => a
-    ? [a.info.vendor, a.info.architecture, a.info.device, a.info.description].filter(Boolean).join(' ') || 'unnamed adapter'
-    : 'no adapter')`);
-  console.log(`adapter: ${adapter ?? 'navigator.gpu is undefined'}`);
+  await cdp.send('Page.navigate', { url: `http://localhost:${PORT}/test/gpu.html` });
 
   const summary = await until(async () => {
     const title = await cdp.eval('document.title');
