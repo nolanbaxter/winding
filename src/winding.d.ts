@@ -123,12 +123,21 @@ export interface DeviceLost {
   action: 'reload';
 }
 
+/** Auto exposure's settings. Ranges in stops, speeds in stops a second. */
+export interface AutoExposure {
+  min?: number;
+  max?: number;
+  brighten?: number;
+  darken?: number;
+}
+
 export interface WindingOptions {
   label?: string;
   powerPreference?: 'high-performance' | 'low-power';
   onDeviceLost?: ((detail: DeviceLost) => void) | null;
   onError?: ((error: GPUError) => void) | null;
   exposure?: number;
+  autoExposure?: AutoExposure | boolean | null;
   antialias?: boolean;
   grading?: Grading | null;
   post?: PostOptions;
@@ -237,6 +246,7 @@ export interface Post {
 
 export interface Renderer {
   exposure: number;
+  autoExposure: AutoExposure | boolean | null;
   resolution: number;
   fog: Fog | null;
   dof: DepthOfField | null;

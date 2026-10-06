@@ -142,6 +142,7 @@ export class Winding {
         ao: options.ao,
         fog: options.fog,
         dof: options.dof,
+        autoExposure: options.autoExposure,
       });
 
       const environment = new Environment(rhi, options.environment ?? {});
@@ -753,6 +754,8 @@ export class Winding {
     // and neither is the next while it builds. Asking only now missed a build
     // that finished between two frames: the one drawn without it stayed up.
     if (last.building || this._building()) return false;
+    // Still easing toward its exposure: the image changes with nothing moved.
+    if (renderer.autoExposure && renderer.post.autoExposure.adapting) return false;
     // With the size and pixel ratio, as a frame updates it: a Camera2D's view
     // changes with the ratio alone, when the page is zoomed.
     camera.update(this.gpu.width / this.gpu.height, this.gpu.width, this.gpu.height, this.gpu.pixelRatio);
@@ -816,7 +819,7 @@ export class Winding {
   _settings() {
     const r = this.renderer, p = r.post;
     return settingsSignature([
-      r.exposure, r.resolution, r.fog, r.dof, r.skybox, r.shadowDistance, r.lightDistance, r.ao, r.oit, r.debug.depthTest,
+      r.exposure, r.autoExposure, r.resolution, r.fog, r.dof, r.skybox, r.shadowDistance, r.lightDistance, r.ao, r.oit, r.debug.depthTest,
       p.threshold, p.knee, p.filterRadius, p.strength, p.levels, p.antialias, p.grading,
       // The shadow settings a frame reads; the rest are fixed at creation.
       r.shadows.lambda, r.shadows.casterExtent, r.shadows.normalBias,

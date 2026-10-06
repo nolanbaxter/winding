@@ -1620,6 +1620,82 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report;
   });
 
+  await step('auto exposure meters what is lit, eases at its speed, and leaves targets and off alone', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+      antialias: false,
+    });
+    probe.gpu.device.pushErrorScope('validation');
+    const auto = probe.renderer.post.autoExposure;
+    const cam = new Camera({ fovY: 1, near: 0.1 });
+    cam.position.set([0, 0, 2]);
+    cam.target.set([0, 0, 0]);
+    // An unlit grey square on black: black is left out, so the square is all it meters.
+    const scenes = {};
+    for (const [name, grey] of [['dim', 0.05], ['bright', 0.8]]) {
+      scenes[name] = probe.createScene();
+      scenes[name].add(await probe.load(buildFeatureGLB({ baseColorFactor: [grey, grey, grey, 1], materialExtensions: { KHR_materials_unlit: {} } })));
+    }
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
+    const shot = async (scene, options) => {
+      probe.renderFrame(scene, cam, options);
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
+      const i = ((height >> 1) * width + (width >> 1)) * 4;
+      await settle();   // for the exposure's own readback
+      return pixels[i];
+    };
+    const plainDim = await shot(scenes.dim);
+    const plainBright = await shot(scenes.bright);
+
+    probe.renderer.autoExposure = { darken: 1, brighten: 1 };
+    const autoDim = await shot(scenes.dim);
+    const dimStops = auto.stops;
+    const autoBright = await shot(scenes.bright);   // eases from the dim exposure, so: changing
+    const adaptingAfterSwitch = auto.adapting;
+    const before = auto.stops;
+    await new Promise((resolve) => setTimeout(resolve, 400));   // longer than the 0.25 s step cap
+    await shot(scenes.bright);
+    const eased = before - auto.stops;
+
+    probe.renderer.autoExposure = { darken: 1000, brighten: 1000 };
+    await shot(scenes.bright);
+    await shot(scenes.bright);
+    const settledBright = await shot(scenes.bright);
+    const brightStops = auto.stops;
+    const adaptingSettled = auto.adapting;
+
+    const target = await probe.createTarget({ size: [64, 64] });
+    probe.renderFrame(scenes.dim, cam, { target });
+    await settle();
+    const afterTarget = auto.stops;
+
+    probe.renderer.autoExposure = null;
+    const offAgain = await shot(scenes.bright);
+    const error = await probe.gpu.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const expected = (grey) => Math.log2(0.18 / grey);
+    const report = `plain ${plainDim} / ${plainBright}; auto ${autoDim} at ${dimStops.toFixed(2)} stops / ${settledBright} at ${brightStops.toFixed(2)} `
+      + `(metering ${expected(0.05).toFixed(2)} / ${expected(0.8).toFixed(2)}); eased ${eased.toFixed(3)} stops in a capped step, `
+      + `adapting ${adaptingAfterSwitch} then ${adaptingSettled}; ${afterTarget.toFixed(2)} after a target frame; ${offAgain} off again`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    // A bin is 0.38 stops wide, so the metered mean can sit up to half that off.
+    const ok = Math.abs(plainBright - plainDim) > 100 && Math.abs(settledBright - autoDim) <= 12
+      && Math.abs(dimStops - expected(0.05)) < 0.2 && Math.abs(brightStops - expected(0.8)) < 0.2
+      && Math.abs(eased - 0.25) < 0.02 && adaptingAfterSwitch && !adaptingSettled
+      && afterTarget === brightStops && offAgain === plainBright;
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
   await step('depth of field blurs by the lens: sharp at the focus distance, spread away from it', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';

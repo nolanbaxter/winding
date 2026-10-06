@@ -7,6 +7,7 @@ import { packProbes, FACE_CAMERAS, PROBE_FLOATS } from '../src/render/probes.js'
 import { distanceField, layoutText, glyphsOf, SPREAD } from '../src/render/text.js';
 import { parseCube, whiteBalanceMatrix, planckianXY, packGrading } from '../src/render/grading.js';
 import { lensCoefficients } from '../src/render/dof.js';
+import { autoExposureSettings, AUTO_EXPOSURE_DEFAULTS } from '../src/render/exposure.js';
 import { textRecord } from '../src/scene/scene.js';
 import { probeRecord } from '../src/scene/scene.js';
 import { parseHDR, halfBits, toHalfRGBA } from '../src/render/hdr.js';
@@ -1905,6 +1906,18 @@ test('half floats round to nearest, hold at the largest finite, and flush the un
   // Every exact power of two in the normal range, where log2 can slip an ulp.
   for (let e = -14; e <= 15; e++) assert.equal(halfBits(2 ** e), (e + 15) << 10, `2^${e}`);
   assert.deepEqual([...toHalfRGBA(Float32Array.of(1, 0.5, 2))], [0x3c00, 0x3800, 0x4000, 0x3c00]);
+});
+
+test('auto exposure settings: true takes the defaults, a part fills from them, and a bad one names itself', () => {
+  assert.equal(autoExposureSettings(null), null);
+  assert.equal(autoExposureSettings(undefined), null);
+  assert.deepEqual(autoExposureSettings(true), AUTO_EXPOSURE_DEFAULTS);
+  assert.deepEqual(autoExposureSettings({ darken: 2 }), { ...AUTO_EXPOSURE_DEFAULTS, darken: 2 });
+  assert.throws(() => autoExposureSettings({ min: 2, max: 1 }), /min must be at most max/);
+  assert.throws(() => autoExposureSettings({ max: Infinity }), /max must be a finite number of stops/);
+  assert.throws(() => autoExposureSettings({ brighten: 0 }), /brighten must be a positive number/);
+  assert.throws(() => autoExposureSettings({ darken: NaN }), /darken must be a positive number/);
+  assert.throws(() => autoExposureSettings('on'), /true, \{ min, max, brighten, darken \}, or null/);
 });
 
 

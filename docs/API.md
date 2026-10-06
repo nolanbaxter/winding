@@ -53,7 +53,7 @@ These hold everywhere, so one learned is one learned for good.
 
 Every call, setting and entry, A to Z by its name.
 
-**A** &nbsp; [`aabb`](#math-aabb) · [`scene.add()`](#scene-add) · [`scene.addDecal()`](#scene-adddecal) · [`scene.addEmitter()`](#scene-addemitter) · [`scene.addLight()`](#scene-addlight) · [`scene.addPath()`](#scene-addpath) · [`scene.addProbe()`](#scene-addprobe) · [`scene.addShape()`](#scene-addshape) · [`scene.addSplats()`](#scene-addsplats) · [`scene.addSprite()`](#scene-addsprite) · [`scene.addText()`](#scene-addtext) · [`scene.addTilemap()`](#scene-addtilemap) · [`scene.advance()`](#scene-advance) · [`node.alive`](#node-alive) · [`camera.ambient`](#camera2d-ambient) · [`camera.angle`](#camera2d-angle) · [`node.animation`](#node-animation) · [`node.animations`](#node-animations) · [`engine.renderer.post.antialias`](#post-antialias) · [`engine.renderer.ao`](#renderer-ao) · [`engine.debug.axes()`](#debug-axes)
+**A** &nbsp; [`aabb`](#math-aabb) · [`scene.add()`](#scene-add) · [`scene.addDecal()`](#scene-adddecal) · [`scene.addEmitter()`](#scene-addemitter) · [`scene.addLight()`](#scene-addlight) · [`scene.addPath()`](#scene-addpath) · [`scene.addProbe()`](#scene-addprobe) · [`scene.addShape()`](#scene-addshape) · [`scene.addSplats()`](#scene-addsplats) · [`scene.addSprite()`](#scene-addsprite) · [`scene.addText()`](#scene-addtext) · [`scene.addTilemap()`](#scene-addtilemap) · [`scene.advance()`](#scene-advance) · [`node.alive`](#node-alive) · [`camera.ambient`](#camera2d-ambient) · [`camera.angle`](#camera2d-angle) · [`node.animation`](#node-animation) · [`node.animations`](#node-animations) · [`engine.renderer.post.antialias`](#post-antialias) · [`engine.renderer.ao`](#renderer-ao) · [`engine.renderer.autoExposure`](#renderer-autoexposure) · [`engine.debug.axes()`](#debug-axes)
 
 **B** &nbsp; [`camera.background`](#camera2d-background) · [`new Benchmark()`](#benchmark) · [`scene.bounds()`](#scene-bounds) · [`engine.debug.box()`](#debug-box) · [`scene.burst()`](#scene-burst)
 
@@ -114,6 +114,7 @@ Creates an engine on a `<canvas>`: requests the WebGPU device, compiles the rend
 | `onDeviceLost` | `null` | `(detail) => {}` when the GPU goes away. `detail` is `{ reason, message, recoverable, action: 'reload' }`. Without it the loss is logged to the console. The engine destroys itself either way. |
 | `onError` | `null` | `(error) => {}` for uncaptured WebGPU errors. Without it they go to `console.error`. |
 | `exposure` | `1` | Starting value of [`renderer.exposure`](#renderer-exposure). |
+| `autoExposure` | `null` | Starting value of [`renderer.autoExposure`](#renderer-autoexposure). |
 | `antialias` | `true` | FXAA after the tonemap. Same as `post.antialias`; see [`post.antialias`](#post-antialias). |
 | `grading` | `null` | Starting colour grading; see [`engine.grading`](#engine-grading). |
 | `post` | `{}` | Bloom and post settings: `threshold`, `knee`, `filterRadius`, `strength`, `levels`, `antialias`, `grading`. See [Renderer settings](#renderer-settings). Values here win over the top-level `antialias` and `grading`. |
@@ -579,11 +580,39 @@ Plain fields on `engine.renderer` and `engine.renderer.post`. Set them at any ti
 <a id="renderer-exposure"></a>
 ### `engine.renderer.exposure` → `number`
 
-Default `1` (the `exposure` option). Multiplies the scene's linear colour before the tonemap. `2` is one stop brighter.
+Default `1` (the `exposure` option). Multiplies the scene's linear colour before the tonemap. `2` is one stop brighter. With [`autoExposure`](#renderer-autoexposure) on, it applies on top, as exposure compensation.
 
 ```js
 engine.renderer.exposure = 0.5;
 ```
+
+<a id="renderer-autoexposure"></a>
+### `engine.renderer.autoExposure` → `object | null`
+
+Default `null` (off; the `autoExposure` option). Exposure chosen from the image, as an eye or a camera adapts: it opens up in a dark room and stops down outside, easing from one to the other over time. Assign `true` for the defaults, or an object; `null` turns it off.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `min` | `-8` | The lowest exposure it will choose, in stops. |
+| `max` | `8` | The highest, in stops. At least `min`. |
+| `brighten` | `3` | How fast the image brightens, going somewhere darker, in stops a second. Above 0. |
+| `darken` | `1` | How fast it darkens, going somewhere brighter, in stops a second. Above 0. |
+
+It measures the scene each frame, before exposure, and puts its average brightness at middle grey, leaving out the darkest and brightest tenth and black: a lamp in shot or a dark corner does not swing it. [`exposure`](#renderer-exposure) still applies on top, so `exposure = 2` keeps everything a stop brighter than auto exposure would.
+
+Throws (on the next frame): `'autoExposure: true, { min, max, brighten, darken }, or null to turn it off, got …'`; `'autoExposure: min must be a finite number of stops, got …'`, and the same for `max`; `'autoExposure: min must be at most max, got …'`; `'autoExposure: brighten must be a positive number of stops a second, got …'`, and the same for `darken`.
+
+```js
+engine.renderer.autoExposure = true;
+engine.renderer.autoExposure = { min: -2, max: 4, darken: 2 };
+engine.renderer.exposure = 1.5;   // half a stop over what auto exposure picks
+```
+
+Notes:
+- The first frame after it is turned on takes the right exposure at once; after that it eases.
+- It adapts only on frames drawn to the canvas. A frame drawn into a [target](#engine-createtarget) uses the canvas's exposure and does not move it.
+- With [`onDemand`](#engine-ondemand), `run` keeps drawing while the exposure is still easing, even if nothing moved, and rests once it has settled.
+- It costs two small compute passes, about 0.1 ms at 1280x720 on integrated graphics (Intel Iris Xe).
 
 <a id="renderer-resolution"></a>
 ### `engine.renderer.resolution` → `number`

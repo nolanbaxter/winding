@@ -61,6 +61,7 @@ import {
 import { HierarchicalDepth } from './hzb.js';
 import { View2D } from './view2d.js';
 import { AmbientOcclusion, AMBIENT_FORMAT } from './ao.js';
+import { autoExposureSettings } from './exposure.js';
 import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 import { createBuffer } from '../rhi/buffer.js';
 
@@ -143,10 +144,10 @@ export class RenderTarget {
 export class Renderer {
   static async create(rhi, {
     maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
-    shadowDistance = null, post, gpuTiming = false, oit = false, ao = false, fog = null, dof = null,
+    shadowDistance = null, post, gpuTiming = false, oit = false, ao = false, fog = null, dof = null, autoExposure = null,
   } = {}) {
     const renderer = new Renderer(rhi, {
-      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao, fog, dof,
+      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao, fog, dof, autoExposure,
     });
     await renderer._init();
     return renderer;
@@ -154,7 +155,7 @@ export class Renderer {
 
   constructor(rhi, {
     maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = false,
-    oit = false, ao = false, fog = null, dof = null,
+    oit = false, ao = false, fog = null, dof = null, autoExposure = null,
   }) {
     this.shadowOptions = shadows ?? {};
     this._fogOption = fog;
@@ -163,6 +164,12 @@ export class Renderer {
     this.rhi = rhi;
     this.maxDraws = maxDraws;
     this.exposure = exposure;
+    /**
+     * Auto exposure (render/exposure.js), off by default: `true`, or
+     * { min, max, brighten, darken }. On top of it, `exposure` still applies,
+     * as compensation. A plain field, checked each frame like fog.
+     */
+    this.autoExposure = autoExposure;
     /**
      * The share of the canvas's width and height a 3D view is drawn at, 0.5
      * to 1, brought back up to the canvas by NVIDIA Image Scaling: see
@@ -854,6 +861,7 @@ export class Renderer {
     if (aoRadius !== null && aoRadius !== undefined && !(aoRadius > 0 && Number.isFinite(aoRadius))) {
       throw new Error(`ao: radius must be positive, or null to fit the scene, got ${aoRadius} (renderer.ao = null turns it off)`);
     }
+    const autoExposure = autoExposureSettings(this.autoExposure);
     // A canvas frame at a lower resolution is drawn whole into a view of that
     // size, as into a target, and brought up to the canvas at the end.
     const scaled = target === null && output === null ? this._scaledView() : null;
@@ -1386,7 +1394,10 @@ export class Renderer {
     if (target === null) {
       // Depth of field last in HDR, on everything drawn, before bloom and the tonemap.
       const lensed = this.dof ? this.dofPass.addPasses(graph, { sceneColor, depth, camera, width, height, dof: this.dof }) : sceneColor;
-      this.post.addPasses(graph, { sceneColor: lensed, surface, width, height, exposure: this.exposure });
+      // Only the canvas moves the exposure: a target is shown at the canvas's.
+      this.post.addPasses(graph, {
+        sceneColor: lensed, surface, width, height, exposure: this.exposure, autoExposure, adapt: output === null,
+      });
       // Debug lines are the canvas's.
       if (output === null) this.debug.addPass(graph, { surface, depth, viewProjection: camera.viewProjection });
       if (scaled !== null) {
@@ -1406,6 +1417,7 @@ export class Renderer {
     // After the last pass is recorded and before the encoder is closed: this
     // only copies queries the GPU will have written by the time it runs.
     this.gpuTiming.resolve(encoder);
+    this.post.autoExposure.resolve(encoder);
 
     const tEnd = now();
     this.timing.transforms = tAfterTransforms - tFrame;
@@ -1419,6 +1431,7 @@ export class Renderer {
     // After the submit, never before: the command buffer above writes the
     // buffer this maps, and a buffer with a map pending cannot be written.
     this.gpuTiming.readback();
+    this.post.autoExposure.readback();
     p?.mark('submit');
     p?.frameEnd();
   }

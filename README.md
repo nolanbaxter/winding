@@ -266,8 +266,9 @@ with no sorting at all. Sorting is exact for separated convex objects, OIT is ap
 and doesn't care what order anything arrives in.
 
 **Post-processing**, each with its own entry: FXAA on by default, ground-truth ambient occlusion,
-depth of field from a real lens model, fog integrated exactly along each view ray with its colour
-derived from the sky, bloom, and colour grading with white balance and `.cube` LUTs. See
+auto exposure that adapts as an eye does, depth of field from a real lens model, fog integrated
+exactly along each view ray with its colour derived from the sky, bloom, and colour grading with
+white balance and `.cube` LUTs. See
 [Renderer settings](docs/API.md#renderer-exposure) and [`engine.grading`](docs/API.md#engine-grading).
 
 **Fewer pixels, brought back up.** [`renderer.resolution`](docs/API.md#renderer-resolution) draws the

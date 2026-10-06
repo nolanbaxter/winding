@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto exposure.** [`renderer.autoExposure`](docs/API.md#renderer-autoexposure) (`true`, or
+  `{ min, max, brighten, darken }`) sets the exposure from the image: a 64-bin histogram of log
+  brightness, its darkest and brightest tenths left out, puts the scene at middle grey, and the
+  exposure eases there at so many stops a second. Two small compute passes, with no read back on the
+  way: the tonemap reads the result on the GPU. `renderer.exposure` still applies, as
+  compensation. `run` keeps drawing while it eases and rests once it settles.
+
 - **The GPU suite runs in CI.** `test/gpu.ci.js` (`npm run test:gpu:headless`) opens
   `test/gpu.html` in headless Chrome, driven over the DevTools protocol with Node's own WebSocket,
   so nothing is installed. CI runs it on every push, on a runner with no GPU, where SwiftShader
