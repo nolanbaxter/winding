@@ -306,6 +306,12 @@ export class Renderer {
      */
     this.oit = oit;
     /**
+     * Whether lights with a size cast soft shadows (PCSS): true by default. A
+     * switch for the whole renderer -- a quality setting -- that leaves every
+     * light's size as it is. Off, the soft code is compiled back out.
+     */
+    this.softShadows = true;
+    /**
      * Screen-space ambient occlusion (ao.js), off by default: `true`, or
      * { radius } in world units. Without a radius it is a thirty-second of
      * the scene's bounding radius, found each frame -- the reach of a contact
@@ -724,7 +730,7 @@ export class Renderer {
     // switched on -- or all six faces of every probe are drawn without them,
     // and stay that way until the next capture.
     const drawn = (this.decals.prepare(scene) > 0 ? FEATURE_DECALS : 0) | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0)
-      | softShadows(scene);
+      | (this.softShadows ? softShadows(scene) : 0);
     if (drawn !== 0) await this._enableFeatures(drawn);
     const set = this._probesFor(scene, environment);
     const size = environment.size;
@@ -892,7 +898,7 @@ export class Renderer {
     // without what it adds.
     const decalCount = this.decals.prepare(scene);
     const features = (probes !== null && probes.count > 0 ? FEATURE_PROBES : 0) | (decalCount > 0 ? FEATURE_DECALS : 0)
-      | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0) | softShadows(scene);
+      | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0) | (this.softShadows ? softShadows(scene) : 0);
     if (!this._variantSets.has(features)) this._enableFeatures(features).catch((error) => console.error(error));
     const variantSet = this._readySet(features);
     // AO and OIT this frame are what the set drawn from has built in: asked for

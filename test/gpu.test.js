@@ -1121,7 +1121,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report.join(', ');
   });
 
-  await step('a light with a size casts soft shadows: sharp by the caster, wider the farther it falls', async () => {
+  await step('a light with a size casts soft shadows: sharp by the caster, wider the farther it falls, and a switch turns them off', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '200px';
     canvas.style.height = '200px';
@@ -1177,12 +1177,18 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         probe.renderFrame(scenes[1], cam);
         for (let i = 0; i < 200 && !probe.renderer._variantSets.get(16)?.ready; i++) await new Promise((r) => setTimeout(r, 20));
         results[name].soft = await penumbras();
+        // Switched off for the whole renderer: plain again, each light keeping its size.
+        probe.renderer.softShadows = false;
+        results[name].off = await penumbras();
+        probe.renderer.softShadows = true;
         scenes.forEach((scene, k) => scene.remove(nodes[k]));
       }
       const error = await probe.gpu.device.popErrorScope();
-      const report = Object.entries(results).map(([name, { hard, soft }]) => `${name}: ${hard.join(' and ')} px plain, ${soft.join(' and ')} px soft (low plate, high plate)`).join('; ');
+      const report = Object.entries(results).map(([name, { hard, soft, off }]) => `${name}: ${hard.join(' and ')} px plain, ${soft.join(' and ')} px soft, `
+        + `${off.join(' and ')} px switched off (low plate, high plate)`).join('; ');
       if (error) throw new Error(`${report}; ${error.message}`);
-      for (const { hard, soft } of Object.values(results)) {
+      for (const { hard, soft, off } of Object.values(results)) {
+        if (off.some((v, k) => Math.abs(v - hard[k]) > 1)) throw new Error(report);
         // Plain: the same few-pixel edge under both. Soft: the high plate's edge far wider than the low one's.
         if (!(Math.abs(hard[0] - hard[1]) <= 2 && soft[1] > soft[0] * 2.5 && soft[1] > hard[1] + 4)) throw new Error(report);
       }

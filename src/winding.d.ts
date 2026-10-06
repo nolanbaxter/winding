@@ -254,6 +254,7 @@ export interface Renderer {
   dof: DepthOfField | null;
   ao: { radius: number | null } | null;
   oit: boolean;
+  softShadows: boolean;
   readonly shadows: ShadowMaps;
   skybox: boolean;
   shadowDistance: number | null;

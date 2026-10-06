@@ -36,6 +36,7 @@ export async function threeD(): Promise<void> {
   engine.renderer.resolution = 0.75;
   engine.renderer.autoExposure = { min: -2, darken: 2 };
   engine.renderer.autoExposure = true;
+  engine.renderer.softShadows = false;
   engine.renderer.fog = { visibility: 200, scaleHeight: 20 };
   engine.renderer.post.strength = 0.15;
   engine.grading = { whiteBalance: 5000, lut: await engine.loadLUT('film.cube') };

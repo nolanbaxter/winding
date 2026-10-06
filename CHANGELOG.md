@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per pixel, so a wide penumbra is grain, not bands. Compiled in only while a light that casts has
   a size. `setLight` changes it and `lightOf` returns it. Not cheap: a real-sized sun takes Sponza's
   forward pass from 5.7 to 8.8 ms at 720p on Iris Xe (the first cut took it to 12.3).
+  [`renderer.softShadows`](docs/API.md#renderer-softshadows) `= false` turns it off for every light at
+  once, a quality setting, leaving each light's size as it is.
 
 - **Splats change colour with the view.** A `.ply` capture's higher spherical harmonics (`f_rest_*`,
   degree 1 to 3) are kept, as half floats, and evaluated from the direction each splat is seen
