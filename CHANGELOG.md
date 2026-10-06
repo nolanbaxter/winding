@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Soft shadows.** `scene.addLight({ size })` -- a point or spot light's radius, a directional
+  light's angle across -- casts percentage-closer soft shadows (PCSS): a blocker search, then a
+  filter as wide as the penumbra the gap between caster and receiver makes, so a shadow is sharp
+  where an object meets the floor and soft far from it. 8 search taps and 12 filter taps on a Vogel disk turned
+  per pixel, so a wide penumbra is grain, not bands. Compiled in only while a light that casts has
+  a size. `setLight` changes it and `lightOf` returns it. Not cheap: a real-sized sun takes Sponza's
+  forward pass from 5.7 to 8.8 ms at 720p on Iris Xe (the first cut took it to 12.3).
+
 - **Splats change colour with the view.** A `.ply` capture's higher spherical harmonics (`f_rest_*`,
   degree 1 to 3) are kept, as half floats, and evaluated from the direction each splat is seen
   from. A compute pass works them out once a visible splat, whenever the cloud is sorted again, so

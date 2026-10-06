@@ -1121,6 +1121,78 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report.join(', ');
   });
 
+  await step('a light with a size casts soft shadows: sharp by the caster, wider the farther it falls', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '200px';
+    canvas.style.height = '200px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(200, 200);
+      const quad = await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1] }));
+      // A floor, and the same floor under two plates: one low, one high, side by
+      // side. The plates face down, so from above they are culled and show their
+      // shadows; dividing by the bare floor leaves the shadow alone.
+      const floor = (plates) => {
+        const scene = probe.createScene();
+        scene.add(quad).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(40, 40, 1);
+        if (plates) {
+          scene.add(quad).setPosition(-1.5, 0.5, 0).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(1.2, 1.2, 1);
+          scene.add(quad).setPosition(1.5, 4, 0).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(1.2, 1.2, 1);
+        }
+        return scene;
+      };
+      const scenes = [floor(false), floor(true)];
+      const cam = new Camera({ fovY: 0.8, orthographic: true });
+      cam.position.set([0, 20, 0]);
+      cam.target.set([0, 0, 0]);
+      cam.up.set([0, 0, -1]);
+      const rowOf = async (scene) => {
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        const pixels = await probe.gpu.readPixels();
+        return Array.from({ length: 200 }, (_, x) => pixels[(100 * 200 + x) * 4 + 1]);
+      };
+      /** Under each plate, the pixels across the middle row that are neither lit nor in full shadow. */
+      const penumbras = async () => {
+        const [bare, shaded] = [await rowOf(scenes[0]), await rowOf(scenes[1])];
+        const seen = shaded.map((v, x) => (bare[x] > 8 ? v / bare[x] : 1));
+        const between = (from, to) => seen.slice(from, to).filter((v) => v > 0.1 && v < 0.9).length;
+        return [between(0, 100), between(100, 200)];
+      };
+      const results = {};
+      for (const [name, light, size] of [
+        ['sun', { type: 'directional', direction: [0, -1, 0], intensity: 3 }, 0.12],
+        ['spot', { position: [0, 9, 0], direction: [0, -1, 0], intensity: 300, radius: 30, outerAngle: 1.2, innerAngle: 1.1, castShadow: true }, 1.2],
+      ]) {
+        const nodes = scenes.map((scene) => scene.addLight(light));
+        results[name] = { hard: await penumbras() };
+        scenes.forEach((scene, k) => scene.setLight(nodes[k], { size }));
+        // The soft pipelines start building on the first frame that asks for them,
+        // and frames draw the plain edge until they are ready.
+        probe.renderFrame(scenes[1], cam);
+        for (let i = 0; i < 200 && !probe.renderer._variantSets.get(16)?.ready; i++) await new Promise((r) => setTimeout(r, 20));
+        results[name].soft = await penumbras();
+        scenes.forEach((scene, k) => scene.remove(nodes[k]));
+      }
+      const error = await probe.gpu.device.popErrorScope();
+      const report = Object.entries(results).map(([name, { hard, soft }]) => `${name}: ${hard.join(' and ')} px plain, ${soft.join(' and ')} px soft (low plate, high plate)`).join('; ');
+      if (error) throw new Error(`${report}; ${error.message}`);
+      for (const { hard, soft } of Object.values(results)) {
+        // Plain: the same few-pixel edge under both. Soft: the high plate's edge far wider than the low one's.
+        if (!(Math.abs(hard[0] - hard[1]) <= 2 && soft[1] > soft[0] * 2.5 && soft[1] > hard[1] + 4)) throw new Error(report);
+      }
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a point light keeps its shadow maps while nothing near it moves, and redraws when a caster does', async () => {
     // The cached frame must be the frame a fresh draw gives, pixel for pixel;
     // a caster that moves must take its shadow with it; and something moving

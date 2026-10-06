@@ -1346,10 +1346,11 @@ Adds a point, spot or directional light.
 | `outerAngle` | `0.5` | Spot only: radians from the axis where the cone reaches zero. `0 ≤ innerAngle ≤ outerAngle ≤ π/2`; equal angles give a hard edge. |
 | `parent` | `null` | Node to attach it to. The light then follows and aims with its parent. |
 | `castShadow` | `true` for directional, `false` otherwise | Whether it casts shadows. |
+| `size` | `0` | How large the light itself is, which softens its shadows: a point or spot light's radius in world units (a bulb, 0.05; a window, 0.5); a directional light's angle across, in radians (the sun, 0.0093). `0` casts the plain edge. 0 or more. |
 
 Returns: the light's Node.
 
-Throws: `'addLight: type must be point, spot or directional, got …'`; `'addLight: color must be 3 finite numbers, 0 or more, got …'`; `'addLight: intensity must be 0 or more, got …'`; `'addLight: radius must be positive, got …'`; `'addLight: angles need 0 <= innerAngle <= outerAngle <= PI/2, got …'`.
+Throws: `'addLight: type must be point, spot or directional, got …'`; `'addLight: color must be 3 finite numbers, 0 or more, got …'`; `'addLight: intensity must be 0 or more, got …'`; `'addLight: radius must be positive, got …'`; `'addLight: size must be 0 or more, got …'`; `'addLight: angles need 0 <= innerAngle <= outerAngle <= PI/2, got …'`.
 
 ```js
 const lamp = scene.addLight({ position: [0, 3, 0], color: [1, 0.7, 0.4], intensity: 20, radius: 8 });
@@ -1361,6 +1362,7 @@ Notes:
 - A directional light with no `direction` shines along -Z. Give it one, or turn its node.
 - Passing `direction` without `type` makes a spot. For a directional light, say `type: 'directional'`.
 - Shadows are drawn from a closed mesh's back faces, which keeps its lit faces free of acne. A mesh with an open edge -- a plane, a roof of one sheet -- is drawn whole, so it casts whichever side faces the light, as a double-sided material does.
+- Soft shadows: a light with a `size` casts percentage-closer soft shadows (PCSS). Its penumbra widens with the gap between the caster and where the shadow falls, as a real light's does: sharp where a chair leg meets the floor, soft under a table top. The width is capped at 64 shadow-map texels, and the edge is a fine per-pixel grain, not bands. It costs only while some light that casts has a size: the scene's shaders are built a second way, with it compiled in, the first time one does, and frames show the plain edge until they are ready. It is not cheap: on integrated graphics (Intel Iris Xe), a sun the sun's size took Sponza's forward pass at 1280x720 from 5.7 to 8.8 ms, most of it 8 depth reads and 12 filtered taps for every pixel it lights.
 - Shadows, by type: a directional light gets up to four cascaded shadow maps that follow the camera. A spot gets one shadow view down its cone, or six (like a point light) when `outerAngle` is wider than 45 degrees. A point light gets six, one per cube face. A point or spot light draws no shadow maps while its radius sphere is off screen. Maps are redrawn only when something within the light's reach moves.
 - 2D: through a `Camera2D`, point and spot lights also light every sprite, shape, path, text or tilemap made with `lit: true`, fading to nothing at `radius` (in the view's units). Give `position: [x, y]` and, for a spot, `direction: [x, y]`. Directional lights and shadows do not apply in 2D. Where no light reaches, the camera's `ambient` lights it.
 
@@ -1376,7 +1378,7 @@ Changes what a light is, without moving it: the same names [`addLight`](#scene-a
 
 | Change | Applies to |
 |---|---|
-| `color`, `intensity`, `castShadow` | every type |
+| `color`, `intensity`, `castShadow`, `size` | every type |
 | `radius` | point, spot |
 | `innerAngle`, `outerAngle` | spot |
 
@@ -1394,7 +1396,7 @@ Notes: a light cannot change type; remove it and add another.
 
 The light's settings, or `null` if the node is not a light. A copy: change it through [`setLight`](#scene-setlight).
 
-Returns: `{ type, color, intensity, castShadow }`, plus `radius` for a point or spot, plus `innerAngle` and `outerAngle` for a spot. Position and direction are not included; they are the node's.
+Returns: `{ type, color, intensity, castShadow, size }`, plus `radius` for a point or spot, plus `innerAngle` and `outerAngle` for a spot. Position and direction are not included; they are the node's.
 
 ```js
 if (scene.lightOf(lamp).castShadow) console.log('casts');

@@ -854,13 +854,14 @@ export class ShadowMaps {
       // does not depend on it. A thousandth of the reach clips only casters
       // inside the bulb.
       const near = radius / 1024;
+      const size = scene.lightSizes.get(scene.lightEntity[i]) ?? 0;
       if (views === 1) {
         const tanHalf = Math.tan(scene._lightCone[i * 2 + 1]) * margin;
-        this._localView(count, this._eye, lights[o + 8], lights[o + 9], lights[o + 10], tanHalf, near);
+        this._localView(count, this._eye, lights[o + 8], lights[o + 9], lights[o + 10], tanHalf, near, size);
       } else {
         for (let face = 0; face < 6; face++) {
           const [x, y, z] = CUBE_AXES[face];
-          this._localView(count + face, this._eye, x, y, z, margin, near);
+          this._localView(count + face, this._eye, x, y, z, margin, near, size);
         }
       }
       lights[o + 11] = views;
@@ -917,8 +918,12 @@ export class ShadowMaps {
     return redraw;
   }
 
-  /** One perspective view from `eye` along (x, y, z), square, at `tanHalf`. */
-  _localView(index, eye, x, y, z, tanHalf, near) {
+  /**
+   * One perspective view from `eye` along (x, y, z), square, at `tanHalf`.
+   * Its params are what the shader needs beside the matrix: tanHalf, near (a
+   * stored depth is near / distance), and the light's size, for soft shadows.
+   */
+  _localView(index, eye, x, y, z, tanHalf, near, size = 0) {
     this._lightDirection[0] = x; this._lightDirection[1] = y; this._lightDirection[2] = z;
     vec3Normalize(this._lightDirection, this._lightDirection);
     this._target[0] = eye[0] + this._lightDirection[0];
@@ -930,6 +935,8 @@ export class ShadowMaps {
     mat4Multiply(this.localData, this._projection, this._lightView, at);
     this._localStagingF32.set(this.localData.subarray(at, at + 16), index * this.alignment / 4);
     this.localData[index * LOCAL_VIEW_FLOATS + 16] = tanHalf;
+    this.localData[index * LOCAL_VIEW_FLOATS + 17] = near;
+    this.localData[index * LOCAL_VIEW_FLOATS + 18] = size;
   }
 
   /**

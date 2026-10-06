@@ -258,7 +258,8 @@ shimmer as the camera turns), one view down a spot's cone, six for a point light
 shadow: a cutout casts its texture's shape, a half-transparent pane a shadow half as dark. Where one
 cascade hands over to the next there is no seam: each cascade's filter widens across its slice
 until, at the split, it already matches the next one's texels. Shadow maps are kept while nothing
-near a light moves, so a still scene redraws none.
+near a light moves, so a still scene redraws none. Give a light a `size` and its shadows are soft
+as a real light's are (PCSS): sharp where an object meets the floor, wider the farther they fall.
 
 **Two transparency paths.** Blended geometry is sorted back-to-front on the CPU and drawn after
 every opaque batch; `{ oit: true }` swaps that for weighted-blended order-independent transparency,

@@ -79,12 +79,16 @@ override PROBES : bool = true;
 // Whether decals are painted (render/decals.js). Off unless the scene has
 // some, for the same reason as PROBES.
 override DECALS : bool = true;
+/** Soft shadows (PCSS), for lights given a size: compiled in only when one is. */
+override SOFT_SHADOWS : bool = false;
 
 /**
  * The ambient term of the fragment shade() last ran, for fsAO to write out
  * beside the colour. Private to the invocation, so it is one fragment's.
  */
 var<private> ambientOut : vec3<f32>;
+/** This pixel's turn of the soft-shadow taps, 0 to 1: set by shade(), read by softTap(). */
+var<private> softTurn : f32;
 
 /** The smallest normal f32: below it a squared length has no direction left. */
 const F32_MIN_NORMAL : f32 = 1.17549435e-38;
@@ -108,7 +112,7 @@ struct Probe {
 /** A directional light. Packed by Scene.refreshLights. */
 struct Directional {
   direction : vec4<f32>,   // the way its light travels; w = shadow slot + 1, 0 for none
-  color     : vec4<f32>,   // colour times intensity
+  color     : vec4<f32>,   // colour times intensity; w = its size, an angle across, for soft shadows
 };
 
 struct Light {
@@ -118,7 +122,7 @@ struct Light {
   coneFalloff    : vec4<f32>,   // x scale, y offset, z type (0 point, 1 spot), w = first shadow layer + 1
 };
 
-/** A point or spot light's shadow view. params.x is tan(half the field of view). */
+/** A point or spot light's shadow view. params: tan(half the field of view), near, the light's size. */
 struct LocalView {
   viewProjection : mat4x4<f32>,
   params         : vec4<f32>,
@@ -873,6 +877,108 @@ fn tapSpacing(cascade : i32, viewDepth : f32) -> f32 {
   return mix(1.0, ratio, along);
 }
 
+// Soft shadows: percentage-closer soft shadows (Fernando, 2005). A light
+// with a size casts a penumbra that widens with the gap between the shadow's
+// caster and where it falls: sharp where an object meets the floor, soft far
+// from it. So first a blocker search -- the depths in front of this point,
+// averaged -- then a filter as wide as the penumbra that gap makes. Taps on a
+// Vogel disk turned a different way each pixel, so a wide penumbra is grain
+// rather than bands; a radius capped at SOFT_MOST texels, past which the grain
+// is coarse. A directional light's texels are small -- a cascade spends its
+// map on the slice in view -- so the cap is wide.
+//
+// It is paid at every pixel a light reaches, so the taps are few: on Sponza at
+// 720p (Iris Xe) a sun the sun's size took the forward pass from 5.6 to 12.3 ms
+// with sixteen of each and a search out to the cascade's near plane; 8 search
+// taps, an umbra that skips the filter and 12 filter taps bring it to
+// 8.8. Compiled in but unused, it costs 0.3. Searching less widely saved
+// as much again, and cut wide penumbras short: the search has to reach as far
+// as the widest penumbra kept.
+
+const SOFT_TAPS = 12u;
+/** The blocker search wants an average depth, not a smooth edge: fewer taps. */
+const SEARCH_TAPS = 8u;
+const SOFT_MOST = 64.0;
+
+/** Tap i of n, spread evenly over the unit disk, turned by this pixel's softTurn. */
+fn softTapOf(i : u32, n : u32) -> vec2<f32> {
+  let r = sqrt((f32(i) + 0.5) / f32(n));
+  let a = f32(i) * 2.39996323 + softTurn * 6.28318531;   // the golden angle
+  return r * vec2<f32>(cos(a), sin(a));
+}
+
+fn softTap(i : u32) -> vec2<f32> { return softTapOf(i, SOFT_TAPS); }
+fn searchTap(i : u32) -> vec2<f32> { return softTapOf(i, SEARCH_TAPS); }
+
+/**
+ * A directional light's soft shadow in one cascade. Its map is orthographic,
+ * so depth is linear: depthPerWorld turns a depth difference into metres,
+ * and the penumbra is that gap times the light's angle across.
+ */
+fn softDirectional(layer : i32, uv : vec2<f32>, depth : f32, texelWorld : f32, angle : f32) -> f32 {
+  let size = frame.shadowParams.y;
+  let m = cascadeViews[layer];
+  let depthPerWorld = length(vec3<f32>(m[0].z, m[1].z, m[2].z));
+  let last = vec2<i32>(i32(size) - 1);
+  // Search as far as a caster at the light's near plane could throw its penumbra.
+  // Out as far as the widest penumbra kept: a narrower search would leave the
+  // outer part of a wide penumbra with no blocker, lit, and cut the edge short.
+  let search = clamp((1.0 - depth) / depthPerWorld * angle / texelWorld, 1.0, SOFT_MOST);
+  var blockers = 0.0;
+  var found = 0.0;
+  for (var i = 0u; i < SEARCH_TAPS; i++) {
+    let at = clamp(vec2<i32>((uv + searchTap(i) * search / size) * size), vec2<i32>(0), last);
+    let d = textureLoad(shadowMap, at, layer, 0);
+    // Reverse-Z: nearer the light is greater.
+    if (d > depth) { blockers += d; found += 1.0; }
+  }
+  // Nothing in front: lit. Everything: in the umbra, with no edge to filter.
+  if (found == 0.0) { return 1.0; }
+  if (found == f32(SEARCH_TAPS)) { return 0.0; }
+  let gap = (blockers / found - depth) / depthPerWorld;
+  let penumbra = clamp(gap * angle / texelWorld, 1.0, SOFT_MOST);
+  var total = 0.0;
+  for (var i = 0u; i < SOFT_TAPS; i++) {
+    total += textureSampleCompareLevel(shadowMap, shadowSampler, uv + softTap(i) * penumbra / size, layer, depth);
+  }
+  return total / f32(SOFT_TAPS);
+}
+
+/**
+ * A point or spot light's soft shadow in one of its views. Its map is a
+ * reverse-Z perspective with no far plane, so a stored depth is near over the
+ * distance; the penumbra is the light's size times (receiver - blocker) /
+ * blocker, by similar triangles, measured in texels where it falls.
+ */
+fn softLocal(layer : i32, uv : vec2<f32>, depth : f32) -> f32 {
+  let view = localViews[layer];
+  let near = view.params.y;
+  let light = view.params.z;
+  let size = frame.shadowParams.w;
+  let last = vec2<i32>(i32(size) - 1);
+  let receiver = near / depth;
+  let texelWorld = 2.0 * receiver * view.params.x / size;
+  // The light as large as it looks from here: as far as a blocker's penumbra reaches, near enough.
+  let search = clamp(light / texelWorld, 1.0, SOFT_MOST);
+  var blockers = 0.0;
+  var found = 0.0;
+  for (var i = 0u; i < SEARCH_TAPS; i++) {
+    let at = clamp(vec2<i32>((uv + searchTap(i) * search / size) * size), vec2<i32>(0), last);
+    let d = textureLoad(localShadowMap, at, layer, 0);
+    if (d > depth) { blockers += d; found += 1.0; }
+  }
+  // Nothing in front: lit. Everything: in the umbra, with no edge to filter.
+  if (found == 0.0) { return 1.0; }
+  if (found == f32(SEARCH_TAPS)) { return 0.0; }
+  let blocker = near / (blockers / found);
+  let penumbra = clamp(light * (receiver - blocker) / blocker / texelWorld, 1.0, SOFT_MOST);
+  var total = 0.0;
+  for (var i = 0u; i < SOFT_TAPS; i++) {
+    total += textureSampleCompareLevel(localShadowMap, shadowSampler, uv + softTap(i) * penumbra / size, layer, depth);
+  }
+  return total / f32(SOFT_TAPS);
+}
+
 /**
  * How much of a casting directional light reaches this point, through its
  * cascades. 1 is fully lit.
@@ -887,7 +993,7 @@ fn tapSpacing(cascade : i32, viewDepth : f32) -> f32 {
  * Surfaces facing away from the light are skipped entirely -- they are already
  * dark from N.L, and their shadow lookups are the noisiest ones there are.
  */
-fn directionalVisibility(slot : i32, worldPosition : vec3<f32>, normal : vec3<f32>, NoL : f32, viewDepth : f32) -> f32 {
+fn directionalVisibility(slot : i32, worldPosition : vec3<f32>, normal : vec3<f32>, NoL : f32, viewDepth : f32, angle : f32) -> f32 {
   if (NoL <= 0.0) { return 1.0; }
 
   let cascade = selectCascade(viewDepth);
@@ -913,6 +1019,8 @@ fn directionalVisibility(slot : i32, worldPosition : vec3<f32>, normal : vec3<f3
   if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z <= 0.0) {
     return 1.0;
   }
+
+  if (SOFT_SHADOWS && angle > 0.0) { return softDirectional(layer, uv, ndc.z, cascadeTexelSize(cascade), angle); }
 
   // 3x3 PCF. Nine taps of hardware-filtered comparisons, which is a soft edge
   // about three texels wide -- enough to hide the staircase without the cost
@@ -974,6 +1082,7 @@ fn localVisibility(light : Light, worldPosition : vec3<f32>, normal : vec3<f32>,
   let ndc = clip.xyz / clip.w;
   let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
   if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return 1.0; }
+  if (SOFT_SHADOWS && view.params.z > 0.0) { return softLocal(layer, uv, ndc.z); }
 
   let texel = 1.0 / size;
   var total = 0.0;
@@ -1079,6 +1188,9 @@ fn vsSkinned(
  * dimmed with the rest.
  */
 fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
+  // Interleaved gradient noise (Jimenez, 2014): each pixel turns its soft-shadow
+  // taps a different way, so a wide penumbra is a fine grain, not bands.
+  if (SOFT_SHADOWS) { softTurn = fract(52.9829189 * fract(dot(v.clip.xy, vec2<f32>(0.06711056, 0.00583715)))); }
   let colour = shadeSurface(v, frontFacing);
   if (frame.fog.x <= 0.0) { return colour; }
   let toSurface = v.world - frame.cameraPosition.xyz;
@@ -1318,13 +1430,13 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
       // as its far side would be.
       if (EXTENSIONS && s.transmission > 0.0) {
         var through = 1.0;
-        if (slot >= 0) { through = directionalVisibility(slot, v.world, -n, -dNoL, viewDepth); }
+        if (slot >= 0) { through = directionalVisibility(slot, v.world, -n, -dNoL, viewDepth, dl.color.w); }
         direct = direct + surfaceTransmission(s, dL, dl.color.rgb * through);
       }
       continue;
     }
     var shadow = 1.0;
-    if (slot >= 0) { shadow = directionalVisibility(slot, v.world, n, dNoL, viewDepth); }
+    if (slot >= 0) { shadow = directionalVisibility(slot, v.world, n, dNoL, viewDepth, dl.color.w); }
     if (shadow <= 0.0) { continue; }
     direct = direct + surfaceLight(s, dL, dNoL, dl.color.rgb * shadow);
   }

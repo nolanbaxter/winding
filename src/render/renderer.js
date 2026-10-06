@@ -100,9 +100,19 @@ export const FEATURE_DECALS = 2;
 export const FEATURE_AO = 4;
 /** Order-independent transparency: blended surfaces draw into two targets and a resolve. */
 export const FEATURE_OIT = 8;
+/** Soft shadows (PCSS): compiled in while a light that casts has a size. */
+export const FEATURE_SOFT = 16;
 
 function featureConstants(features) {
-  return { PROBES: features & FEATURE_PROBES ? 1 : 0, DECALS: features & FEATURE_DECALS ? 1 : 0 };
+  return {
+    PROBES: features & FEATURE_PROBES ? 1 : 0, DECALS: features & FEATURE_DECALS ? 1 : 0, SOFT_SHADOWS: features & FEATURE_SOFT ? 1 : 0,
+  };
+}
+
+/** Whether a light that casts shadows has a size, so its shadows are soft. */
+function softShadows(scene) {
+  for (const entity of scene.lightSizes.keys()) if (scene.shadowCasters.has(entity)) return FEATURE_SOFT;
+  return 0;
 }
 
 /**
@@ -713,7 +723,8 @@ export class Renderer {
     // And what the captures themselves draw with -- decals, and AO or OIT
     // switched on -- or all six faces of every probe are drawn without them,
     // and stay that way until the next capture.
-    const drawn = (this.decals.prepare(scene) > 0 ? FEATURE_DECALS : 0) | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
+    const drawn = (this.decals.prepare(scene) > 0 ? FEATURE_DECALS : 0) | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0)
+      | softShadows(scene);
     if (drawn !== 0) await this._enableFeatures(drawn);
     const set = this._probesFor(scene, environment);
     const size = environment.size;
@@ -881,7 +892,7 @@ export class Renderer {
     // without what it adds.
     const decalCount = this.decals.prepare(scene);
     const features = (probes !== null && probes.count > 0 ? FEATURE_PROBES : 0) | (decalCount > 0 ? FEATURE_DECALS : 0)
-      | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
+      | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0) | softShadows(scene);
     if (!this._variantSets.has(features)) this._enableFeatures(features).catch((error) => console.error(error));
     const variantSet = this._readySet(features);
     // AO and OIT this frame are what the set drawn from has built in: asked for

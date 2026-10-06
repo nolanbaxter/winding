@@ -350,6 +350,8 @@ export interface LightOptions extends Placed {
   innerAngle?: number;
   outerAngle?: number;
   castShadow?: boolean;
+  /** The light's own size, for soft shadows: a radius for a point or spot, an angle across for a directional. */
+  size?: number;
 }
 
 export interface Light {
@@ -357,6 +359,7 @@ export interface Light {
   color: number[];
   intensity: number;
   castShadow: boolean;
+  size: number;
   radius?: number;
   innerAngle?: number;
   outerAngle?: number;
@@ -506,7 +509,7 @@ export class Scene {
   pick(camera: Camera2D, x: number, y: number, width: number, height: number): Hit2D | null;
 
   addLight(options?: LightOptions): Node;
-  setLight(node: Node, changes: Pick<LightOptions, 'color' | 'intensity' | 'castShadow' | 'radius' | 'innerAngle' | 'outerAngle'>): void;
+  setLight(node: Node, changes: Pick<LightOptions, 'color' | 'intensity' | 'castShadow' | 'size' | 'radius' | 'innerAngle' | 'outerAngle'>): void;
   lightOf(node: Node): Light | null;
 
   addEmitter(options: EmitterOptions): Node;
