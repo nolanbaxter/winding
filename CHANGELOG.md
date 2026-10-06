@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Temporal antialiasing.** [`renderer.taa`](docs/API.md#renderer-taa) (and the `taa` option)
+  moves the camera a fraction of a pixel each frame, by a 16-point Halton sequence, and blends each
+  frame with the history of the ones before it: reprojected from the depth buffer and the camera,
+  fetched by Catmull-Rom, clipped to the neighbourhood's colours in YCoCg, blended a tenth new and
+  weighted by luma, trusting the history less as it moves. It takes FXAA's place on canvas frames.
+  On Sponza at 720p against 16x supersampling, edge error 9.3 -> 6.2 still and 9.8 -> 9.3 panning,
+  for about 1.2 ms a frame on Iris Xe -- with material textures half a mip sharper, which three
+  other ways of keeping surfaces crisp were measured against: a full mip sharper (+3.3 ms), AMD's
+  CAS sharpening after it (cheaper, and worse: it sharpened the noise), and a running average for
+  a still view (further from supersampling). Soft shadows' grain turns each frame and averages
+  away. A still view draws 24 more frames to settle, then `run` rests.
+
 - **Soft shadows.** `scene.addLight({ size })` -- a point or spot light's radius, a directional
   light's angle across -- casts percentage-closer soft shadows (PCSS): a blocker search, then a
   filter as wide as the penumbra the gap between caster and receiver makes, so a shadow is sharp

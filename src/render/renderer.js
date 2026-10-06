@@ -19,7 +19,7 @@ const CAPTURE = Object.freeze({ view: 'capture' });
 export const OIT_ACCUM_FORMAT = 'rgba16float';
 export const OIT_REVEAL_FORMAT = 'r16float';
 
-import { mat4NormalMatrix } from '../core/math/mat4.js';
+import { mat4NormalMatrix, mat4Multiply, mat4Invert } from '../core/math/mat4.js';
 import { vec3Create, vec3Sub, vec3Normalize } from '../core/math/vec3.js';
 import { frustumCreate, frustumFromViewProjection, frustumTestAABB } from '../core/math/frustum.js';
 import { grownCapacity } from '../core/grow.js';
@@ -62,6 +62,7 @@ import { HierarchicalDepth } from './hzb.js';
 import { View2D } from './view2d.js';
 import { AmbientOcclusion, AMBIENT_FORMAT } from './ao.js';
 import { autoExposureSettings } from './exposure.js';
+import { TemporalAA, jitterOf, TAA_MIP_BIAS } from './taa.js';
 import { VERTEX_BUFFER_LAYOUT as VERTEX_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 import { createBuffer } from '../rhi/buffer.js';
 
@@ -154,10 +155,10 @@ export class RenderTarget {
 export class Renderer {
   static async create(rhi, {
     maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
-    shadowDistance = null, post, gpuTiming = false, oit = false, ao = false, fog = null, dof = null, autoExposure = null,
+    shadowDistance = null, post, gpuTiming = false, oit = false, ao = false, fog = null, dof = null, autoExposure = null, taa = false,
   } = {}) {
     const renderer = new Renderer(rhi, {
-      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao, fog, dof, autoExposure,
+      maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao, fog, dof, autoExposure, taa,
     });
     await renderer._init();
     return renderer;
@@ -165,7 +166,7 @@ export class Renderer {
 
   constructor(rhi, {
     maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = false,
-    oit = false, ao = false, fog = null, dof = null, autoExposure = null,
+    oit = false, ao = false, fog = null, dof = null, autoExposure = null, taa = false,
   }) {
     this.shadowOptions = shadows ?? {};
     this._fogOption = fog;
@@ -311,6 +312,20 @@ export class Renderer {
      * light's size as it is. Off, the soft code is compiled back out.
      */
     this.softShadows = true;
+    /**
+     * Temporal antialiasing (render/taa.js), off by default. On, it takes the
+     * place of FXAA on frames drawn to the canvas; its pass builds the first
+     * time it is asked for, and frames draw with FXAA until it is ready.
+     */
+    this.taa = taa;
+    this.taaPass = null;
+    /** Canvas frames TAA has drawn: the jitter's place in its cycle. */
+    this._taaFrame = 0;
+    /** Whether the last canvas frame was drawn with TAA: one that was not leaves no history. */
+    this._taaLast = false;
+    this._taaPrevious = new Float32Array(16);
+    this._taaInverse = new Float32Array(16);
+    this._taaSaved = { projection: new Float32Array(16), viewProjection: new Float32Array(16), inverseProjection: new Float32Array(16) };
     /**
      * Screen-space ambient occlusion (ao.js), off by default: `true`, or
      * { radius } in world units. Without a radius it is a thirty-second of
@@ -926,6 +941,11 @@ export class Renderer {
     // A scaled frame is shown at the canvas's shape, which rounding the
     // smaller size could miss by a fraction of a pixel.
     camera.update(scaled !== null ? rhi.width / rhi.height : width / height);
+    // TAA on a canvas frame: the projection moved a fraction of a pixel, for
+    // everything this frame draws, and put back at the end of it.
+    if (this.taa && this.taaPass === null) this._taaReady().catch((error) => console.error(error));
+    const jittered = this.taa && this.taaPass !== null && target === null && output === null;
+    if (jittered) this._jitterCamera(camera, width, height);
     frustumFromViewProjection(this.frustum, camera.viewProjection);
     p?.mark('camera');
 
@@ -1187,6 +1207,10 @@ export class Renderer {
     this.frameData[51] = scene.directionalCount;   // a value; see the shader
     this.frameData.set(this._fogData, 52);
     this.frameData[64] = probes?.count ?? 0;
+    // Which frame of TAA's cycle this is, so per-pixel noise turns each frame
+    // and averages out; 0, holding it still, without TAA.
+    this.frameData[65] = jittered ? (this._taaFrame % 64) + 1 : 0;
+    this.frameData[66] = jittered ? TAA_MIP_BIAS : 0;
     rhi.queue.writeBuffer(this.frameBuffer, 0, this.frameData);
     p?.mark('clusters + frame uniform');
 
@@ -1409,11 +1433,21 @@ export class Renderer {
     }
 
     if (target === null) {
-      // Depth of field last in HDR, on everything drawn, before bloom and the tonemap.
-      const lensed = this.dof ? this.dofPass.addPasses(graph, { sceneColor, depth, camera, width, height, dof: this.dof }) : sceneColor;
+      // TAA on everything drawn, then depth of field, last in HDR, before bloom and the tonemap.
+      let resolved = sceneColor;
+      if (jittered) {
+        mat4Invert(this._taaInverse, camera.viewProjection);
+        resolved = this.taaPass.addPass(graph, {
+          color: sceneColor, depth, width, height, inverseViewProjection: this._taaInverse,
+          viewProjection: this._taaSaved.viewProjection, previousViewProjection: this._taaPrevious, reset: !this._taaLast,
+        });
+      }
+      const lensed = this.dof ? this.dofPass.addPasses(graph, { sceneColor: resolved, depth, camera, width, height, dof: this.dof }) : resolved;
       // Only the canvas moves the exposure: a target is shown at the canvas's.
       this.post.addPasses(graph, {
         sceneColor: lensed, surface, width, height, exposure: this.exposure, autoExposure, adapt: output === null,
+        // TAA has antialiased it: FXAA would only soften it again.
+        fxaa: !jittered,
       });
       // Debug lines are the canvas's.
       if (output === null) this.debug.addPass(graph, { surface, depth, viewProjection: camera.viewProjection });
@@ -1449,8 +1483,53 @@ export class Renderer {
     // buffer this maps, and a buffer with a map pending cannot be written.
     this.gpuTiming.readback();
     this.post.autoExposure.readback();
+    if (target === null && output === null) {
+      if (jittered) {
+        this._unjitterCamera(camera);
+        this._taaFrame++;
+      }
+      this._taaLast = jittered;
+    }
     p?.mark('submit');
     p?.frameEnd();
+  }
+
+  /** Builds TAA's pass the first time it is asked for; frames use FXAA until it is ready. */
+  _taaReady() {
+    this._taaBuilding ??= TemporalAA.create(this.rhi, this.pipelines).then((pass) => { this.taaPass = pass; });
+    return this._taaBuilding;
+  }
+
+  /**
+   * Moves the camera's projection by this frame's jitter, a fraction of a
+   * pixel, in clip space: x += dx w and y += dy w, so the same for a
+   * perspective camera and an orthographic one. Keeps the unjittered
+   * view-projection, for the next frame's history.
+   */
+  _jitterCamera(camera, width, height) {
+    const saved = this._taaSaved;
+    saved.projection.set(camera.projection);
+    saved.viewProjection.set(camera.viewProjection);
+    saved.inverseProjection.set(camera.inverseProjection);
+    const [jx, jy] = jitterOf(this._taaFrame);
+    const dx = 2 * jx / width;
+    const dy = -2 * jy / height;   // pixels count down, clip space up
+    const m = camera.projection;
+    for (let c = 0; c < 4; c++) {
+      m[c * 4] += dx * m[c * 4 + 3];
+      m[c * 4 + 1] += dy * m[c * 4 + 3];
+    }
+    mat4Multiply(camera.viewProjection, m, camera.view);
+    mat4Invert(camera.inverseProjection, m);
+  }
+
+  /** The camera's own matrices back, and the view-projection kept as the next frame's previous one. */
+  _unjitterCamera(camera) {
+    const saved = this._taaSaved;
+    camera.projection.set(saved.projection);
+    camera.viewProjection.set(saved.viewProjection);
+    camera.inverseProjection.set(saved.inverseProjection);
+    this._taaPrevious.set(saved.viewProjection);
   }
 
   /**

@@ -148,6 +148,7 @@ export interface WindingOptions {
   lightDistance?: number | null;
   ao?: boolean | { radius: number | null };
   oit?: boolean;
+  taa?: boolean;
   fog?: Fog | null;
   dof?: DepthOfField | null;
   /** Settings for the default environment, not an `Environment`. */
@@ -255,6 +256,7 @@ export interface Renderer {
   ao: { radius: number | null } | null;
   oit: boolean;
   softShadows: boolean;
+  taa: boolean;
   readonly shadows: ShadowMaps;
   skybox: boolean;
   shadowDistance: number | null;

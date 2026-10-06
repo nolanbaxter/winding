@@ -495,7 +495,7 @@ export class PostStack {
    * `sceneColor` is the HDR target the forward pass wrote; `surface` is the
    * swap chain. Everything between is a graph transient.
    */
-  addPasses(graph, { sceneColor, surface, width, height, exposure, autoExposure = null, adapt = true }) {
+  addPasses(graph, { sceneColor, surface, width, height, exposure, autoExposure = null, adapt = true, fxaa = true }) {
     this._frame++;
     this.rhi.queue.writeBuffer(this.gradingBuffer, 0, packGrading(this._gradingData, this.grading));
     this._evictBindGroups();
@@ -585,8 +585,8 @@ export class PostStack {
 
     const black = { r: 0, g: 0, b: 0, a: 1 };
     // Antialiased once FXAA's pipelines exist; asked for before then, they start building.
-    if (this.antialias && this.fxaaPipeline === undefined) this._fxaaReady().catch((error) => console.error(error));
-    this._antialiasing = this.antialias && this.fxaaPipeline !== undefined;
+    if (fxaa && this.antialias && this.fxaaPipeline === undefined) this._fxaaReady().catch((error) => console.error(error));
+    this._antialiasing = fxaa && this.antialias && this.fxaaPipeline !== undefined;
     const ldr = this._antialiasing
       ? graph.createTexture('ldr', {
         width, height, format: LDR_FORMAT,

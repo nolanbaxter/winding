@@ -44,7 +44,9 @@ struct Frame {
   fog            : vec4<f32>,               // 208
   fogAlbedo      : vec4<f32>,               // 224
   fogLight       : vec4<f32>,               // 240  the directional lights' inscattered radiance
-  probeInfo      : vec4<f32>,               // 256  x = reflection probes to consult
+  // x = reflection probes to consult; y = TAA's frame, 0 without it; z = the
+  // material textures' mip bias: sharper under TAA, whose blend softens them.
+  probeInfo      : vec4<f32>,               // 256
   // Written once, not per frame: the sheen albedo table (render/sheen.js),
   // four entries a vec4 because a uniform array's stride is 16.
   sheenAlbedo    : array<vec4<f32>, ${SHEEN_ALBEDO.length / 4}>,   // 272
@@ -347,7 +349,7 @@ fn sampleExtension(kind : u32, uv0 : vec2<f32>, uv1 : vec2<f32>) -> vec4<f32> {
   let p = vec3<f32>(select(uv0, uv1, material.uvTransforms[row].w > 0.5), 1.0);
   let uv = vec2<f32>(dot(material.uvTransforms[row].xyz, p), dot(material.uvTransforms[row + 1u].xyz, p));
   switch slot {
-${Array.from({ length: extensionSlots }, (_, i) => `    case ${i}: { return textureSample(extensionMap${i}, surfSampler, uv); }`).join('\n')}
+${Array.from({ length: extensionSlots }, (_, i) => `    case ${i}: { return textureSampleBias(extensionMap${i}, surfSampler, uv, frame.probeInfo.z); }`).join('\n')}
     default: { return vec4<f32>(1.0); }
   }
 }
@@ -1190,7 +1192,10 @@ fn vsSkinned(
 fn shade(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // Interleaved gradient noise (Jimenez, 2014): each pixel turns its soft-shadow
   // taps a different way, so a wide penumbra is a fine grain, not bands.
-  if (SOFT_SHADOWS) { softTurn = fract(52.9829189 * fract(dot(v.clip.xy, vec2<f32>(0.06711056, 0.00583715)))); }
+  // With TAA, turned a little more each frame (the golden ratio's step), so it averages away.
+  if (SOFT_SHADOWS) {
+    softTurn = fract(52.9829189 * fract(dot(v.clip.xy, vec2<f32>(0.06711056, 0.00583715))) + 0.61803399 * frame.probeInfo.y);
+  }
   let colour = shadeSurface(v, frontFacing);
   if (frame.fog.x <= 0.0) { return colour; }
   let toSurface = v.world - frame.cameraPosition.xyz;
@@ -1215,7 +1220,7 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
 
   // COLOR_0 multiplies base colour, per the spec. An asset without it carries
   // opaque white, so this costs those nothing and needs no variant.
-  let sampled = textureSample(baseColorMap, surfSampler, uvBaseColor)
+  let sampled = textureSampleBias(baseColorMap, surfSampler, uvBaseColor, frame.probeInfo.z)
     * material.baseColor * v.color;
 
   if (USE_ALPHA_MASK) {
@@ -1231,13 +1236,13 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
 
   // glTF puts roughness in G and metallic in B. Occlusion is its own texture,
   // even though exporters usually pack it into R of this one.
-  let mr = textureSample(mrMap, surfSampler, uvMetallicRoughness);
+  let mr = textureSampleBias(mrMap, surfSampler, uvMetallicRoughness, frame.probeInfo.z);
   let roughness = clamp(mr.g * material.roughness, 0.045, 1.0);
   let metallic  = clamp(mr.b * material.emissive.w, 0.0, 1.0);
 
   // The spec's blend: strength 0 disables the map entirely rather than
   // multiplying ambient by zero.
-  let occlusionSample = textureSample(occlusionMap, surfSampler, uvOcclusion).r;
+  let occlusionSample = textureSampleBias(occlusionMap, surfSampler, uvOcclusion, frame.probeInfo.z).r;
   let occlusion = 1.0 + material.occlusionStrength * (occlusionSample - 1.0);
 
   // Tangent-space normal into world space.
@@ -1253,7 +1258,7 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // The bitangent flips with the normal to keep the basis right-handed. The
   // tangent does not: it follows the UV's u axis, which does not reverse.
   let facing = select(-1.0, 1.0, frontFacing);
-  var tangentNormal = (textureSample(normalMap, surfSampler, uvNormal).xyz * 2.0 - 1.0)
+  var tangentNormal = (textureSampleBias(normalMap, surfSampler, uvNormal, frame.probeInfo.z).xyz * 2.0 - 1.0)
                     * vec3<f32>(material.normalScale, material.normalScale, 1.0);
   tangentNormal = vec3<f32>(untransformNormal(4u, tangentNormal.xy), tangentNormal.z);
   let geometric = normalize(v.normal) * facing;
@@ -1504,7 +1509,7 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   ambientOut = min(ambient, vec3<f32>(65504.0));
 
   // A coat dims what shines through it as it dims everything else beneath.
-  var emissive = textureSample(emissiveMap, surfSampler, uvEmissive).rgb * material.emissive.rgb;
+  var emissive = textureSampleBias(emissiveMap, surfSampler, uvEmissive, frame.probeInfo.z).rgb * material.emissive.rgb;
   if (EXTENSIONS) { emissive = emissive * (1.0 - s.coat * s.coatFresnel); }
 
   // Linear HDR, deliberately not clamped to 1. Bloom needs to know a highlight

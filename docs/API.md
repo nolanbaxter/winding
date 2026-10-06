@@ -89,7 +89,7 @@ Every call, setting and entry, A to Z by its name.
 
 **S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
 
-**T** &nbsp; [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
+**T** &nbsp; [`engine.renderer.taa`](#renderer-taa) · [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
 
 **U** &nbsp; [`engine.unload()`](#engine-unload) · [`scene.update()`](#scene-update) · [`camera.update()`](#camera2d-update) · [`camera.update()`](#camera-update) · [`orbit.update()`](#orbitcontroller-update) · [`overlay.update()`](#statsoverlay-update)
 
@@ -123,6 +123,7 @@ Creates an engine on a `<canvas>`: requests the WebGPU device, compiles the rend
 | `lightDistance` | `null` | Starting value of [`renderer.lightDistance`](#renderer-lightdistance). |
 | `ao` | `false` | Ambient occlusion: `true`, or `{ radius }` in world units. Starting value of [`renderer.ao`](#renderer-ao). |
 | `oit` | `false` | Starting value of [`renderer.oit`](#renderer-oit). |
+| `taa` | `false` | Starting value of [`renderer.taa`](#renderer-taa). |
 | `fog` | `null` | Starting value of [`renderer.fog`](#renderer-fog). |
 | `dof` | `null` | Starting value of [`renderer.dof`](#renderer-dof). |
 | `environment` | `{}` | Settings for the default [`Environment`](#environment) (`size`, `irradianceSize`, `prefilterMips`, `sky`, `map`, `label`). Settings only, not an `Environment` instance. |
@@ -693,6 +694,31 @@ engine.renderer.ao = null;
 Throws (on the next frame): `'ao: radius must be positive, or null to fit the scene, …'`.
 
 Notes: the first time it is turned on, its pipelines build in the background. Frames draw without it until they are ready, a fraction of a second. After that, switching costs nothing. The same holds for [`oit`](#renderer-oit) and [`post.antialias`](#post-antialias).
+
+<a id="renderer-taa"></a>
+### `engine.renderer.taa` → `boolean`
+
+Default `false` (the `taa` option). Temporal antialiasing, in place of FXAA on frames drawn to the canvas. The camera is moved a fraction of a pixel each frame, a different fraction each time, and each frame is blended with the ones before it, so over sixteen frames every pixel has been sampled at sixteen points inside it: close to supersampling, spread over time.
+
+```js
+engine.renderer.taa = true;
+```
+
+What it does better than FXAA:
+- Edges come out much nearer a supersampled frame: on Sponza at 1280x720, the error at edges against 16x supersampling fell from 9.3 to 6.2 with the camera still, and from 9.8 to 9.3 panning.
+- Thin and shiny things stop crawling as the camera moves, which FXAA cannot fix: it sees one frame at a time.
+- The grain of soft shadows ([`size`](#scene-addlight)) is turned a little each frame and averages away.
+
+What it costs:
+- About 1.2 ms a frame more than FXAA at 1280x720 on integrated graphics (Intel Iris Xe): 0.6 for its own pass, the rest for material textures read half a mip sharper, which keeps surfaces from going soft.
+- Surfaces inside an object are still a little softer than with FXAA (2.7 against 2.2 in that measure).
+- Two images of history, 8 bytes a pixel each: about 15 MB at 1280x720.
+
+Notes:
+- Where a surface was last frame is worked out from the depth buffer and the camera, so it is exact for everything that the camera's own movement moves. Something that moves by itself is kept from smearing by holding the history to the colours around each pixel in this frame; on Sponza a box crossing the view at 7 pixels a frame left no trail. Particles, splats and sprites are treated the same way.
+- A still view keeps drawing for 24 frames while the picture settles; then [`run`](#engine-run) rests as it does without TAA.
+- Only frames drawn to the canvas use it: a [target](#engine-createtarget) keeps FXAA.
+- The first time it is turned on, its pass builds in the background, and frames use FXAA until it is ready.
 
 <a id="renderer-oit"></a>
 ### `engine.renderer.oit` → `boolean`

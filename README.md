@@ -266,7 +266,8 @@ every opaque batch; `{ oit: true }` swaps that for weighted-blended order-indepe
 with no sorting at all. Sorting is exact for separated convex objects, OIT is approximate everywhere
 and doesn't care what order anything arrives in.
 
-**Post-processing**, each with its own entry: FXAA on by default, ground-truth ambient occlusion,
+**Post-processing**, each with its own entry: FXAA on by default, or temporal antialiasing, which
+samples every pixel at sixteen points over sixteen frames and stops thin things crawling; ground-truth ambient occlusion,
 auto exposure that adapts as an eye does, depth of field from a real lens model, fog integrated
 exactly along each view ray with its colour derived from the sky, bloom, and colour grading with
 white balance and `.cube` LUTs. See

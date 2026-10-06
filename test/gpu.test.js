@@ -1387,6 +1387,94 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report;
   });
 
+  await step('TAA settles an edge far nearer supersampling than an unfiltered frame, and run() rests once it has', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      // A bright square turned a little: long edges at a shallow slope, the
+      // staircase antialiasing is for.
+      const scene = probe.createScene();
+      scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
+        .setAxisAngle([0, 0, 1], 0.12).setScale(0.6, 0.6, 1);
+      const cam = new Camera({ fovY: 0.8, near: 0.1 });
+      cam.position.set([0, 0, 3]);
+      cam.target.set([0, 0, 0]);
+      const W = 160, H = 120;
+      const frames = async (n) => {
+        let pixels;
+        for (let i = 0; i < n; i++) {
+          probe.renderFrame(scene, cam);
+          if (i === n - 1) pixels = await probe.gpu.readPixels();
+          else await new Promise((r) => setTimeout(r, 5));
+        }
+        return pixels;
+      };
+      // The truth: 4x4 the pixels, no antialiasing, averaged down as light --
+      // decoded from sRGB, averaged, encoded again -- as a pixel's share of
+      // each colour adds up on a screen.
+      const toLinear = (b) => { const c = b / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+      const toByte = (l) => 255 * (l <= 0.0031308 ? l * 12.92 : 1.055 * l ** (1 / 2.4) - 0.055);
+      probe.renderer.post.antialias = false;
+      probe.gpu.resize(W * 4, H * 4);
+      const big = await frames(3);
+      const truth = new Float32Array(W * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        let s = 0;
+        for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) s += toLinear(big[((y * 4 + j) * W * 4 + x * 4 + i) * 4 + 1]);
+        truth[y * W + x] = toByte(s / 16);
+      }
+      probe.gpu.resize(W, H);
+      // Error at the edge: wherever the truth is neither black nor white.
+      const edgeError = (pixels) => {
+        let e = 0, n = 0;
+        for (let k = 0; k < W * H; k++) {
+          if (truth[k] > 10 && truth[k] < truth.reduce((a, b) => Math.max(a, b), 0) - 10) { e += Math.abs(pixels[k * 4 + 1] - truth[k]); n++; }
+        }
+        return { error: e / n, pixels: n };
+      };
+      // Unfiltered: every edge pixel all one side or the other. (Against FXAA
+      // the comparison is the tonemap's: TAA averages light before it, as a
+      // camera does, a supersampled frame after it, so a bright edge differs
+      // by a few levels whichever is right. Sponza's benches do that one.)
+      const rawPixels = await frames(3);
+      const raw = edgeError(rawPixels);
+      probe.renderer.taa = true;
+      probe.renderFrame(scene, cam);
+      for (let i = 0; i < 200 && probe.renderer.taaPass === null; i++) await new Promise((r) => setTimeout(r, 20));
+      const taaPixels = await frames(40);
+      const taa = edgeError(taaPixels);
+      let x0 = 0;
+      while (x0 < W - 1 && truth[60 * W + x0] < 5) x0++;
+      const row = (get) => Array.from({ length: 8 }, (_, k) => Math.round(get(60 * W + x0 - 3 + k))).join(' ');
+      const rows = `; across one: truth [${row((k) => truth[k])}], unfiltered [${row((k) => rawPixels[k * 4 + 1])}], TAA [${row((k) => taaPixels[k * 4 + 1])}]`;
+
+      // run() with on-demand: a still view keeps drawing while TAA settles, then rests.
+      probe.renderer.post.antialias = true;
+      const skippedBefore = probe.skippedFrames;
+      probe.run(scene, cam);
+      await new Promise((r) => setTimeout(r, 1500));
+      probe.stop();
+      const skipped = probe.skippedFrames - skippedBefore;
+      const error = await probe.gpu.device.popErrorScope();
+      const report = `edge error against 4x4 supersampling: unfiltered ${raw.error.toFixed(1)}, TAA ${taa.error.toFixed(1)} over ${taa.pixels} edge pixels; `
+        + `run() skipped ${skipped} frames of a still view once settled` + rows;
+      if (error) throw new Error(`${report}; ${error.message}`);
+      if (!(taa.error < raw.error * 0.5 && skipped > 0)) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('antialiasing softens a hard edge, and off leaves it hard', async () => {
     // A flat quad turned a little against a flat sky, unlit so the edge is
     // one colour meeting another. Without antialiasing every pixel along it
