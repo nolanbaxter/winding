@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-06
+
+**Better pictures, measured.** Temporal antialiasing, soft shadows from a light's size, auto
+exposure, splats whose colour changes with the view and that load from `.spz` and `.sog`, and
+cheaper ambient occlusion -- each A/B'd on Sponza or a real capture before it was kept, and what
+was tried and dropped says so below. And the GPU suite runs in CI now, on every push.
+
 ### Added
 
 - **Temporal antialiasing.** [`renderer.taa`](docs/API.md#renderer-taa) (and the `taa` option)
@@ -2253,7 +2260,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/nolanbaxter/winding/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/nolanbaxter/winding/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nolanbaxter/winding/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/nolanbaxter/winding/compare/v1.1.0...v1.1.1

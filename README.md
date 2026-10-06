@@ -111,7 +111,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.4.0/src/winding.js';
 </script>
 ```
 
@@ -136,8 +136,8 @@ completion and hover help.
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.4.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.4.0/src/"
   }
 }
 </script>
@@ -194,9 +194,9 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test                   # 755 checks, Node, no browser
-npm run test:gpu           # serves the page; open test/gpu.html for 62 checks on your GPU
-npm run test:gpu:headless  # the same 62 in headless Chrome, as CI runs them
+npm test                   # 759 checks, Node, no browser
+npm run test:gpu           # serves the page; open test/gpu.html for 67 checks on your GPU
+npm run test:gpu:headless  # the same 67 in headless Chrome, as CI runs them
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
