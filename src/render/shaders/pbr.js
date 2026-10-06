@@ -1462,46 +1462,59 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   let lightCount = min(clusterCounts[cluster], ${MAX_LIGHTS_PER_CLUSTER}u);
   let clusterBase = cluster * ${MAX_LIGHTS_PER_CLUSTER}u;
 
-  for (var li = 0u; li < lightCount; li = li + 1u) {
-    let light = lights[clusterIndices[clusterBase + li]];
+  // Four at a time: their indices, then where they are, then each one in
+  // turn. Each light is two loads, one waiting on the other, and this shader
+  // has too few threads in flight to hide that -- walking the list, not
+  // shading, was most of the cost. Loading four before testing any waits
+  // once for the four. 256 lights in Sponza, 720p, Iris Xe: 17.3 -> 14.1 ms
+  // at 3 m radius, 10.0 -> 8.9 at 2 m, the same at 1 m; same picture.
+  for (var group = 0u; group < lightCount; group = group + 4u) {
+    var ids : array<u32, 4>;
+    var reach : array<vec4<f32>, 4>;
+    // Past the count, a stale entry of this cell's slice: loaded, never used.
+    for (var k = 0u; k < 4u; k = k + 1u) { ids[k] = clusterIndices[clusterBase + min(group + k, ${MAX_LIGHTS_PER_CLUSTER - 1}u)]; }
+    for (var k = 0u; k < 4u; k = k + 1u) { reach[k] = lights[ids[k]].positionRadius; }
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      if (group + k >= lightCount) { break; }
+      let toLight = reach[k].xyz - v.world;
+      let lightDistance = length(toLight);
+      if (lightDistance >= reach[k].w) { continue; }
+      let light = lights[ids[k]];
 
-    let toLight = light.positionRadius.xyz - v.world;
-    let lightDistance = length(toLight);
-    if (lightDistance >= light.positionRadius.w) { continue; }
+      let l = toLight / max(lightDistance, 1e-4);
+      let lightNoL = dot(n, l);
+      // From behind, only a transmissive surface has anything to show.
+      let through = lightNoL <= 0.0;
+      if (through && !(EXTENSIONS && s.transmission > 0.0)) { continue; }
 
-    let l = toLight / max(lightDistance, 1e-4);
-    let lightNoL = dot(n, l);
-    // From behind, only a transmissive surface has anything to show.
-    let through = lightNoL <= 0.0;
-    if (through && !(EXTENSIONS && s.transmission > 0.0)) { continue; }
+      // Inverse-square, windowed so it reaches exactly zero at the radius.
+      // Physical falloff never does, and a light that is merely very dim at its
+      // cutoff pops visibly when a cluster boundary drops it.
+      let ratio = lightDistance / reach[k].w;
+      let window = clamp(1.0 - ratio * ratio * ratio * ratio, 0.0, 1.0);
+      let attenuation = (window * window) / max(lightDistance * lightDistance, 1e-4);
 
-    // Inverse-square, windowed so it reaches exactly zero at the radius.
-    // Physical falloff never does, and a light that is merely very dim at its
-    // cutoff pops visibly when a cluster boundary drops it.
-    let ratio = lightDistance / light.positionRadius.w;
-    let window = clamp(1.0 - ratio * ratio * ratio * ratio, 0.0, 1.0);
-    let attenuation = (window * window) / max(lightDistance * lightDistance, 1e-4);
+      var cone = 1.0;
+      if (light.coneFalloff.z > 0.5) {
+        // The scale and offset were precomputed on the CPU, so the cone test is
+        // a multiply-add rather than two cosines per pixel.
+        let alignment = dot(-l, light.directionCone.xyz);
+        cone = clamp(alignment * light.coneFalloff.x + light.coneFalloff.y, 0.0, 1.0);
+        cone = cone * cone;
+      }
+      if (cone <= 0.0) { continue; }
+      if (through) {
+        let behindShadow = localVisibility(light, v.world, -n, -lightNoL);
+        direct = direct + surfaceTransmission(s, l,
+          light.colorIntensity.rgb * light.colorIntensity.a * attenuation * cone * behindShadow);
+        continue;
+      }
+      let shadow = localVisibility(light, v.world, n, lightNoL);
+      if (shadow <= 0.0) { continue; }
 
-    var cone = 1.0;
-    if (light.coneFalloff.z > 0.5) {
-      // The scale and offset were precomputed on the CPU, so the cone test is
-      // a multiply-add rather than two cosines per pixel.
-      let alignment = dot(-l, light.directionCone.xyz);
-      cone = clamp(alignment * light.coneFalloff.x + light.coneFalloff.y, 0.0, 1.0);
-      cone = cone * cone;
+      direct = direct + surfaceLight(s, l, lightNoL,
+        light.colorIntensity.rgb * light.colorIntensity.a * attenuation * cone * shadow);
     }
-    if (cone <= 0.0) { continue; }
-    if (through) {
-      let behindShadow = localVisibility(light, v.world, -n, -lightNoL);
-      direct = direct + surfaceTransmission(s, l,
-        light.colorIntensity.rgb * light.colorIntensity.a * attenuation * cone * behindShadow);
-      continue;
-    }
-    let shadow = localVisibility(light, v.world, n, lightNoL);
-    if (shadow <= 0.0) { continue; }
-
-    direct = direct + surfaceLight(s, l, lightNoL,
-      light.colorIntensity.rgb * light.colorIntensity.a * attenuation * cone * shadow);
   }
 
   // ---- ambient, from the prebaked environment ----
