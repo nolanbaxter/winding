@@ -326,6 +326,7 @@ box-projected, so a room reflects the room and not the sky.
 [`engine.loadSplats`](docs/API.md#engine-loadsplats) and placed as a node by
 [`scene.addSplats`](docs/API.md#scene-addsplats): culled and sorted back to front on the GPU whenever
 the view moves, a million splats in about 2 ms, and drawn behind the geometry in front of them.
+Higher spherical harmonics, to degree 3, are kept, so colour changes with the view.
 
 **Picking.** [`scene.pick`](docs/API.md#scene-pick) returns what's under the pointer, by bounding
 box, or by triangle for a model loaded with `retainGeometry`, skinned and morphed meshes as posed.

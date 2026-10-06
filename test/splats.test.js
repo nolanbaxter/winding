@@ -69,19 +69,49 @@ test('turned a quarter about z, its long axis turns from y to x', () => {
 });
 
 test('a .ply as training writes it: harmonic colour, sigmoid opacity, log scales, extra properties skipped', () => {
-  const properties = ['x', 'y', 'z', 'nx', 'ny', 'nz', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'f_rest_0', 'opacity',
+  const properties = ['x', 'y', 'z', 'nx', 'ny', 'nz', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity',
     'scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3'];
   const SH_C0 = 0.28209479177387814;
   const s = parseSplats(ply(properties, [
-    { x: -1, y: 0, z: 4, f_dc_0: (1 - 0.5) / SH_C0, f_dc_1: 0, f_dc_2: (0 - 0.5) / SH_C0, f_rest_0: 9,
+    { x: -1, y: 0, z: 4, f_dc_0: (1 - 0.5) / SH_C0, f_dc_1: 0, f_dc_2: (0 - 0.5) / SH_C0,
       opacity: 0, scale_0: Math.log(2), scale_1: Math.log(3), scale_2: 0, rot_0: 2 },
     { x: 5, y: -2, z: 0, rot_0: 1 },
   ]));
   assert.equal(s.count, 2);
+  assert.equal(s.degree, 0);
   assert.deepEqual(colourOf(s, 0), [255, 128, 0, 128]);
   close(s.covariances[0], 4); close(s.covariances[3], 9); close(s.covariances[5], 1);
   assert.deepEqual(s.min, [-1, -2, 0]);
   assert.deepEqual(s.max, [5, 0, 4]);
+});
+
+/** A half float's value, from its bits. */
+function fromHalf(h) {
+  const sign = h & 0x8000 ? -1 : 1;
+  const exponent = (h >> 10) & 31;
+  const mantissa = h & 1023;
+  return sign * (exponent === 0 ? mantissa / 1024 * 2 ** -14 : (1 + mantissa / 1024) * 2 ** (exponent - 15));
+}
+
+test('a .ply\'s higher harmonics: the degree from how many, kept as half floats, red green and blue together', () => {
+  const base = ['x', 'y', 'z', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity', 'scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3'];
+  const rest = Array.from({ length: 9 }, (_, k) => `f_rest_${k}`);
+  // f_rest_k for red is k, green 10 + k, blue -(k + 1): red's three first, then green's, then blue's.
+  const row = { rot_0: 1 };
+  for (let k = 0; k < 3; k++) { row[`f_rest_${k}`] = k; row[`f_rest_${k + 3}`] = 10 + k; row[`f_rest_${k + 6}`] = -(k + 1); }
+  const s = parseSplats(ply([...base, ...rest], [row, row]));
+  assert.equal(s.degree, 1);
+  // Three coefficients of three channels: nine halves, in five words, a splat; and one word over.
+  assert.equal(s.sh.length, 2 * 5 + 1);
+  const halves = new Uint16Array(s.sh.buffer);
+  for (const i of [0, 1]) {
+    for (let k = 0; k < 3; k++) {
+      const at = i * 10 + k * 3;
+      assert.deepEqual([halves[at], halves[at + 1], halves[at + 2]].map(fromHalf), [k, 10 + k, -(k + 1)]);
+    }
+  }
+  const odd = ply([...base, 'f_rest_0', 'f_rest_1'], [{}]);
+  assert.throws(() => parseSplats(odd), /2 f_rest_ properties; harmonics of degree 1, 2 or 3 have 9, 24 or 45/);
 });
 
 test('what is not a splat capture is refused, by what is wrong with it', () => {

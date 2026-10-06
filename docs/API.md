@@ -301,11 +301,11 @@ const scene = engine.createScene({ environment: studio });
 <a id="engine-loadsplats"></a>
 ### `engine.loadSplats(source, { fetch })` → `Promise<Splats>`
 
-Loads a Gaussian splat capture for [`scene.addSplats`](#scene-addsplats). It reads a `.ply` as 3D Gaussian Splatting training writes it (binary, with `f_dc`, `opacity`, `scale` and `rot` properties), or a `.splat` (32 bytes a splat). Colour comes from the constant spherical-harmonic term; the higher terms are skipped, so colour does not change with the view.
+Loads a Gaussian splat capture for [`scene.addSplats`](#scene-addsplats). It reads a `.ply` as 3D Gaussian Splatting training writes it (binary, with `f_dc`, `opacity`, `scale` and `rot` properties), or a `.splat` (32 bytes a splat). A `.ply` with higher spherical harmonics (`f_rest_*`, to degree 3) keeps them, so colour changes with the view as it did in the photographs: a sheen, a reflection. They are kept as half floats, 20 to 92 bytes a splat by degree.
 
 `source` is a URL, an `ArrayBuffer` or a `Uint8Array`. `fetch` replaces `fetch` for downloading `source`.
 
-Returns: `{ count, min, max }`: how many splats, and the corners of the box around their centres, in the capture's units. Free it with [`engine.unload`](#engine-unload) once no scene draws it.
+Returns: `{ count, min, max, degree }`: how many splats, the corners of the box around their centres in the capture's units, and the degree of its harmonics, 0 to 3. Free it with [`engine.unload`](#engine-unload) once no scene draws it.
 Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' format; only binary_little_endian is read'`; `'splats: this .ply is not a splat capture: no <properties>'`; `'splats: the .ply is cut short: …'`; `'splats: not a .ply, and <n> bytes is not a whole number of 32-byte .splat records'`; `'splats: splat <i> has a position that is not a number'`; `'splats: a compressed .ply (from SuperSplat) is not read; …'`; `'splats: this is a zip -- a .sog, perhaps -- which is not read; …'`; `'splats: this is gzipped -- a .spz, perhaps -- which is not read; …'`; `'splats: <n> splats need <bytes> bytes in one buffer, past this device's <limit>; …'`.
 
 ```js
@@ -1471,7 +1471,7 @@ A capture made by 3D Gaussian Splatting: up to millions of soft, coloured ellips
 
 Adds a capture as a node. The node's position, rotation and scale place it, and one capture can be added any number of times. `position` defaults to `[0, 0, 0]`.
 
-Splats are lit by nothing: they show the colour the capture saw, decoded from sRGB, fogged by [`renderer.fog`](#renderer-fog) by the distance to each one, and tonemapped with the rest of the frame. Geometry in front hides them. They write no depth, so they hide nothing and cast no shadows. They are drawn straight after opaque geometry, so sprites, particles and blended surfaces in front of a capture show over it; blended or transmissive surfaces behind one show over it too. [Depth of field](#renderer-dof) works from depth, so it blurs splats as whatever geometry is behind them, or as far away where there is none. They count in [`scene.bounds`](#scene-bounds) and [`scene.frame`](#scene-frame) by the box around their centres. They are not picked or raycast.
+Splats are lit by nothing: they show the colour the capture saw, from where the camera sees them when the capture has harmonics, decoded from sRGB, fogged by [`renderer.fog`](#renderer-fog) by the distance to each one, and tonemapped with the rest of the frame. Geometry in front hides them. They write no depth, so they hide nothing and cast no shadows. They are drawn straight after opaque geometry, so sprites, particles and blended surfaces in front of a capture show over it; blended or transmissive surfaces behind one show over it too. [Depth of field](#renderer-dof) works from depth, so it blurs splats as whatever geometry is behind them, or as far away where there is none. They count in [`scene.bounds`](#scene-bounds) and [`scene.frame`](#scene-frame) by the box around their centres. They are not picked or raycast.
 
 Throws: `'addSplats: splats must be what engine.loadSplats returned'`; `'addSplats: these splats were unloaded'`. A frame drawing splats unloaded since they were added throws `'addSplats: these splats were unloaded; remove the node first'`.
 
@@ -1481,7 +1481,7 @@ const room = await engine.loadSplats('room.ply');
 scene.addSplats({ splats: room }).setAxisAngle([1, 0, 0], Math.PI);
 ```
 
-Notes: two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. On integrated graphics (Intel Iris Xe, a million splats, 1280x720) the draw costs about 10 ms for a capture seen whole, and more up close, where splats fill the screen; [`renderer.resolution`](#renderer-resolution) cuts that part. The sort costs about 2 ms, and nothing while the view is still.
+Notes: a capture's harmonics are worked out once a visible splat whenever it is sorted again, so a still view barely pays for them: for 205,000 splats of degree 3 on integrated graphics (Intel Iris Xe), about 1.4 ms in the frames the view moves, and 0.16 ms in the draw otherwise. Two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. On integrated graphics (Intel Iris Xe, a million splats, 1280x720) the draw costs about 10 ms for a capture seen whole, and more up close, where splats fill the screen; [`renderer.resolution`](#renderer-resolution) cuts that part. The sort costs about 2 ms, and nothing while the view is still.
 
 <a id="scene-splatsof"></a>
 ### `scene.splatsOf(node)` → `{ splats } | null`

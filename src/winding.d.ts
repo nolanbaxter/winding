@@ -82,6 +82,8 @@ export interface LUT {
 /** From `engine.loadSplats`. */
 export interface Splats {
   readonly count: number;
+  /** The degree of its spherical harmonics, 0 to 3: 0 is one colour from every side. */
+  readonly degree: number;
   readonly min: Float32Array;
   readonly max: Float32Array;
 }

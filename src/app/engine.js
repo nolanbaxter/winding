@@ -362,7 +362,11 @@ export class Winding {
       bytes = new Uint8Array(await response.arrayBuffer());
       this._assertAlive('loadSplats');
     }
-    return new Splats(this.gpu, parseSplats(bytes));
+    const data = parseSplats(bytes);
+    // The pipeline for its harmonics, built before it can be drawn.
+    await this.renderer.splats.ready(data.degree);
+    this._assertAlive('loadSplats');
+    return new Splats(this.gpu, data);
   }
 
   /**

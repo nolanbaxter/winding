@@ -1563,6 +1563,75 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
   });
 
+  await step('a capture with harmonics changes colour with the view, in its own space, to degree 3', async () => {
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    // A .ply of grey splats, mid grey at every angle but for the harmonics given.
+    const ply = (degree, rows) => {
+      const rest = [0, 9, 24, 45][degree];
+      const names = ['x', 'y', 'z', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity', 'scale_0', 'scale_1', 'scale_2',
+        'rot_0', 'rot_1', 'rot_2', 'rot_3', ...Array.from({ length: rest }, (_, k) => `f_rest_${k}`)];
+      const head = new TextEncoder().encode(`ply\nformat binary_little_endian 1.0\nelement vertex ${rows.length}\n`
+        + names.map((n) => `property float ${n}\n`).join('') + 'end_header\n');
+      const bytes = new Uint8Array(head.length + rows.length * names.length * 4);
+      bytes.set(head);
+      const view = new DataView(bytes.buffer, head.length);
+      rows.forEach((row, i) => names.forEach((n, k) => {
+        const value = { opacity: 8, scale_0: Math.log(0.4), scale_1: Math.log(0.4), scale_2: Math.log(0.4), rot_0: 1, ...row }[n] ?? 0;
+        view.setFloat32((i * names.length + k) * 4, value, true);
+      }));
+      return bytes;
+    };
+    const cam = new Camera({ fovY: 0.8, near: 0.1 });
+    cam.target.set([0, 0, 0]);
+    const centreFrom = async (scene, x) => {
+      cam.position.set([x, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels({ x: 80, y: 60, width: 1, height: 1 });
+      return [...pixels.subarray(0, 3)];
+    };
+    try {
+      probe.gpu.resize(160, 120);
+      // Degree 1: red's third coefficient is the -x term. Seen from +x, the
+      // direction to the splat is -x, so red rises; from -x it falls.
+      const one = await probe.loadSplats(ply(1, [{ f_rest_2: 0.6 }]));
+      const scene = probe.createScene();
+      const node = scene.addSplats({ splats: one });
+      const plusX = await centreFrom(scene, 5);
+      const minusX = await centreFrom(scene, -5);
+      // Turned half round about y, the capture's +x faces the world's -x.
+      node.setAxisAngle([0, 1, 0], Math.PI);
+      const turned = await centreFrom(scene, -5);
+      // Degree 3, on the file's second splat (the first is far out of view): only
+      // the last coefficient, blue's -x (x^2 - 3y^2) term, so blue rises from +x.
+      const three = await probe.loadSplats(ply(3, [{ x: 100 }, { f_rest_44: 0.6 }]));
+      const scene3 = probe.createScene();
+      scene3.addSplats({ splats: three });
+      const blueFrom = await centreFrom(scene3, 5);
+      const blueAway = await centreFrom(scene3, -5);
+      probe.unload(one);
+      probe.unload(three);
+      const show = (p) => p.join(',');
+      const report = `degree 1: ${show(plusX)} from +x, ${show(minusX)} from -x, ${show(turned)} turned; `
+        + `degree 3: ${show(blueFrom)} from +x, ${show(blueAway)} from -x`;
+      const ok = plusX[0] > plusX[1] + 40 && minusX[0] < minusX[1] - 40 && Math.abs(plusX[1] - minusX[1]) <= 2
+        && Math.abs(turned[0] - plusX[0]) <= 2
+        && blueFrom[2] > blueFrom[1] + 40 && blueAway[2] < blueAway[1] - 40;
+      if (!ok) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('grading: saturation, a white balance that neutralises its light, and a .cube LUT', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';

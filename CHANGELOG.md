@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Splats change colour with the view.** A `.ply` capture's higher spherical harmonics (`f_rest_*`,
+  degree 1 to 3) are kept, as half floats, and evaluated from the direction each splat is seen
+  from. A compute pass works them out once a visible splat, whenever the cloud is sorted again, so
+  a still view pays nothing: in the vertex shader they ran at every corner of every quad and doubled
+  the draw (205k splats, 720p, Iris Xe: 2.19 -> 4.65 ms); as a pass, 1.4 ms while the view moves,
+  0.16 ms while it is still. Each degree is an override constant, so a capture without them pays
+  nothing. `loadSplats` returns the capture's `degree`.
+
 - **Auto exposure.** [`renderer.autoExposure`](docs/API.md#renderer-autoexposure) (`true`, or
   `{ min, max, brighten, darken }`) sets the exposure from the image: a 64-bin histogram of log
   brightness, its darkest and brightest tenths left out, puts the scene at middle grey, and the

@@ -8,19 +8,35 @@
 //   .ply    what training writes: a binary PLY whose vertices hold x, y, z,
 //           f_dc_0..2 (colour as the constant term of a spherical harmonic),
 //           opacity (before a sigmoid), scale_0..2 (logarithms) and rot_0..3
-//           (a quaternion, w first). Higher harmonics, f_rest_*, are skipped:
-//           colour here does not change with the view.
+//           (a quaternion, w first), and, for colour that changes with the
+//           view, f_rest_*: the higher harmonics, up to degree 3, red's
+//           coefficients first, then green's, then blue's.
 //   .splat  the compact web format: 32 bytes a splat, position and scale as
 //           floats, colour and opacity as four bytes, rotation as four bytes.
 //
 // Produces plain CPU data, as the glTF importer does, for render/splats.js
 // to upload: each splat's centre and colour, and its covariance -- the
 // ellipsoid as a symmetric 3x3, R S S^T R^T, six numbers -- which is what the
-// renderer projects. Worked out once here rather than every frame there.
+// renderer projects. Worked out once here rather than every frame there. The
+// higher harmonics are kept as half floats, as PlayCanvas keeps them: half
+// the memory, and no difference to see.
+
+import { halfBits } from '../render/hdr.js';
 
 /** The constant spherical harmonic, by which f_dc scales into a colour. */
 const SH_C0 = 0.28209479177387814;
 const SPLAT_BYTES = 32;
+
+/** Coefficients a colour channel has past the constant one, by degree. */
+export const SH_COEFFICIENTS = [0, 3, 8, 15];
+
+/** 32-bit words a splat's harmonics take: three channels of half floats, packed. */
+export const shWords = (degree) => Math.ceil(SH_COEFFICIENTS[degree] * 3 / 2);
+
+/** A half float's bits, sign and all. */
+function signedHalf(v) {
+  return v < 0 ? 0x8000 | halfBits(-v) : halfBits(v);
+}
 
 /**
  * A capture's splats, from the bytes of a .ply or .splat file:
@@ -44,16 +60,33 @@ export function parseSplats(bytes) {
   return parseSplatFile(data);
 }
 
-function output(count) {
+/**
+ * Room for `count` splats, with harmonics to `degree`. `sh` is shWords(degree)
+ * words a splat, coefficient by coefficient, red, green and blue in each, and
+ * one word over, so the shader's two-word read of the last never falls off.
+ */
+function output(count, degree = 0) {
   const centers = new Float32Array(count * 4);
+  const sh = new Uint32Array(degree > 0 ? count * shWords(degree) + 1 : 1);
   return {
     count,
+    degree,
     centers,
     colours: new Uint32Array(centers.buffer),
     covariances: new Float32Array(count * 6),
+    sh,
+    halves: new Uint16Array(sh.buffer),
     min: [Infinity, Infinity, Infinity],
     max: [-Infinity, -Infinity, -Infinity],
   };
+}
+
+/** Splat i's coefficient k (0 is the first past the constant one), as red, green and blue. */
+function putSH(out, i, k, r, g, b) {
+  const h = i * shWords(out.degree) * 2 + k * 3;
+  out.halves[h] = signedHalf(r);
+  out.halves[h + 1] = signedHalf(g);
+  out.halves[h + 2] = signedHalf(b);
 }
 
 /** One splat into the output: its centre, colour bytes, and covariance from scale and rotation. */
@@ -169,13 +202,25 @@ function parsePly(data) {
     return (base) => view[get](base + offset, true);
   };
   const [x, y, z, dc0, dc1, dc2, opacity, s0, s1, s2, q0, q1, q2, q3] = PLY_NEEDS.map(reader);
-  const out = output(vertices.count);
+  // The higher harmonics: as many f_rest_ as there are, which says the degree.
+  let rest = 0;
+  while (at[`f_rest_${rest}`] !== undefined) rest++;
+  const degree = SH_COEFFICIENTS.indexOf(rest / 3);
+  if (rest > 0 && degree < 1) {
+    throw new Error(`splats: a .ply with ${rest} f_rest_ properties; harmonics of degree 1, 2 or 3 have 9, 24 or 45`);
+  }
+  const restReaders = Array.from({ length: rest }, (_, k) => reader(`f_rest_${k}`));
+  const per = rest / 3;
+  const out = output(vertices.count, Math.max(degree, 0));
   const sigmoid = (v) => 1 / (1 + Math.exp(-v));
   for (let i = 0; i < vertices.count; i++) {
     const b = i * vertices.stride;
     put(out, i, x(b), y(b), z(b),
       byte(0.5 + SH_C0 * dc0(b)), byte(0.5 + SH_C0 * dc1(b)), byte(0.5 + SH_C0 * dc2(b)), byte(sigmoid(opacity(b))),
       Math.exp(s0(b)), Math.exp(s1(b)), Math.exp(s2(b)), q0(b), q1(b), q2(b), q3(b));
+    for (let k = 0; k < per; k++) {
+      putSH(out, i, k, restReaders[k](b), restReaders[k + per](b), restReaders[k + 2 * per](b));
+    }
   }
   return out;
 }
