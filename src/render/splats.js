@@ -35,8 +35,15 @@
 // them at 320x180.
 //
 // A splat is lit by nothing: its colour is what the capture saw, decoded from
-// sRGB, fogged as the scene is, and tonemapped with everything else. Colour
-// does not change with the view (the file's higher harmonics are skipped).
+// sRGB, fogged as the scene is, and tonemapped with everything else. Where the
+// capture has higher harmonics, the colour changes with the view as it did in
+// the photographs -- a sheen, a reflection -- from the direction each splat
+// is seen from. They change only when the camera or the cloud moves, which is
+// when it is sorted again, so a fourth compute pass after the sort evaluates
+// them once a visible splat, into a colour the draw reads: in the vertex
+// shader they were worked out at each of a quad's four corners, and doubled
+// the draw (205k splats of degree 3, 720p, Iris Xe: 2.19 -> 4.65 ms). Each
+// degree is an override constant, so a capture without them pays nothing.
 // Splats are hidden by geometry in front of them, and hide nothing: they
 // write no depth, and cast no shadows. So they are drawn straight after the
 // opaque scene, before sprites, particles and blended surfaces, which a
@@ -49,15 +56,16 @@ import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer, storageCapacity } from '../rhi/buffer.js';
 import { DEPTH_FORMAT, DEPTH_COMPARE } from '../rhi/device.js';
 import { handleIndex } from '../core/handle.js';
-import { mat4Multiply } from '../core/math/mat4.js';
+import { mat4Multiply, mat4Invert } from '../core/math/mat4.js';
+import { shWords } from '../scene/splats.js';
 import { FRAME_WGSL } from './shaders/pbr.js';
 import { FOG_WGSL } from './fog.js';
 
 const BUCKETS = 65536;
 const WORKGROUP = 256;
-/** modelView, projection, viewport, depth range, count: what a sort depends on. Then model, for fog. */
+/** modelView, projection, viewport, depth range, count: what a sort depends on. Then model, for fog, and the eye. */
 const CLOUD_FLOATS = 37;
-const CLOUD_BYTES = 224;
+const CLOUD_BYTES = 240;
 /** Frames a node's sort buffers outlive the last frame that drew it. */
 const KEEP_FRAMES = 120;
 
@@ -70,6 +78,7 @@ struct Cloud {
   depthScale : f32,   // buckets per unit of depth across it
   count      : u32,
   model      : mat4x4<f32>,   // for fog, which is in world space
+  eye        : vec3<f32>,     // the camera, in the capture's own space, for its harmonics
 };
 `;
 
@@ -164,7 +173,12 @@ ${FOG_WGSL}
 @group(0) @binding(1) var<storage, read> centers : array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read> covariances : array<f32>;
 @group(0) @binding(3) var<storage, read> order : array<u32>;
+// With harmonics, each visible splat's colour as the shade pass left it.
+@group(0) @binding(4) var<storage, read> shaded : array<u32>;
 @group(1) @binding(0) var<uniform> frame : Frame;
+
+/** Whether the capture has harmonics, so the colour is the shade pass's. */
+override SHADED : bool = false;
 @group(1) @binding(1) var irradiance : texture_cube<f32>;
 @group(1) @binding(2) var envSampler : sampler;
 
@@ -233,7 +247,8 @@ fn vs(@builtin(vertex_index) corner : u32, @builtin(instance_index) instance : u
 
   // Out to where it fades below 1/255, and no further than e^-4 of its peak:
   // a faint splat covers fewer pixels than an opaque one of the same size.
-  let colour = unpack4x8unorm(center.w);
+  var colour = unpack4x8unorm(center.w);
+  if (SHADED) { colour = unpack4x8unorm(shaded[i]); }
   let reach = log(255.0 * colour.a);
   if (reach <= 0.0) { return out; }
   let q = (vec2<f32>(f32(corner & 1u), f32(corner >> 1u)) * 2.0 - 1.0) * sqrt(min(reach, 4.0));
@@ -262,6 +277,75 @@ fn fs(v : VertexOut) -> @location(0) vec4<f32> {
 }
 `;
 
+const SHADE_SHADER = /* wgsl */ `
+${CLOUD_WGSL}
+struct DrawArgs {
+  vertexCount   : u32,
+  instanceCount : u32,
+  firstVertex   : u32,
+  firstInstance : u32,
+};
+
+@group(0) @binding(0) var<uniform> cloud : Cloud;
+@group(0) @binding(1) var<storage, read> centers : array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read> sh : array<u32>;
+@group(0) @binding(3) var<storage, read> visible : array<u32>;
+@group(0) @binding(4) var<storage, read> args : DrawArgs;
+@group(0) @binding(5) var<storage, read_write> shaded : array<u32>;
+
+/** The harmonics' degree, 1 to 3. */
+override SH_DEGREE : u32 = 1u;
+
+/**
+ * Splat i's coefficient k past the constant one, as red, green and blue:
+ * three half floats, from the two words they lie across.
+ */
+fn coefficient(i : u32, k : u32) -> vec3<f32> {
+  let n = select(15u, select(8u, 3u, SH_DEGREE == 1u), SH_DEGREE < 3u);
+  let h = i * ((n * 3u + 1u) / 2u) * 2u + k * 3u;
+  let a = unpack2x16float(sh[h >> 1u]);
+  let b = unpack2x16float(sh[(h >> 1u) + 1u]);
+  return select(vec3<f32>(a.x, a.y, b.x), vec3<f32>(a.y, b.x, b.y), (h & 1u) == 1u);
+}
+
+/** What the harmonics past the constant add, seen along d -- the 3DGS reference's evaluation. */
+fn harmonics(i : u32, d : vec3<f32>) -> vec3<f32> {
+  let x = d.x; let y = d.y; let z = d.z;
+  var c = 0.4886025119029199 * (-y * coefficient(i, 0u) + z * coefficient(i, 1u) - x * coefficient(i, 2u));
+  if (SH_DEGREE >= 2u) {
+    let xx = x * x; let yy = y * y; let zz = z * z;
+    c += 1.0925484305920792 * x * y * coefficient(i, 3u)
+      - 1.0925484305920792 * y * z * coefficient(i, 4u)
+      + 0.31539156525252005 * (2.0 * zz - xx - yy) * coefficient(i, 5u)
+      - 1.0925484305920792 * x * z * coefficient(i, 6u)
+      + 0.5462742152960396 * (xx - yy) * coefficient(i, 7u);
+    if (SH_DEGREE >= 3u) {
+      c += -0.5900435899266435 * y * (3.0 * xx - yy) * coefficient(i, 8u)
+        + 2.890611442640554 * x * y * z * coefficient(i, 9u)
+        - 0.4570457994644658 * y * (4.0 * zz - xx - yy) * coefficient(i, 10u)
+        + 0.3731763325901154 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * coefficient(i, 11u)
+        - 0.4570457994644658 * x * (4.0 * zz - xx - yy) * coefficient(i, 12u)
+        + 1.445305721320277 * z * (xx - yy) * coefficient(i, 13u)
+        - 0.5900435899266435 * x * (xx - 3.0 * yy) * coefficient(i, 14u);
+    }
+  }
+  return c;
+}
+
+/** Each visible splat's colour, seen from the eye: the constant term and the harmonics, clamped as 3DGS clamps them. */
+@compute @workgroup_size(${WORKGROUP})
+fn shade(@builtin(global_invocation_id) id : vec3<u32>, @builtin(num_workgroups) groups : vec3<u32>) {
+  let slot = id.x + id.y * groups.x * ${WORKGROUP}u;
+  if (slot >= args.instanceCount) { return; }
+  let i = visible[slot];
+  let center = centers[i];
+  let base = unpack4x8unorm(center.w);
+  let d = normalize(bitcast<vec3<f32>>(center.xyz) - cloud.eye);
+  let seen = clamp(base.rgb + harmonics(i, d), vec3<f32>(0.0), vec3<f32>(1.0));
+  shaded[i] = pack4x8unorm(vec4<f32>(seen, base.a));
+}
+`;
+
 /**
  * A capture on the GPU: engine.loadSplats makes one, scene.addSplats places
  * it, any number of times. `count` splats; `min` and `max`, the corners of
@@ -275,26 +359,34 @@ export class Splats {
     if (data.count > most) {
       throw new Error(`splats: ${data.count} splats are more than this device holds in one buffer, ${most}`);
     }
+    this.degree = data.degree ?? 0;
+    if (this.degree > 0 && data.count > storageCapacity(rhi, shWords(this.degree) * 4)) {
+      throw new Error(`splats: ${data.count} splats with harmonics of degree ${this.degree} are more than this device holds in one buffer`);
+    }
     this.rhi = rhi;
     this.count = data.count;
     this.min = data.min;
     this.max = data.max;
     this.centers = createBuffer(rhi, { label: `${label}-centers`, data: data.centers, usage: GPUBufferUsage.STORAGE });
     this.covariances = createBuffer(rhi, { label: `${label}-covariances`, data: data.covariances, usage: GPUBufferUsage.STORAGE });
+    // One word when there are none: the binding is there for every capture.
+    this.sh = createBuffer(rhi, { label: `${label}-sh`, data: data.sh ?? new Uint32Array(1), usage: GPUBufferUsage.STORAGE });
   }
 
   destroy() {
     this.centers.destroy();
     this.covariances.destroy();
+    this.sh.destroy();
   }
 }
 
 export class SplatPass {
   static async create(rhi, pipelines, colorFormat, frameBuffer) {
     const device = rhi.device;
-    const [sortShader, drawShader] = await Promise.all([
+    const [sortShader, drawShader, shadeShader] = await Promise.all([
       compileShader(device, SORT_SHADER, 'splats-sort.wgsl'),
       compileShader(device, DRAW_SHADER, 'splats.wgsl'),
+      compileShader(device, SHADE_SHADER, 'splats-shade.wgsl'),
     ]);
     const storage = (binding, type = 'storage') => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type } });
     const sortLayout = device.createBindGroupLayout({
@@ -304,6 +396,14 @@ export class SplatPass {
         storage(1, 'read-only-storage'), storage(2), storage(3), storage(4), storage(5), storage(6), storage(7),
       ],
     });
+    const shadeLayout = device.createBindGroupLayout({
+      label: 'splats-shade',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        storage(1, 'read-only-storage'), storage(2, 'read-only-storage'), storage(3, 'read-only-storage'),
+        storage(4, 'read-only-storage'), storage(5),
+      ],
+    });
     const drawLayout = device.createBindGroupLayout({
       label: 'splats-draw',
       entries: [
@@ -311,6 +411,7 @@ export class SplatPass {
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
     const frameLayout = device.createBindGroupLayout({
@@ -338,11 +439,18 @@ export class SplatPass {
       primitive: { topology: 'triangle-strip', cullMode: 'none' },
       depth: { format: DEPTH_FORMAT, depthCompare: DEPTH_COMPARE, depthWriteEnabled: false },
     };
+    // Plain now; the one that reads shaded colours when a capture with harmonics loads.
+    const shadedDescriptor = { ...drawDescriptor, label: 'splats-shaded', constants: { SHADED: 1 } };
     await pipelines.warm([drawDescriptor]);
+    const shadeLayoutGPU = createPipelineLayout(device, { 0: shadeLayout }, 'splats-shade');
     return new SplatPass(rhi, frameBuffer, {
-      sortLayout, drawLayout, frameLayout,
+      sortLayout, drawLayout, frameLayout, shadeLayout, pipelines, shadedDescriptor,
+      shadeFor: (degree) => pipelines.compute({
+        label: `splats-shade${degree}`, layout: shadeLayoutGPU, shader: shadeShader, entry: 'shade', constants: { SH_DEGREE: degree },
+      }),
       keys: compute('makeKeys'), scan: compute('scanCounts'), scatter: compute('place'),
       draw: pipelines.get(drawDescriptor),
+      shades: [],
     });
   }
 
@@ -357,6 +465,7 @@ export class SplatPass {
     this._items = [];
     this._frame = 0;
     this._modelView = new Float32Array(16);
+    this._viewModel = new Float32Array(16);
     this._cloud = new ArrayBuffer(CLOUD_BYTES);
     this._cloudF32 = new Float32Array(this._cloud);
     this._cloudU32 = new Uint32Array(this._cloud);
@@ -367,6 +476,19 @@ export class SplatPass {
     this.sorted = 0;
     this._sort = (pass) => this._encodeSort(pass);
     this._draw = (pass) => this._encodeDraw(pass);
+  }
+
+  /**
+   * Builds the pipeline for harmonics of `degree`, if it is not built: called
+   * by engine.loadSplats, so a frame never compiles one.
+   */
+  async ready(degree) {
+    if (degree === 0 || this.shades[degree] !== undefined) return;
+    if (this.drawShaded === undefined) {
+      await this.pipelines.warm([this.shadedDescriptor]);
+      this.drawShaded = this.pipelines.get(this.shadedDescriptor);
+    }
+    this.shades[degree] = this.shadeFor(degree);
   }
 
   /**
@@ -412,6 +534,8 @@ export class SplatPass {
       f[35] = (BUCKETS - 1) / Math.max(far - near, 1e-6);
       this._cloudU32[36] = splats.count;
       f.set(scene.transforms.world.subarray(handleIndex(entity) * 16, handleIndex(entity) * 16 + 16), 40);
+      // The eye, in the capture's space: where (view x model)^-1 takes the view's origin.
+      if (splats.degree > 0 && mat4Invert(this._viewModel, modelView) !== null) f.set(this._viewModel.subarray(12, 15), 56);
       this.rhi.queue.writeBuffer(state.cloud, 0, this._cloud);
       // Sorted again only when something it is sorted by changed. What it
       // was sorted for is kept when the sort is recorded, not here: a frame
@@ -423,7 +547,7 @@ export class SplatPass {
         this.sorted++;
       }
       const cx = (splats.min[0] + splats.max[0]) / 2, cy = (splats.min[1] + splats.max[1]) / 2, cz = (splats.min[2] + splats.max[2]) / 2;
-      items.push({ state, sort, count: splats.count, depth: -(modelView[2] * cx + modelView[6] * cy + modelView[10] * cz + modelView[14]) });
+      items.push({ state, sort, count: splats.count, degree: splats.degree, depth: -(modelView[2] * cx + modelView[6] * cy + modelView[10] * cz + modelView[14]) });
       this.count += splats.count;
     }
     items.sort((a, b) => b.depth - a.depth);
@@ -470,6 +594,7 @@ export class SplatPass {
       cursors: make('cursors', BUCKETS * 4),
       order: make('order', n * 4),
       args: make('args', 16, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST),
+      shaded: make('shaded', splats.degree > 0 ? n * 4 : 4),
     };
     const device = rhi.device;
     const entries = (list) => list.map((buffer, binding) => ({ binding, resource: { buffer } }));
@@ -481,15 +606,22 @@ export class SplatPass {
     state.drawGroup = device.createBindGroup({
       label: 'splats-draw',
       layout: this.drawLayout,
-      entries: entries([state.cloud, splats.centers, splats.covariances, state.order]),
+      entries: entries([state.cloud, splats.centers, splats.covariances, state.order, state.shaded]),
     });
+    if (splats.degree > 0) {
+      state.shadeGroup = device.createBindGroup({
+        label: 'splats-shade',
+        layout: this.shadeLayout,
+        entries: entries([state.cloud, splats.centers, splats.sh, state.visible, state.args, state.shaded]),
+      });
+    }
     this._states.set(record, state);
     return state;
   }
 
   _encodeSort(pass) {
     const limit = this.rhi.limits.maxComputeWorkgroupsPerDimension ?? 65535;
-    for (const { state, sort, count } of this._items) {
+    for (const { state, sort, count, degree } of this._items) {
       if (!sort) continue;
       state.last.set(state.next);
       const groups = Math.ceil(count / WORKGROUP);
@@ -502,6 +634,11 @@ export class SplatPass {
       pass.dispatchWorkgroups(1);
       pass.setPipeline(this.scatter);
       pass.dispatchWorkgroups(x, y);
+      if (degree > 0) {
+        pass.setBindGroup(0, state.shadeGroup);
+        pass.setPipeline(this.shades[degree]);
+        pass.dispatchWorkgroups(x, y);
+      }
     }
   }
 
@@ -520,9 +657,11 @@ export class SplatPass {
       });
       this._frameGroups.set(environment, frameGroup);
     }
-    pass.setPipeline(this.draw);
     pass.setBindGroup(1, frameGroup);
-    for (const { state } of this._items) {
+    let pipeline = null;
+    for (const { state, degree } of this._items) {
+      const wanted = degree > 0 ? this.drawShaded : this.draw;
+      if (wanted !== pipeline) pass.setPipeline(pipeline = wanted);
       pass.setBindGroup(0, state.drawGroup);
       pass.drawIndirect(state.args, 0);
     }
@@ -540,5 +679,5 @@ function sameFloats(a, b, n) {
 }
 
 function destroyState(state) {
-  for (const name of ['cloud', 'keys', 'visible', 'counts', 'cursors', 'order', 'args']) state[name].destroy();
+  for (const name of ['cloud', 'keys', 'visible', 'counts', 'cursors', 'order', 'args', 'shaded']) state[name].destroy();
 }

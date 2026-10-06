@@ -53,7 +53,7 @@ These hold everywhere, so one learned is one learned for good.
 
 Every call, setting and entry, A to Z by its name.
 
-**A** &nbsp; [`aabb`](#math-aabb) · [`scene.add()`](#scene-add) · [`scene.addDecal()`](#scene-adddecal) · [`scene.addEmitter()`](#scene-addemitter) · [`scene.addLight()`](#scene-addlight) · [`scene.addPath()`](#scene-addpath) · [`scene.addProbe()`](#scene-addprobe) · [`scene.addShape()`](#scene-addshape) · [`scene.addSplats()`](#scene-addsplats) · [`scene.addSprite()`](#scene-addsprite) · [`scene.addText()`](#scene-addtext) · [`scene.addTilemap()`](#scene-addtilemap) · [`scene.advance()`](#scene-advance) · [`node.alive`](#node-alive) · [`camera.ambient`](#camera2d-ambient) · [`camera.angle`](#camera2d-angle) · [`node.animation`](#node-animation) · [`node.animations`](#node-animations) · [`engine.renderer.post.antialias`](#post-antialias) · [`engine.renderer.ao`](#renderer-ao) · [`engine.debug.axes()`](#debug-axes)
+**A** &nbsp; [`aabb`](#math-aabb) · [`scene.add()`](#scene-add) · [`scene.addDecal()`](#scene-adddecal) · [`scene.addEmitter()`](#scene-addemitter) · [`scene.addLight()`](#scene-addlight) · [`scene.addPath()`](#scene-addpath) · [`scene.addProbe()`](#scene-addprobe) · [`scene.addShape()`](#scene-addshape) · [`scene.addSplats()`](#scene-addsplats) · [`scene.addSprite()`](#scene-addsprite) · [`scene.addText()`](#scene-addtext) · [`scene.addTilemap()`](#scene-addtilemap) · [`scene.advance()`](#scene-advance) · [`node.alive`](#node-alive) · [`camera.ambient`](#camera2d-ambient) · [`camera.angle`](#camera2d-angle) · [`node.animation`](#node-animation) · [`node.animations`](#node-animations) · [`engine.renderer.post.antialias`](#post-antialias) · [`engine.renderer.ao`](#renderer-ao) · [`engine.renderer.autoExposure`](#renderer-autoexposure) · [`engine.debug.axes()`](#debug-axes)
 
 **B** &nbsp; [`camera.background`](#camera2d-background) · [`new Benchmark()`](#benchmark) · [`scene.bounds()`](#scene-bounds) · [`engine.debug.box()`](#debug-box) · [`scene.burst()`](#scene-burst)
 
@@ -87,9 +87,9 @@ Every call, setting and entry, A to Z by its name.
 
 **R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.renderer.post.requestedLevels` (renamed)](#post-requestedlevels) · [`engine.renderer.resolution`](#renderer-resolution) · [`engine.rhi` (renamed)](#engine-rhi) · [`camera.rotation` (renamed)](#camera2d-rotation) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
 
-**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.debug.sphere()`](#debug-sphere) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
+**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
 
-**T** &nbsp; [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
+**T** &nbsp; [`engine.renderer.taa`](#renderer-taa) · [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
 
 **U** &nbsp; [`engine.unload()`](#engine-unload) · [`scene.update()`](#scene-update) · [`camera.update()`](#camera2d-update) · [`camera.update()`](#camera-update) · [`orbit.update()`](#orbitcontroller-update) · [`overlay.update()`](#statsoverlay-update)
 
@@ -114,6 +114,7 @@ Creates an engine on a `<canvas>`: requests the WebGPU device, compiles the rend
 | `onDeviceLost` | `null` | `(detail) => {}` when the GPU goes away. `detail` is `{ reason, message, recoverable, action: 'reload' }`. Without it the loss is logged to the console. The engine destroys itself either way. |
 | `onError` | `null` | `(error) => {}` for uncaptured WebGPU errors. Without it they go to `console.error`. |
 | `exposure` | `1` | Starting value of [`renderer.exposure`](#renderer-exposure). |
+| `autoExposure` | `null` | Starting value of [`renderer.autoExposure`](#renderer-autoexposure). |
 | `antialias` | `true` | FXAA after the tonemap. Same as `post.antialias`; see [`post.antialias`](#post-antialias). |
 | `grading` | `null` | Starting colour grading; see [`engine.grading`](#engine-grading). |
 | `post` | `{}` | Bloom and post settings: `threshold`, `knee`, `filterRadius`, `strength`, `levels`, `antialias`, `grading`. See [Renderer settings](#renderer-settings). Values here win over the top-level `antialias` and `grading`. |
@@ -122,6 +123,7 @@ Creates an engine on a `<canvas>`: requests the WebGPU device, compiles the rend
 | `lightDistance` | `null` | Starting value of [`renderer.lightDistance`](#renderer-lightdistance). |
 | `ao` | `false` | Ambient occlusion: `true`, or `{ radius }` in world units. Starting value of [`renderer.ao`](#renderer-ao). |
 | `oit` | `false` | Starting value of [`renderer.oit`](#renderer-oit). |
+| `taa` | `false` | Starting value of [`renderer.taa`](#renderer-taa). |
 | `fog` | `null` | Starting value of [`renderer.fog`](#renderer-fog). |
 | `dof` | `null` | Starting value of [`renderer.dof`](#renderer-dof). |
 | `environment` | `{}` | Settings for the default [`Environment`](#environment) (`size`, `irradianceSize`, `prefilterMips`, `sky`, `map`, `label`). Settings only, not an `Environment` instance. |
@@ -300,18 +302,31 @@ const scene = engine.createScene({ environment: studio });
 <a id="engine-loadsplats"></a>
 ### `engine.loadSplats(source, { fetch })` → `Promise<Splats>`
 
-Loads a Gaussian splat capture for [`scene.addSplats`](#scene-addsplats). It reads a `.ply` as 3D Gaussian Splatting training writes it (binary, with `f_dc`, `opacity`, `scale` and `rot` properties), or a `.splat` (32 bytes a splat). Colour comes from the constant spherical-harmonic term; the higher terms are skipped, so colour does not change with the view.
+Loads a Gaussian splat capture for [`scene.addSplats`](#scene-addsplats). It reads four formats, told apart by their bytes, not their names:
+
+| Format | What it is |
+|---|---|
+| `.ply` | As 3D Gaussian Splatting training writes it: binary, with `f_dc`, `opacity`, `scale` and `rot` properties. |
+| `.splat` | 32 bytes a splat, the compact web format. No harmonics. |
+| `.spz` | Niantic's, versions 1 to 3: gzipped and quantised, about a tenth of a `.ply`. Unpacked by the browser's own `DecompressionStream`, and turned from its y-up axes to the `.ply`'s, so it lands as its `.ply` would. |
+| `.sog` | PlayCanvas's, version 2: a zip of lossless WebP images and `meta.json`, about a fifteenth of a `.ply`. A loose `meta.json` and its images are not read: zip them. |
+
+A capture with higher spherical harmonics (a `.ply`'s `f_rest_*`, and the same in a `.spz` or `.sog`, to degree 3) keeps them, so colour changes with the view as it did in the photographs: a sheen, a reflection. They are kept as half floats, 20 to 92 bytes a splat by degree.
 
 `source` is a URL, an `ArrayBuffer` or a `Uint8Array`. `fetch` replaces `fetch` for downloading `source`.
 
-Returns: `{ count, min, max }`: how many splats, and the corners of the box around their centres, in the capture's units. Free it with [`engine.unload`](#engine-unload) once no scene draws it.
-Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' format; only binary_little_endian is read'`; `'splats: this .ply is not a splat capture: no <properties>'`; `'splats: the .ply is cut short: …'`; `'splats: not a .ply, and <n> bytes is not a whole number of 32-byte .splat records'`; `'splats: splat <i> has a position that is not a number'`; `'splats: a compressed .ply (from SuperSplat) is not read; …'`; `'splats: this is a zip -- a .sog, perhaps -- which is not read; …'`; `'splats: this is gzipped -- a .spz, perhaps -- which is not read; …'`; `'splats: <n> splats need <bytes> bytes in one buffer, past this device's <limit>; …'`.
+Returns: `{ count, min, max, degree }`: how many splats, the corners of the box around their centres in the capture's units, and the degree of its harmonics, 0 to 3. Free it with [`engine.unload`](#engine-unload) once no scene draws it.
+Throws: `'loadSplats: <url> returned <status>'`; `'splats: a .ply in '<format>' format; only binary_little_endian is read'`; `'splats: this .ply is not a splat capture: no <properties>'`; `'splats: the .ply is cut short: …'`; `'splats: not a .ply, and <n> bytes is not a whole number of 32-byte .splat records'`; `'splats: splat <i> has a position that is not a number'`; `'splats: a compressed .ply (from SuperSplat) is not read; …'`; `'splats: a .spz of version 4, compressed with zstd, which browsers cannot unpack; …'`; `'splats: gzipped, but not a .spz'`; `'splats: the .spz is cut short: …'`; `'splats: a .sog of version <n>; version 2 is read …'`; `'splats: the .sog has no <file>'`; `'splats: <image> has <n> pixels, for <count> splats'`; `'splats: a zip64 .sog is not read'`; `'splats: <n> splats need <bytes> bytes in one buffer, past this device's <limit>; …'`.
 
 ```js
 const room = await engine.loadSplats('room.ply');
 ```
 
-Notes: every call allocates, the same file included. One `Splats` can be drawn by many nodes, in many scenes.
+Notes:
+- Every call allocates, the same file included. One `Splats` can be drawn by many nodes, in many scenes.
+- A `.spz` is read as Niantic's spec has it: stored y up (RUB), and turned to the `.ply`'s axes, so it needs the same half turn about x a `.ply` does. Some tools write a `.spz` without that conversion, in the `.ply`'s axes as they are -- PlayCanvas's `splat-transform` does -- and the header does not say which. Such a capture comes out the other way up: it stands upright without the half turn.
+- A `.spz` saved antialiased (Mip-Splatting) is drawn as any other; its antialiasing is not applied.
+- A `.spz` with harmonics of degree 4 keeps the first three degrees.
 
 <a id="engine-run"></a>
 ### `engine.run(scene, camera, { update, frame, hud })` → `void`
@@ -579,11 +594,39 @@ Plain fields on `engine.renderer` and `engine.renderer.post`. Set them at any ti
 <a id="renderer-exposure"></a>
 ### `engine.renderer.exposure` → `number`
 
-Default `1` (the `exposure` option). Multiplies the scene's linear colour before the tonemap. `2` is one stop brighter.
+Default `1` (the `exposure` option). Multiplies the scene's linear colour before the tonemap. `2` is one stop brighter. With [`autoExposure`](#renderer-autoexposure) on, it applies on top, as exposure compensation.
 
 ```js
 engine.renderer.exposure = 0.5;
 ```
+
+<a id="renderer-autoexposure"></a>
+### `engine.renderer.autoExposure` → `object | null`
+
+Default `null` (off; the `autoExposure` option). Exposure chosen from the image, as an eye or a camera adapts: it opens up in a dark room and stops down outside, easing from one to the other over time. Assign `true` for the defaults, or an object; `null` turns it off.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `min` | `-8` | The lowest exposure it will choose, in stops. |
+| `max` | `8` | The highest, in stops. At least `min`. |
+| `brighten` | `3` | How fast the image brightens, going somewhere darker, in stops a second. Above 0. |
+| `darken` | `1` | How fast it darkens, going somewhere brighter, in stops a second. Above 0. |
+
+It measures the scene each frame, before exposure, and puts its average brightness at middle grey, leaving out the darkest and brightest tenth and black: a lamp in shot or a dark corner does not swing it. [`exposure`](#renderer-exposure) still applies on top, so `exposure = 2` keeps everything a stop brighter than auto exposure would.
+
+Throws (on the next frame): `'autoExposure: true, { min, max, brighten, darken }, or null to turn it off, got …'`; `'autoExposure: min must be a finite number of stops, got …'`, and the same for `max`; `'autoExposure: min must be at most max, got …'`; `'autoExposure: brighten must be a positive number of stops a second, got …'`, and the same for `darken`.
+
+```js
+engine.renderer.autoExposure = true;
+engine.renderer.autoExposure = { min: -2, max: 4, darken: 2 };
+engine.renderer.exposure = 1.5;   // half a stop over what auto exposure picks
+```
+
+Notes:
+- The first frame after it is turned on takes the right exposure at once; after that it eases.
+- It adapts only on frames drawn to the canvas. A frame drawn into a [target](#engine-createtarget) uses the canvas's exposure and does not move it.
+- With [`onDemand`](#engine-ondemand), `run` keeps drawing while the exposure is still easing, even if nothing moved, and rests once it has settled.
+- It costs two small compute passes, about 0.1 ms at 1280x720 on integrated graphics (Intel Iris Xe).
 
 <a id="renderer-resolution"></a>
 ### `engine.renderer.resolution` → `number`
@@ -652,6 +695,31 @@ Throws (on the next frame): `'ao: radius must be positive, or null to fit the sc
 
 Notes: the first time it is turned on, its pipelines build in the background. Frames draw without it until they are ready, a fraction of a second. After that, switching costs nothing. The same holds for [`oit`](#renderer-oit) and [`post.antialias`](#post-antialias).
 
+<a id="renderer-taa"></a>
+### `engine.renderer.taa` → `boolean`
+
+Default `false` (the `taa` option). Temporal antialiasing, in place of FXAA on frames drawn to the canvas. The camera is moved a fraction of a pixel each frame, a different fraction each time, and each frame is blended with the ones before it, so over sixteen frames every pixel has been sampled at sixteen points inside it: close to supersampling, spread over time.
+
+```js
+engine.renderer.taa = true;
+```
+
+What it does better than FXAA:
+- Edges come out much nearer a supersampled frame: on Sponza at 1280x720, the error at edges against 16x supersampling fell from 9.3 to 6.2 with the camera still, and from 9.8 to 9.3 panning.
+- Thin and shiny things stop crawling as the camera moves, which FXAA cannot fix: it sees one frame at a time.
+- The grain of soft shadows ([`size`](#scene-addlight)) is turned a little each frame and averages away.
+
+What it costs:
+- About 1.2 ms a frame more than FXAA at 1280x720 on integrated graphics (Intel Iris Xe): 0.6 for its own pass, the rest for material textures read half a mip sharper, which keeps surfaces from going soft.
+- Surfaces inside an object are still a little softer than with FXAA (2.7 against 2.2 in that measure).
+- Two images of history, 8 bytes a pixel each: about 15 MB at 1280x720.
+
+Notes:
+- Where a surface was last frame is worked out from the depth buffer and the camera, so it is exact for everything that the camera's own movement moves. Something that moves by itself is kept from smearing by holding the history to the colours around each pixel in this frame; on Sponza a box crossing the view at 7 pixels a frame left no trail. Particles, splats and sprites are treated the same way.
+- A still view keeps drawing for 24 frames while the picture settles; then [`run`](#engine-run) rests as it does without TAA.
+- Only frames drawn to the canvas use it: a [target](#engine-createtarget) keeps FXAA.
+- The first time it is turned on, its pass builds in the background, and frames use FXAA until it is ready.
+
 <a id="renderer-oit"></a>
 ### `engine.renderer.oit` → `boolean`
 
@@ -662,6 +730,15 @@ engine.renderer.oit = true;
 ```
 
 Notes: builds in the background the first time, like [`ao`](#renderer-ao).
+
+<a id="renderer-softshadows"></a>
+### `engine.renderer.softShadows` → `boolean`
+
+Default `true`. Whether lights given a [`size`](#scene-addlight) cast soft shadows. Set it `false` to draw every light's shadow with the plain edge -- on a slow device, say, or from a graphics setting -- without changing any light: each keeps its size, and soft shadows come back when it is set `true` again. Off, the soft-shadow code is compiled out of the shaders, so it costs nothing at all.
+
+```js
+engine.renderer.softShadows = false;
+```
 
 <a id="renderer-shadows"></a>
 ### `engine.renderer.shadows` → `ShadowMaps`
@@ -1304,10 +1381,11 @@ Adds a point, spot or directional light.
 | `outerAngle` | `0.5` | Spot only: radians from the axis where the cone reaches zero. `0 ≤ innerAngle ≤ outerAngle ≤ π/2`; equal angles give a hard edge. |
 | `parent` | `null` | Node to attach it to. The light then follows and aims with its parent. |
 | `castShadow` | `true` for directional, `false` otherwise | Whether it casts shadows. |
+| `size` | `0` | How large the light itself is, which softens its shadows: a point or spot light's radius in world units (a bulb, 0.05; a window, 0.5); a directional light's angle across, in radians (the sun, 0.0093). `0` casts the plain edge. 0 or more. |
 
 Returns: the light's Node.
 
-Throws: `'addLight: type must be point, spot or directional, got …'`; `'addLight: color must be 3 finite numbers, 0 or more, got …'`; `'addLight: intensity must be 0 or more, got …'`; `'addLight: radius must be positive, got …'`; `'addLight: angles need 0 <= innerAngle <= outerAngle <= PI/2, got …'`.
+Throws: `'addLight: type must be point, spot or directional, got …'`; `'addLight: color must be 3 finite numbers, 0 or more, got …'`; `'addLight: intensity must be 0 or more, got …'`; `'addLight: radius must be positive, got …'`; `'addLight: size must be 0 or more, got …'`; `'addLight: angles need 0 <= innerAngle <= outerAngle <= PI/2, got …'`.
 
 ```js
 const lamp = scene.addLight({ position: [0, 3, 0], color: [1, 0.7, 0.4], intensity: 20, radius: 8 });
@@ -1319,6 +1397,7 @@ Notes:
 - A directional light with no `direction` shines along -Z. Give it one, or turn its node.
 - Passing `direction` without `type` makes a spot. For a directional light, say `type: 'directional'`.
 - Shadows are drawn from a closed mesh's back faces, which keeps its lit faces free of acne. A mesh with an open edge -- a plane, a roof of one sheet -- is drawn whole, so it casts whichever side faces the light, as a double-sided material does.
+- Soft shadows: a light with a `size` casts percentage-closer soft shadows (PCSS). Its penumbra widens with the gap between the caster and where the shadow falls, as a real light's does: sharp where a chair leg meets the floor, soft under a table top. The width is capped at 64 shadow-map texels, and the edge is a fine per-pixel grain, not bands. [`renderer.softShadows`](#renderer-softshadows) turns it off for every light at once. It costs only while some light that casts has a size: the scene's shaders are built a second way, with it compiled in, the first time one does, and frames show the plain edge until they are ready. It is not cheap: on integrated graphics (Intel Iris Xe), a sun the sun's size took Sponza's forward pass at 1280x720 from 5.7 to 8.8 ms, most of it 8 depth reads and 12 filtered taps for every pixel it lights.
 - Shadows, by type: a directional light gets up to four cascaded shadow maps that follow the camera. A spot gets one shadow view down its cone, or six (like a point light) when `outerAngle` is wider than 45 degrees. A point light gets six, one per cube face. A point or spot light draws no shadow maps while its radius sphere is off screen. Maps are redrawn only when something within the light's reach moves.
 - 2D: through a `Camera2D`, point and spot lights also light every sprite, shape, path, text or tilemap made with `lit: true`, fading to nothing at `radius` (in the view's units). Give `position: [x, y]` and, for a spot, `direction: [x, y]`. Directional lights and shadows do not apply in 2D. Where no light reaches, the camera's `ambient` lights it.
 
@@ -1334,7 +1413,7 @@ Changes what a light is, without moving it: the same names [`addLight`](#scene-a
 
 | Change | Applies to |
 |---|---|
-| `color`, `intensity`, `castShadow` | every type |
+| `color`, `intensity`, `castShadow`, `size` | every type |
 | `radius` | point, spot |
 | `innerAngle`, `outerAngle` | spot |
 
@@ -1352,7 +1431,7 @@ Notes: a light cannot change type; remove it and add another.
 
 The light's settings, or `null` if the node is not a light. A copy: change it through [`setLight`](#scene-setlight).
 
-Returns: `{ type, color, intensity, castShadow }`, plus `radius` for a point or spot, plus `innerAngle` and `outerAngle` for a spot. Position and direction are not included; they are the node's.
+Returns: `{ type, color, intensity, castShadow, size }`, plus `radius` for a point or spot, plus `innerAngle` and `outerAngle` for a spot. Position and direction are not included; they are the node's.
 
 ```js
 if (scene.lightOf(lamp).castShadow) console.log('casts');
@@ -1442,7 +1521,7 @@ A capture made by 3D Gaussian Splatting: up to millions of soft, coloured ellips
 
 Adds a capture as a node. The node's position, rotation and scale place it, and one capture can be added any number of times. `position` defaults to `[0, 0, 0]`.
 
-Splats are lit by nothing: they show the colour the capture saw, decoded from sRGB, fogged by [`renderer.fog`](#renderer-fog) by the distance to each one, and tonemapped with the rest of the frame. Geometry in front hides them. They write no depth, so they hide nothing and cast no shadows. They are drawn straight after opaque geometry, so sprites, particles and blended surfaces in front of a capture show over it; blended or transmissive surfaces behind one show over it too. [Depth of field](#renderer-dof) works from depth, so it blurs splats as whatever geometry is behind them, or as far away where there is none. They count in [`scene.bounds`](#scene-bounds) and [`scene.frame`](#scene-frame) by the box around their centres. They are not picked or raycast.
+Splats are lit by nothing: they show the colour the capture saw, from where the camera sees them when the capture has harmonics, decoded from sRGB, fogged by [`renderer.fog`](#renderer-fog) by the distance to each one, and tonemapped with the rest of the frame. Geometry in front hides them. They write no depth, so they hide nothing and cast no shadows. They are drawn straight after opaque geometry, so sprites, particles and blended surfaces in front of a capture show over it; blended or transmissive surfaces behind one show over it too. [Depth of field](#renderer-dof) works from depth, so it blurs splats as whatever geometry is behind them, or as far away where there is none. They count in [`scene.bounds`](#scene-bounds) and [`scene.frame`](#scene-frame) by the box around their centres. They are not picked or raycast.
 
 Throws: `'addSplats: splats must be what engine.loadSplats returned'`; `'addSplats: these splats were unloaded'`. A frame drawing splats unloaded since they were added throws `'addSplats: these splats were unloaded; remove the node first'`.
 
@@ -1452,7 +1531,7 @@ const room = await engine.loadSplats('room.ply');
 scene.addSplats({ splats: room }).setAxisAngle([1, 0, 0], Math.PI);
 ```
 
-Notes: two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. On integrated graphics (Intel Iris Xe, a million splats, 1280x720) the draw costs about 10 ms for a capture seen whole, and more up close, where splats fill the screen; [`renderer.resolution`](#renderer-resolution) cuts that part. The sort costs about 2 ms, and nothing while the view is still.
+Notes: a capture's harmonics are worked out once a visible splat whenever it is sorted again, so a still view barely pays for them: for 205,000 splats of degree 3 on integrated graphics (Intel Iris Xe), about 1.4 ms in the frames the view moves, and 0.16 ms in the draw otherwise. Two captures are each sorted on their own and drawn farther one first, so where two overlap they do not interleave. On integrated graphics (Intel Iris Xe, a million splats, 1280x720) the draw costs about 10 ms for a capture seen whole, and more up close, where splats fill the screen; [`renderer.resolution`](#renderer-resolution) cuts that part. The sort costs about 2 ms, and nothing while the view is still.
 
 <a id="scene-splatsof"></a>
 ### `scene.splatsOf(node)` → `{ splats } | null`

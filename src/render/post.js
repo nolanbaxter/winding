@@ -26,6 +26,7 @@ import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { clampSampler } from '../rhi/texture.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { GRADING_WGSL, packGrading } from './grading.js';
+import { AutoExposure } from './exposure.js';
 
 export const HDR_FORMAT = 'rgba16float';
 /**
@@ -59,6 +60,8 @@ ${GRADING_WGSL}
 @group(1) @binding(0) var<uniform> grading : Grading;
 @group(1) @binding(1) var lut        : texture_3d<f32>;
 @group(1) @binding(2) var lutSampler : sampler;
+// Auto exposure's choice, in stops (render/exposure.js): 0 while it is off.
+@group(1) @binding(3) var<storage, read> exposureState : array<f32, 4>;
 
 struct VertexOut {
   @builtin(position) position : vec4<f32>,
@@ -204,7 +207,7 @@ fn fsTonemap(v : VertexOut) -> @location(0) vec4<f32> {
   // Alpha carries the luma FXAA reads, perceptual rather than linear (the
   // square root stands in for the display curve), since that is what edges
   // are judged by. The screen is opaque, so there it is ignored.
-  var mapped = tonemapACES(gradeLinear(grading, combined * params.exposure));
+  var mapped = tonemapACES(gradeLinear(grading, combined * params.exposure * exp2(exposureState[0])));
   // A LUT maps the display's encoded values, texel centres at the grid's
   // points: the encoded colour in, decoded back out, since the target encodes.
   let lutSize = grading.balance2.w;
@@ -407,8 +410,10 @@ export class PostStack {
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '3d' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ],
     });
+    this.autoExposure = await AutoExposure.create(rhi, pipelines);
     const tonemapLayout = createPipelineLayout(rhi.device, { 0: this.layout, 1: this.gradingLayout }, 'tonemap');
     this.gradingBuffer = createBuffer(rhi, { label: 'grading', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     // What the LUT binding holds without one: never sampled, since its size is 0.
@@ -490,7 +495,7 @@ export class PostStack {
    * `sceneColor` is the HDR target the forward pass wrote; `surface` is the
    * swap chain. Everything between is a graph transient.
    */
-  addPasses(graph, { sceneColor, surface, width, height, exposure }) {
+  addPasses(graph, { sceneColor, surface, width, height, exposure, autoExposure = null, adapt = true, fxaa = true }) {
     this._frame++;
     this.rhi.queue.writeBuffer(this.gradingBuffer, 0, packGrading(this._gradingData, this.grading));
     this._evictBindGroups();
@@ -569,7 +574,9 @@ export class PostStack {
       smallerHeight = chain[i].height;
     }
 
-    // --- tonemap ------------------------------------------------------------
+    // --- exposure and tonemap ----------------------------------------------
+    // Declared as a read, so the graph runs the exposure passes first.
+    const exposed = this.autoExposure.addPasses(graph, { settings: autoExposure, sceneColor, width, height, adapt });
     const bloomResult = smaller;
     const tonemapSlot = MAX_BLOOM_LEVELS * 2;
     this._offsets[tonemapSlot] = this._writeParams(tonemapSlot, 1 / width, 1 / height, {
@@ -578,8 +585,8 @@ export class PostStack {
 
     const black = { r: 0, g: 0, b: 0, a: 1 };
     // Antialiased once FXAA's pipelines exist; asked for before then, they start building.
-    if (this.antialias && this.fxaaPipeline === undefined) this._fxaaReady().catch((error) => console.error(error));
-    this._antialiasing = this.antialias && this.fxaaPipeline !== undefined;
+    if (fxaa && this.antialias && this.fxaaPipeline === undefined) this._fxaaReady().catch((error) => console.error(error));
+    this._antialiasing = fxaa && this.antialias && this.fxaaPipeline !== undefined;
     const ldr = this._antialiasing
       ? graph.createTexture('ldr', {
         width, height, format: LDR_FORMAT,
@@ -588,7 +595,7 @@ export class PostStack {
       : surface;
     graph.addPass({
       name: 'tonemap',
-      reads: [sceneColor, bloomResult],
+      reads: exposed === null ? [sceneColor, bloomResult] : [sceneColor, bloomResult, exposed],
       color: [{ resource: ldr, clear: black }],
       execute: this._tonemapExecute,
     });
@@ -678,6 +685,7 @@ export class PostStack {
           { binding: 0, resource: { buffer: this.gradingBuffer } },
           { binding: 1, resource: this.grading?.lut?.view ?? this._noLut.createView({ dimension: '3d' }) },
           { binding: 2, resource: this.sampler },
+          { binding: 3, resource: { buffer: this.autoExposure.state } },
         ],
       });
       this._gradingGroups.set(key, group);
@@ -686,6 +694,7 @@ export class PostStack {
   }
 
   destroy() {
+    this.autoExposure?.destroy();
     this.gradingBuffer.destroy();
     this._noLut.destroy();
     this.paramsBuffer.destroy();

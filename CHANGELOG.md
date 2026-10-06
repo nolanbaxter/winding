@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-06
+
+**Better pictures, measured.** Temporal antialiasing, soft shadows from a light's size, auto
+exposure, splats whose colour changes with the view and that load from `.spz` and `.sog`, and
+cheaper ambient occlusion -- each A/B'd on Sponza or a real capture before it was kept, and what
+was tried and dropped says so below. And the GPU suite runs in CI now, on every push.
+
+### Added
+
+- **Temporal antialiasing.** [`renderer.taa`](docs/API.md#renderer-taa) (and the `taa` option)
+  moves the camera a fraction of a pixel each frame, by a 16-point Halton sequence, and blends each
+  frame with the history of the ones before it: reprojected from the depth buffer and the camera,
+  fetched by Catmull-Rom, clipped to the neighbourhood's colours in YCoCg, blended a tenth new and
+  weighted by luma, trusting the history less as it moves. It takes FXAA's place on canvas frames.
+  On Sponza at 720p against 16x supersampling, edge error 9.3 -> 6.2 still and 9.8 -> 9.3 panning,
+  for about 1.2 ms a frame on Iris Xe -- with material textures half a mip sharper, which three
+  other ways of keeping surfaces crisp were measured against: a full mip sharper (+3.3 ms), AMD's
+  CAS sharpening after it (cheaper, and worse: it sharpened the noise), and a running average for
+  a still view (further from supersampling). Soft shadows' grain turns each frame and averages
+  away. A still view draws 24 more frames to settle, then `run` rests.
+
+- **Soft shadows.** `scene.addLight({ size })` -- a point or spot light's radius, a directional
+  light's angle across -- casts percentage-closer soft shadows (PCSS): a blocker search, then a
+  filter as wide as the penumbra the gap between caster and receiver makes, so a shadow is sharp
+  where an object meets the floor and soft far from it. 8 search taps and 12 filter taps on a Vogel disk turned
+  per pixel, so a wide penumbra is grain, not bands. Compiled in only while a light that casts has
+  a size. `setLight` changes it and `lightOf` returns it. Not cheap: a real-sized sun takes Sponza's
+  forward pass from 5.7 to 8.8 ms at 720p on Iris Xe (the first cut took it to 12.3).
+  [`renderer.softShadows`](docs/API.md#renderer-softshadows) `= false` turns it off for every light at
+  once, a quality setting, leaving each light's size as it is.
+
+- **Splats change colour with the view.** A `.ply` capture's higher spherical harmonics (`f_rest_*`,
+  degree 1 to 3) are kept, as half floats, and evaluated from the direction each splat is seen
+  from. A compute pass works them out once a visible splat, whenever the cloud is sorted again, so
+  a still view pays nothing: in the vertex shader they ran at every corner of every quad and doubled
+  the draw (205k splats, 720p, Iris Xe: 2.19 -> 4.65 ms); as a pass, 1.4 ms while the view moves,
+  0.16 ms while it is still. Each degree is an override constant, so a capture without them pays
+  nothing. `loadSplats` returns the capture's `degree`.
+- **`.spz` and `.sog` captures load.** `engine.loadSplats` reads Niantic's `.spz` (versions 1 to 3,
+  gunzipped by the browser's `DecompressionStream`, turned from its y-up axes to the `.ply`'s) and
+  PlayCanvas's `.sog` (version 2: a zip read by hand, entries stored or deflated, its WebP images
+  decoded exactly through WebGPU, since a 2D canvas premultiplies alpha and would change the
+  bytes). Both with their harmonics. Still no dependency. `.spz` version 4 is zstd, which no
+  browser unpacks, and says so. Checked on real files: Niantic's own sample `.spz`, and a `.sog`
+  and a version 3 `.spz` written by `splat-transform` from a `.ply`, each splat within the format's
+  own quantisation of the `.ply`'s. A `.spz` written without coordinates, as `splat-transform`
+  writes them, comes out the other way up: the spec says RUB, and the header cannot say otherwise.
+
+- **Auto exposure.** [`renderer.autoExposure`](docs/API.md#renderer-autoexposure) (`true`, or
+  `{ min, max, brighten, darken }`) sets the exposure from the image: a 64-bin histogram of log
+  brightness, its darkest and brightest tenths left out, puts the scene at middle grey, and the
+  exposure eases there at so many stops a second. Two small compute passes, with no read back on the
+  way: the tonemap reads the result on the GPU. `renderer.exposure` still applies, as
+  compensation. `run` keeps drawing while it eases and rests once it settles.
+
+- **The GPU suite runs in CI.** `test/gpu.ci.js` (`npm run test:gpu:headless`) opens
+  `test/gpu.html` in headless Chrome, driven over the DevTools protocol with Node's own WebSocket,
+  so nothing is installed. CI runs it on every push, on a runner with no GPU, where SwiftShader
+  compiles and runs every shader: a WGSL mistake now fails the build instead of waiting for someone
+  to open the page.
+
+### Changed
+
+- **Ambient occlusion is 14% cheaper.** A half-resolution pass now works out each block's view depth
+  and normal once, as XeGTAO does, and the occlusion, its blur and the composite read that instead of
+  rebuilding them from the depth buffer -- the composite read the depth buffer nine times a pixel,
+  and now reads it once. 2.21 -> 1.91 ms on Sponza at 1280x720 on Intel Iris Xe, measured A/B in
+  one page. The look is the same but for a pixel's width at screen borders and the thinnest
+  geometry. Walking the horizons on the half-resolution data, a fast `acos`, and depth turned to
+  position without the matrix were measured too, and gained nothing.
+
+### Fixed
+
+- **A GPU check too strict about lines.** The 2D debug-circle check read the one pixel where two
+  of the circle's segments meet; which pixel a line's end covers is up to the implementation, and
+  SwiftShader chose the other one.
+
 ## [1.3.0] - 2026-10-05
 
 **Types.** Winding ships TypeScript types, written by hand from the API reference and checked
@@ -2183,7 +2260,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/nolanbaxter/winding/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/nolanbaxter/winding/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nolanbaxter/winding/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/nolanbaxter/winding/compare/v1.1.0...v1.1.1

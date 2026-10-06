@@ -258,7 +258,7 @@ export function spriteRecord({
  * setLight checks just its changes. `cone` is the inner and outer angle the
  * light will have once the changes land.
  */
-function checkLight(caller, { color, intensity, radius }, cone) {
+function checkLight(caller, { color, intensity, radius, size }, cone) {
   if (color !== undefined && !(color?.length === 3 && [...color].every((v) => Number.isFinite(v) && v >= 0))) {
     throw new Error(`${caller}: color must be 3 finite numbers, 0 or more, got ${color}`);
   }
@@ -266,6 +266,7 @@ function checkLight(caller, { color, intensity, radius }, cone) {
     throw new Error(`${caller}: intensity must be 0 or more, got ${intensity}`);
   }
   if (radius !== undefined && !(radius > 0 && Number.isFinite(radius))) throw new Error(`${caller}: radius must be positive, got ${radius}`);
+  if (size !== undefined && !(size >= 0 && Number.isFinite(size))) throw new Error(`${caller}: size must be 0 or more, got ${size}`);
   if (cone && !(cone[0] >= 0 && cone[0] <= cone[1] && cone[1] <= Math.PI / 2)) {
     throw new Error(`${caller}: angles need 0 <= innerAngle <= outerAngle <= PI/2, got ${cone[0]} and ${cone[1]}`);
   }
@@ -684,6 +685,12 @@ export class Scene {
      * not, because it is local and a point light is six maps.
      */
     this.shadowCasters = new Set();
+    /**
+     * The size of each light that has one, by entity: a point or spot light's
+     * radius, a directional light's angle across. What makes its shadows soft
+     * (PCSS); a light without one casts the plain filtered edge.
+     */
+    this.lightSizes = new Map();
     /**
      * Reflection probes (render/probes.js): { min, max, position, fade,
      * captured }. engine.captureProbes renders them; the revision
@@ -1170,6 +1177,7 @@ export class Scene {
       if (index !== undefined) this._removeLightAt(index);
       this._directional.delete(entity);
       this.shadowCasters.delete(entity);
+      this.lightSizes.delete(entity);
     }
 
     // A scene no 2D view draws never has these read: past a point, a rebuild
@@ -1334,7 +1342,8 @@ export class Scene {
     const entity = node.entity;
     const castShadow = this.shadowCasters.has(entity);
     const directional = this._directional.get(entity);
-    if (directional) return { type: 'directional', color: Float32Array.from(directional.color), intensity: directional.intensity, castShadow };
+    const size = this.lightSizes.get(entity) ?? 0;
+    if (directional) return { type: 'directional', color: Float32Array.from(directional.color), intensity: directional.intensity, castShadow, size };
     const index = this._lightOf.get(entity);
     if (index === undefined) return null;
     const o = index * LIGHT_FLOATS, light = this.lights;
@@ -1346,6 +1355,7 @@ export class Scene {
       radius: light[o + 3],
       ...(spot ? { innerAngle: this._lightCone[index * 2], outerAngle: this._lightCone[index * 2 + 1] } : {}),
       castShadow,
+      size,
     };
   }
 
@@ -1842,12 +1852,13 @@ export class Scene {
     outerAngle = 0.5,
     parent = null,
     castShadow,
+    size = 0,
   } = {}) {
     this.changes++;
     if (type !== 'point' && type !== 'spot' && type !== 'directional') {
       throw new Error(`addLight: type must be point, spot or directional, got ${type}`);
     }
-    checkLight('addLight', { color, intensity, radius }, type === 'spot' ? [innerAngle, outerAngle] : null);
+    checkLight('addLight', { color, intensity, radius, size }, type === 'spot' ? [innerAngle, outerAngle] : null);
     // Aim by rotating the node: -Z along the requested direction, upright.
     // [x, y] aims one across a 2D view.
     const rotation = direction ? quatLookAlong(quatCreate(), [direction[0], direction[1], direction[2] ?? 0]) : undefined;
@@ -1861,6 +1872,7 @@ export class Scene {
       parent: parentEntity,
     });
     this._attachLight(entity, { type, color, intensity, radius, innerAngle, outerAngle, castShadow });
+    if (size > 0) this.lightSizes.set(entity, size);
     return new Node(this, entity);
   }
 
@@ -1889,6 +1901,9 @@ export class Scene {
     const directional = this._directional.get(entity);
     if (changes.castShadow !== undefined && (directional || this._lightOf.has(entity))) {
       if (changes.castShadow) this.shadowCasters.add(entity); else this.shadowCasters.delete(entity);
+    }
+    if (changes.size !== undefined && (directional || this._lightOf.has(entity))) {
+      if (changes.size > 0) this.lightSizes.set(entity, changes.size); else this.lightSizes.delete(entity);
     }
     if (directional) {
       // A directional light has no radius and no cone: colour and brightness are all of it.
@@ -1969,7 +1984,8 @@ export class Scene {
       this.directionals[o + 4] = color[0] * intensity;
       this.directionals[o + 5] = color[1] * intensity;
       this.directionals[o + 6] = color[2] * intensity;
-      this.directionals[o + 7] = 0;
+      // Its size, an angle: how soft its shadows are (render/shaders/pbr.js, softVisibility).
+      this.directionals[o + 7] = this.lightSizes.get(entity) ?? 0;
     }
     this.directionalCount = packed;
   }

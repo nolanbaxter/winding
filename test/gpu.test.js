@@ -1121,6 +1121,84 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report.join(', ');
   });
 
+  await step('a light with a size casts soft shadows: sharp by the caster, wider the farther it falls, and a switch turns them off', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '200px';
+    canvas.style.height = '200px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(200, 200);
+      const quad = await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1] }));
+      // A floor, and the same floor under two plates: one low, one high, side by
+      // side. The plates face down, so from above they are culled and show their
+      // shadows; dividing by the bare floor leaves the shadow alone.
+      const floor = (plates) => {
+        const scene = probe.createScene();
+        scene.add(quad).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(40, 40, 1);
+        if (plates) {
+          scene.add(quad).setPosition(-1.5, 0.5, 0).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(1.2, 1.2, 1);
+          scene.add(quad).setPosition(1.5, 4, 0).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(1.2, 1.2, 1);
+        }
+        return scene;
+      };
+      const scenes = [floor(false), floor(true)];
+      const cam = new Camera({ fovY: 0.8, orthographic: true });
+      cam.position.set([0, 20, 0]);
+      cam.target.set([0, 0, 0]);
+      cam.up.set([0, 0, -1]);
+      const rowOf = async (scene) => {
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        const pixels = await probe.gpu.readPixels();
+        return Array.from({ length: 200 }, (_, x) => pixels[(100 * 200 + x) * 4 + 1]);
+      };
+      /** Under each plate, the pixels across the middle row that are neither lit nor in full shadow. */
+      const penumbras = async () => {
+        const [bare, shaded] = [await rowOf(scenes[0]), await rowOf(scenes[1])];
+        const seen = shaded.map((v, x) => (bare[x] > 8 ? v / bare[x] : 1));
+        const between = (from, to) => seen.slice(from, to).filter((v) => v > 0.1 && v < 0.9).length;
+        return [between(0, 100), between(100, 200)];
+      };
+      const results = {};
+      for (const [name, light, size] of [
+        ['sun', { type: 'directional', direction: [0, -1, 0], intensity: 3 }, 0.12],
+        ['spot', { position: [0, 9, 0], direction: [0, -1, 0], intensity: 300, radius: 30, outerAngle: 1.2, innerAngle: 1.1, castShadow: true }, 1.2],
+      ]) {
+        const nodes = scenes.map((scene) => scene.addLight(light));
+        results[name] = { hard: await penumbras() };
+        scenes.forEach((scene, k) => scene.setLight(nodes[k], { size }));
+        // The soft pipelines start building on the first frame that asks for them,
+        // and frames draw the plain edge until they are ready.
+        probe.renderFrame(scenes[1], cam);
+        for (let i = 0; i < 200 && !probe.renderer._variantSets.get(16)?.ready; i++) await new Promise((r) => setTimeout(r, 20));
+        results[name].soft = await penumbras();
+        // Switched off for the whole renderer: plain again, each light keeping its size.
+        probe.renderer.softShadows = false;
+        results[name].off = await penumbras();
+        probe.renderer.softShadows = true;
+        scenes.forEach((scene, k) => scene.remove(nodes[k]));
+      }
+      const error = await probe.gpu.device.popErrorScope();
+      const report = Object.entries(results).map(([name, { hard, soft, off }]) => `${name}: ${hard.join(' and ')} px plain, ${soft.join(' and ')} px soft, `
+        + `${off.join(' and ')} px switched off (low plate, high plate)`).join('; ');
+      if (error) throw new Error(`${report}; ${error.message}`);
+      for (const { hard, soft, off } of Object.values(results)) {
+        if (off.some((v, k) => Math.abs(v - hard[k]) > 1)) throw new Error(report);
+        // Plain: the same few-pixel edge under both. Soft: the high plate's edge far wider than the low one's.
+        if (!(Math.abs(hard[0] - hard[1]) <= 2 && soft[1] > soft[0] * 2.5 && soft[1] > hard[1] + 4)) throw new Error(report);
+      }
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a point light keeps its shadow maps while nothing near it moves, and redraws when a caster does', async () => {
     // The cached frame must be the frame a fresh draw gives, pixel for pixel;
     // a caster that moves must take its shadow with it; and something moving
@@ -1307,6 +1385,94 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const is = (s, v) => s.aa === v && s.ao === v && s.oit === v;
     if (!(is(off, false) && is(on, true) && is(offAgain, false) && on.between > 50 && offAgain.between < on.between / 4)) throw new Error(report);
     return report;
+  });
+
+  await step('TAA settles an edge far nearer supersampling than an unfiltered frame, and run() rests once it has', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      // A bright square turned a little: long edges at a shallow slope, the
+      // staircase antialiasing is for.
+      const scene = probe.createScene();
+      scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
+        .setAxisAngle([0, 0, 1], 0.12).setScale(0.6, 0.6, 1);
+      const cam = new Camera({ fovY: 0.8, near: 0.1 });
+      cam.position.set([0, 0, 3]);
+      cam.target.set([0, 0, 0]);
+      const W = 160, H = 120;
+      const frames = async (n) => {
+        let pixels;
+        for (let i = 0; i < n; i++) {
+          probe.renderFrame(scene, cam);
+          if (i === n - 1) pixels = await probe.gpu.readPixels();
+          else await new Promise((r) => setTimeout(r, 5));
+        }
+        return pixels;
+      };
+      // The truth: 4x4 the pixels, no antialiasing, averaged down as light --
+      // decoded from sRGB, averaged, encoded again -- as a pixel's share of
+      // each colour adds up on a screen.
+      const toLinear = (b) => { const c = b / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+      const toByte = (l) => 255 * (l <= 0.0031308 ? l * 12.92 : 1.055 * l ** (1 / 2.4) - 0.055);
+      probe.renderer.post.antialias = false;
+      probe.gpu.resize(W * 4, H * 4);
+      const big = await frames(3);
+      const truth = new Float32Array(W * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        let s = 0;
+        for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) s += toLinear(big[((y * 4 + j) * W * 4 + x * 4 + i) * 4 + 1]);
+        truth[y * W + x] = toByte(s / 16);
+      }
+      probe.gpu.resize(W, H);
+      // Error at the edge: wherever the truth is neither black nor white.
+      const edgeError = (pixels) => {
+        let e = 0, n = 0;
+        for (let k = 0; k < W * H; k++) {
+          if (truth[k] > 10 && truth[k] < truth.reduce((a, b) => Math.max(a, b), 0) - 10) { e += Math.abs(pixels[k * 4 + 1] - truth[k]); n++; }
+        }
+        return { error: e / n, pixels: n };
+      };
+      // Unfiltered: every edge pixel all one side or the other. (Against FXAA
+      // the comparison is the tonemap's: TAA averages light before it, as a
+      // camera does, a supersampled frame after it, so a bright edge differs
+      // by a few levels whichever is right. Sponza's benches do that one.)
+      const rawPixels = await frames(3);
+      const raw = edgeError(rawPixels);
+      probe.renderer.taa = true;
+      probe.renderFrame(scene, cam);
+      for (let i = 0; i < 200 && probe.renderer.taaPass === null; i++) await new Promise((r) => setTimeout(r, 20));
+      const taaPixels = await frames(40);
+      const taa = edgeError(taaPixels);
+      let x0 = 0;
+      while (x0 < W - 1 && truth[60 * W + x0] < 5) x0++;
+      const row = (get) => Array.from({ length: 8 }, (_, k) => Math.round(get(60 * W + x0 - 3 + k))).join(' ');
+      const rows = `; across one: truth [${row((k) => truth[k])}], unfiltered [${row((k) => rawPixels[k * 4 + 1])}], TAA [${row((k) => taaPixels[k * 4 + 1])}]`;
+
+      // run() with on-demand: a still view keeps drawing while TAA settles, then rests.
+      probe.renderer.post.antialias = true;
+      const skippedBefore = probe.skippedFrames;
+      probe.run(scene, cam);
+      await new Promise((r) => setTimeout(r, 1500));
+      probe.stop();
+      const skipped = probe.skippedFrames - skippedBefore;
+      const error = await probe.gpu.device.popErrorScope();
+      const report = `edge error against 4x4 supersampling: unfiltered ${raw.error.toFixed(1)}, TAA ${taa.error.toFixed(1)} over ${taa.pixels} edge pixels; `
+        + `run() skipped ${skipped} frames of a still view once settled` + rows;
+      if (error) throw new Error(`${report}; ${error.message}`);
+      if (!(taa.error < raw.error * 0.5 && skipped > 0)) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
   });
 
   await step('antialiasing softens a hard edge, and off leaves it hard', async () => {
@@ -1563,6 +1729,224 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
   });
 
+  await step('a capture with harmonics changes colour with the view, in its own space, to degree 3', async () => {
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    // A .ply of grey splats, mid grey at every angle but for the harmonics given.
+    const ply = (degree, rows) => {
+      const rest = [0, 9, 24, 45][degree];
+      const names = ['x', 'y', 'z', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity', 'scale_0', 'scale_1', 'scale_2',
+        'rot_0', 'rot_1', 'rot_2', 'rot_3', ...Array.from({ length: rest }, (_, k) => `f_rest_${k}`)];
+      const head = new TextEncoder().encode(`ply\nformat binary_little_endian 1.0\nelement vertex ${rows.length}\n`
+        + names.map((n) => `property float ${n}\n`).join('') + 'end_header\n');
+      const bytes = new Uint8Array(head.length + rows.length * names.length * 4);
+      bytes.set(head);
+      const view = new DataView(bytes.buffer, head.length);
+      rows.forEach((row, i) => names.forEach((n, k) => {
+        const value = { opacity: 8, scale_0: Math.log(0.4), scale_1: Math.log(0.4), scale_2: Math.log(0.4), rot_0: 1, ...row }[n] ?? 0;
+        view.setFloat32((i * names.length + k) * 4, value, true);
+      }));
+      return bytes;
+    };
+    const cam = new Camera({ fovY: 0.8, near: 0.1 });
+    cam.target.set([0, 0, 0]);
+    const centreFrom = async (scene, x) => {
+      cam.position.set([x, 0, 0]);
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels({ x: 80, y: 60, width: 1, height: 1 });
+      return [...pixels.subarray(0, 3)];
+    };
+    try {
+      probe.gpu.resize(160, 120);
+      // Degree 1: red's third coefficient is the -x term. Seen from +x, the
+      // direction to the splat is -x, so red rises; from -x it falls.
+      const one = await probe.loadSplats(ply(1, [{ f_rest_2: 0.6 }]));
+      const scene = probe.createScene();
+      const node = scene.addSplats({ splats: one });
+      const plusX = await centreFrom(scene, 5);
+      const minusX = await centreFrom(scene, -5);
+      // Turned half round about y, the capture's +x faces the world's -x.
+      node.setAxisAngle([0, 1, 0], Math.PI);
+      const turned = await centreFrom(scene, -5);
+      // Degree 3, on the file's second splat (the first is far out of view): only
+      // the last coefficient, blue's -x (x^2 - 3y^2) term, so blue rises from +x.
+      const three = await probe.loadSplats(ply(3, [{ x: 100 }, { f_rest_44: 0.6 }]));
+      const scene3 = probe.createScene();
+      scene3.addSplats({ splats: three });
+      const blueFrom = await centreFrom(scene3, 5);
+      const blueAway = await centreFrom(scene3, -5);
+      probe.unload(one);
+      probe.unload(three);
+      const show = (p) => p.join(',');
+      const report = `degree 1: ${show(plusX)} from +x, ${show(minusX)} from -x, ${show(turned)} turned; `
+        + `degree 3: ${show(blueFrom)} from +x, ${show(blueAway)} from -x`;
+      const ok = plusX[0] > plusX[1] + 40 && minusX[0] < minusX[1] - 40 && Math.abs(plusX[1] - minusX[1]) <= 2
+        && Math.abs(turned[0] - plusX[0]) <= 2
+        && blueFrom[2] > blueFrom[1] + 40 && blueAway[2] < blueAway[1] - 40;
+      if (!ok) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('a .sog and a .spz load in the browser: images exact, zip entries deflated, gzip unpacked', async () => {
+    const SKY = [0, 0, 0];
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, {
+      antialias: false, post: { strength: 0 },
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+    });
+    const { decodeImageBytes } = await import('../src/rhi/texture.js');
+    const squeeze = async (bytes, format) => new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream(format))).arrayBuffer());
+    const CRC = Array.from({ length: 256 }, (_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+    const crc32 = (bytes) => {
+      let c = 0xffffffff;
+      for (const b of bytes) c = CRC[(c ^ b) & 255] ^ (c >>> 8);
+      return (c ^ 0xffffffff) >>> 0;
+    };
+    /** An RGBA PNG: lossless, as a .sog's WebP is, so the same bytes come back. */
+    const png = async (width, height, rgba) => {
+      const raw = new Uint8Array(height * (width * 4 + 1));
+      for (let y = 0; y < height; y++) raw.set(rgba.subarray(y * width * 4, (y + 1) * width * 4), y * (width * 4 + 1) + 1);
+      const chunk = (type, data) => {
+        const out = new Uint8Array(12 + data.length);
+        const view = new DataView(out.buffer);
+        view.setUint32(0, data.length);
+        out.set(new TextEncoder().encode(type), 4);
+        out.set(data, 8);
+        view.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+        return out;
+      };
+      const header = new Uint8Array(13);
+      new DataView(header.buffer).setUint32(0, width);
+      new DataView(header.buffer).setUint32(4, height);
+      header.set([8, 6, 0, 0, 0], 8);
+      const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header),
+        chunk('IDAT', await squeeze(raw, 'deflate')), chunk('IEND', new Uint8Array(0))];
+      return new Uint8Array(await new Blob(parts).arrayBuffer());
+    };
+    /** A zip of deflated entries. */
+    const zip = async (files) => {
+      const encoder = new TextEncoder();
+      const parts = [];
+      const directory = [];
+      let offset = 0;
+      for (const [name, data] of Object.entries(files)) {
+        const packed = await squeeze(data, 'deflate-raw');
+        const nameBytes = encoder.encode(name);
+        const local = new Uint8Array(30 + nameBytes.length);
+        const lv = new DataView(local.buffer);
+        lv.setUint32(0, 0x04034b50, true);
+        lv.setUint16(8, 8, true);
+        lv.setUint32(18, packed.length, true);
+        lv.setUint32(22, data.length, true);
+        lv.setUint16(26, nameBytes.length, true);
+        local.set(nameBytes, 30);
+        const central = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(central.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(10, 8, true);
+        cv.setUint32(20, packed.length, true);
+        cv.setUint32(24, data.length, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint32(42, offset, true);
+        central.set(nameBytes, 46);
+        parts.push(local, packed);
+        directory.push(central);
+        offset += local.length + packed.length;
+      }
+      const end = new Uint8Array(22);
+      const ev = new DataView(end.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(10, directory.length, true);
+      ev.setUint32(12, directory.reduce((n, d) => n + d.length, 0), true);
+      ev.setUint32(16, offset, true);
+      return new Uint8Array(await new Blob([...parts, ...directory, end]).arrayBuffer());
+    };
+    const cam = new Camera({ fovY: 0.8, near: 0.1 });
+    cam.position.set([0, 0, 5]);
+    cam.target.set([0, 0, 0]);
+    const centre = async (splats) => {
+      const scene = probe.createScene();
+      scene.addSplats({ splats });
+      probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels({ x: 80, y: 60, width: 1, height: 1 });
+      return [...pixels.subarray(0, 3)];
+    };
+    try {
+      probe.gpu.resize(160, 120);
+      // Pixels a 2D canvas would change: colour under an alpha below 255.
+      const odd = new Uint8Array([200, 100, 50, 7, 0, 255, 128, 128, 13, 77, 250, 1, 255, 255, 255, 0]);
+      const decoded = await decodeImageBytes(probe.gpu, await png(2, 2, odd));
+      const exact = decoded.width === 2 && decoded.height === 2 && decoded.rgba.every((v, k) => v === odd[k]);
+
+      // A .sog of one opaque green splat at the origin: codebooks of zeros but
+      // for an entry or two, so each index picks its value outright.
+      const SH_C0 = 0.28209479177387814;
+      const book = (entries) => Array.from({ length: 256 }, (_, i) => entries[i] ?? 0);
+      const image = (r, g, b, a) => png(1, 1, new Uint8Array([r, g, b, a]));
+      // The middle of a range of -1 to 1 is 0, between stored 32767 and 32768.
+      const mid = 32768;
+      const sog = await zip({
+        'meta.json': new TextEncoder().encode(JSON.stringify({
+          version: 2, count: 1,
+          means: { mins: [-1, -1, -1], maxs: [1, 1, 1], files: ['means_l.webp', 'means_u.webp'] },
+          scales: { codebook: book({ 1: Math.log(0.4) }), files: ['scales.webp'] },
+          quats: { files: ['quats.webp'] },
+          sh0: { codebook: book({ 1: 0.5 / SH_C0, 2: -0.5 / SH_C0 }), files: ['sh0.webp'] },
+        })),
+        'means_l.webp': await image(mid & 255, mid & 255, mid & 255, 255),
+        'means_u.webp': await image(mid >> 8, mid >> 8, mid >> 8, 255),
+        'quats.webp': await image(128, 128, 128, 252),
+        'scales.webp': await image(1, 1, 1, 255),
+        'sh0.webp': await image(2, 1, 2, 255),
+      });
+      const sogSplats = await probe.loadSplats(sog);
+      const sogSeen = await centre(sogSplats);
+
+      // A .spz, version 3, of one opaque blue splat at the origin, gzipped.
+      const raw = new Uint8Array(16 + 9 + 1 + 3 + 3 + 4);
+      const rv = new DataView(raw.buffer);
+      rv.setUint32(0, 0x5053474e, true);
+      rv.setUint32(4, 3, true);
+      rv.setUint32(8, 1, true);
+      raw[13] = 12;
+      raw[25] = 255;                                     // alpha
+      const none = Math.round(0.5 * 255 - (0.5 / SH_C0) * 0.15 * 255);
+      raw.set([none, none, 255], 26);                    // colour: blue
+      raw.set([137, 137, 137], 29);                      // scale: e^(137/16 - 10), about 0.24
+      rv.setUint32(32, (3 << 30) >>> 0, true);           // w the largest, x y z zero
+      const spzSplats = await probe.loadSplats(await squeeze(raw, 'gzip'));
+      const spzSeen = await centre(spzSplats);
+      probe.unload(sogSplats);
+      probe.unload(spzSplats);
+
+      const report = `a PNG with alpha came back ${exact ? 'exactly' : `as ${[...decoded.rgba].join(',')}`}; `
+        + `.sog centre ${sogSeen.join(',')}, .spz centre ${spzSeen.join(',')}`;
+      if (!(exact && sogSeen[1] > 150 && sogSeen[0] < 30 && sogSeen[2] < 30 && spzSeen[2] > 150 && spzSeen[0] < 30)) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('grading: saturation, a white balance that neutralises its light, and a .cube LUT', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';
@@ -1616,6 +2000,82 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     if (error) throw new Error(`${report}; ${error.message}`);
     const ok = spread(grey) <= 1 && spread(tungsten) > 60 && spread(balanced) <= 4
       && same.every((c, k) => Math.abs(c - plain[k]) <= 1) && inverted.every((c, k) => Math.abs(c + plain[k] - 255) <= 2);
+    if (!ok) throw new Error(report);
+    return report;
+  });
+
+  await step('auto exposure meters what is lit, eases at its speed, and leaves targets and off alone', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '320px';
+    canvas.style.height = '240px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+      antialias: false,
+    });
+    probe.gpu.device.pushErrorScope('validation');
+    const auto = probe.renderer.post.autoExposure;
+    const cam = new Camera({ fovY: 1, near: 0.1 });
+    cam.position.set([0, 0, 2]);
+    cam.target.set([0, 0, 0]);
+    // An unlit grey square on black: black is left out, so the square is all it meters.
+    const scenes = {};
+    for (const [name, grey] of [['dim', 0.05], ['bright', 0.8]]) {
+      scenes[name] = probe.createScene();
+      scenes[name].add(await probe.load(buildFeatureGLB({ baseColorFactor: [grey, grey, grey, 1], materialExtensions: { KHR_materials_unlit: {} } })));
+    }
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
+    const shot = async (scene, options) => {
+      probe.renderFrame(scene, cam, options);
+      const pixels = await probe.gpu.readPixels();
+      const { width, height } = probe.gpu;
+      const i = ((height >> 1) * width + (width >> 1)) * 4;
+      await settle();   // for the exposure's own readback
+      return pixels[i];
+    };
+    const plainDim = await shot(scenes.dim);
+    const plainBright = await shot(scenes.bright);
+
+    probe.renderer.autoExposure = { darken: 1, brighten: 1 };
+    const autoDim = await shot(scenes.dim);
+    const dimStops = auto.stops;
+    const autoBright = await shot(scenes.bright);   // eases from the dim exposure, so: changing
+    const adaptingAfterSwitch = auto.adapting;
+    const before = auto.stops;
+    await new Promise((resolve) => setTimeout(resolve, 400));   // longer than the 0.25 s step cap
+    await shot(scenes.bright);
+    const eased = before - auto.stops;
+
+    probe.renderer.autoExposure = { darken: 1000, brighten: 1000 };
+    await shot(scenes.bright);
+    await shot(scenes.bright);
+    const settledBright = await shot(scenes.bright);
+    const brightStops = auto.stops;
+    const adaptingSettled = auto.adapting;
+
+    const target = await probe.createTarget({ size: [64, 64] });
+    probe.renderFrame(scenes.dim, cam, { target });
+    await settle();
+    const afterTarget = auto.stops;
+
+    probe.renderer.autoExposure = null;
+    const offAgain = await shot(scenes.bright);
+    const error = await probe.gpu.device.popErrorScope();
+    probe.destroy();
+    canvas.remove();
+
+    const expected = (grey) => Math.log2(0.18 / grey);
+    const report = `plain ${plainDim} / ${plainBright}; auto ${autoDim} at ${dimStops.toFixed(2)} stops / ${settledBright} at ${brightStops.toFixed(2)} `
+      + `(metering ${expected(0.05).toFixed(2)} / ${expected(0.8).toFixed(2)}); eased ${eased.toFixed(3)} stops in a capped step, `
+      + `adapting ${adaptingAfterSwitch} then ${adaptingSettled}; ${afterTarget.toFixed(2)} after a target frame; ${offAgain} off again`;
+    if (error) throw new Error(`${report}; ${error.message}`);
+    // A bin is 0.38 stops wide, so the metered mean can sit up to half that off.
+    const ok = Math.abs(plainBright - plainDim) > 100 && Math.abs(settledBright - autoDim) <= 12
+      && Math.abs(dimStops - expected(0.05)) < 0.2 && Math.abs(brightStops - expected(0.8)) < 0.2
+      && Math.abs(eased - 0.25) < 0.02 && adaptingAfterSwitch && !adaptingSettled
+      && afterTarget === brightStops && offAgain === plainBright;
     if (!ok) throw new Error(report);
     return report;
   });
@@ -2542,7 +3002,16 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     probe.destroy();
     canvas.remove();
     const show = (p) => `rgb(${p.join(',')})`;
-    const read = { edge: first(80, 150), side: first(40, 170), inside: first(80, 170), circle: first(220, 170), gone: second(80, 150) };
+    // The circle's rightmost point is where two of its segments meet, on a pixel
+    // centre, and which pixels a line's ends cover is the implementation's
+    // choice: SwiftShader leaves that one out. So the grey is looked for in the
+    // 5x5 pixels around it.
+    const circle = [];
+    for (let y = 168; y <= 172; y++) for (let x = 218; x <= 222; x++) circle.push(first(x, y));
+    const read = {
+      edge: first(80, 150), side: first(40, 170), inside: first(80, 170), gone: second(80, 150),
+      circle: circle.find((p) => p.some((c) => c > 0)) ?? circle[1],
+    };
     const report = `box edge ${show(read.edge)}, side ${show(read.side)}, inside ${show(read.inside)}; grey circle ${show(read.circle)}; `
       + `the next frame ${show(read.gone)}`;
     if (error) throw new Error(`${report}; ${error.message}`);

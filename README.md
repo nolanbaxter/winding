@@ -111,7 +111,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.4.0/src/winding.js';
 </script>
 ```
 
@@ -136,8 +136,8 @@ completion and hover help.
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.3.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.4.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.4.0/src/"
   }
 }
 </script>
@@ -194,8 +194,9 @@ blocked over `file://`, and because it sets the COOP/COEP headers the worker pat
 ## Tests
 
 ```bash
-npm test          # 755 checks, Node, no browser
-npm run test:gpu  # serves the page; open test/gpu.html for 52 checks on a real device
+npm test                   # 759 checks, Node, no browser
+npm run test:gpu           # serves the page; open test/gpu.html for 67 checks on your GPU
+npm run test:gpu:headless  # the same 67 in headless Chrome, as CI runs them
 ```
 
 The Node suites cover math, the transform hierarchy, glTF parsing, animation sampling, picking, sort
@@ -203,7 +204,10 @@ keys, the render graph, shadow fitting, clustering and the job system, and that 
 [API reference](docs/API.md) has an entry for every public call. They cannot touch WGSL, so the GPU
 suite boots the engine on a real device and checks that every shader compiles, every material
 pipeline permutation builds, 30 frames submit without the device complaining, and that a benchmark
-run times every CPU phase and GPU pass.
+run times every CPU phase and GPU pass. CI runs it too, on every push: in headless Chrome on a
+runner with no GPU, where SwiftShader, Chrome's software device, compiles and runs every shader.
+A pass there is a pass for the WGSL, not for every driver, so the page is still worth opening on
+real hardware.
 
 ## What it does
 
@@ -254,16 +258,19 @@ shimmer as the camera turns), one view down a spot's cone, six for a point light
 shadow: a cutout casts its texture's shape, a half-transparent pane a shadow half as dark. Where one
 cascade hands over to the next there is no seam: each cascade's filter widens across its slice
 until, at the split, it already matches the next one's texels. Shadow maps are kept while nothing
-near a light moves, so a still scene redraws none.
+near a light moves, so a still scene redraws none. Give a light a `size` and its shadows are soft
+as a real light's are (PCSS): sharp where an object meets the floor, wider the farther they fall.
 
 **Two transparency paths.** Blended geometry is sorted back-to-front on the CPU and drawn after
 every opaque batch; `{ oit: true }` swaps that for weighted-blended order-independent transparency,
 with no sorting at all. Sorting is exact for separated convex objects, OIT is approximate everywhere
 and doesn't care what order anything arrives in.
 
-**Post-processing**, each with its own entry: FXAA on by default, ground-truth ambient occlusion,
-depth of field from a real lens model, fog integrated exactly along each view ray with its colour
-derived from the sky, bloom, and colour grading with white balance and `.cube` LUTs. See
+**Post-processing**, each with its own entry: FXAA on by default, or temporal antialiasing, which
+samples every pixel at sixteen points over sixteen frames and stops thin things crawling; ground-truth ambient occlusion,
+auto exposure that adapts as an eye does, depth of field from a real lens model, fog integrated
+exactly along each view ray with its colour derived from the sky, bloom, and colour grading with
+white balance and `.cube` LUTs. See
 [Renderer settings](docs/API.md#renderer-exposure) and [`engine.grading`](docs/API.md#engine-grading).
 
 **Fewer pixels, brought back up.** [`renderer.resolution`](docs/API.md#renderer-resolution) draws the
@@ -317,10 +324,12 @@ frame rate; [decals](docs/API.md#scene-adddecal) that paint the base colour befo
 lit and shadowed as the surface is; and [reflection probes](docs/API.md#scene-addprobe),
 box-projected, so a room reflects the room and not the sky.
 
-**Gaussian splats.** A capture from 3D Gaussian Splatting, `.ply` or `.splat`, loaded with
+**Gaussian splats.** A capture from 3D Gaussian Splatting — `.ply`, `.splat`, or the compressed
+`.spz` and `.sog`, unpacked with the browser's own decompression — loaded with
 [`engine.loadSplats`](docs/API.md#engine-loadsplats) and placed as a node by
 [`scene.addSplats`](docs/API.md#scene-addsplats): culled and sorted back to front on the GPU whenever
 the view moves, a million splats in about 2 ms, and drawn behind the geometry in front of them.
+Higher spherical harmonics, to degree 3, are kept, so colour changes with the view.
 
 **Picking.** [`scene.pick`](docs/API.md#scene-pick) returns what's under the pointer, by bounding
 box, or by triangle for a model loaded with `retainGeometry`, skinned and morphed meshes as posed.

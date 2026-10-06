@@ -1,14 +1,15 @@
-# The Node suites, on every push and pull request.
+# The Node suites on every push and pull request, and the GPU suite beside them.
 #
-# There is no install step because there are no dependencies. That is not a
-# boast, it is why this file is eight lines: nothing to cache, nothing to audit,
-# nothing to go stale between a green run and a red one.
+# There is no install step for the Node suites because there are no
+# dependencies: nothing to cache, nothing to audit, nothing to go stale between
+# a green run and a red one.
 #
-# The GPU suite is NOT here and cannot be. It needs a real adapter, and a
-# headless runner has none -- `npm run test:gpu` serves the page and a human
-# opens it. So a green tick here means the Node checks passed, and says
-# nothing about WGSL. Worth knowing, given that everything this engine got
-# wrong this year was invisible to exactly these suites.
+# The GPU suite runs test/gpu.html in headless Chrome. The runner has no GPU,
+# so Chrome's own SwiftShader stands in: a software device, slow, but it
+# compiles and runs every shader and reads back every frame, which is the point -- nearly
+# everything this engine has got wrong was invisible to the Node
+# suites. A pass there is not a pass on every real GPU; the page at
+# test/gpu.html still is the test of one.
 name: CI
 
 on:
@@ -32,3 +33,15 @@ jobs:
       # The types, against the docs' examples. TypeScript is fetched for this
       # step alone; the package still depends on nothing.
       - run: npx -y -p typescript@7 tsc --noEmit --strict --target es2022 --module nodenext --lib es2022,dom test/types.ts
+
+  gpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      # Chrome will not start under the WebGPU flags without a Vulkan driver,
+      # even though WebGPU itself then runs on SwiftShader.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+      - run: node test/gpu.ci.js

@@ -436,3 +436,39 @@ export function cubeFaceView(texture, face, mipLevel = 0) {
     mipLevelCount: 1,
   });
 }
+
+/**
+ * An image file's pixels, exactly as stored: { width, height, rgba }. For
+ * data kept in images -- a .sog's -- where a 2D canvas will not do: it
+ * premultiplies alpha, and an alpha below 255 then changes the colour bytes.
+ * Decoded by the browser with no premultiplying and no colour management,
+ * copied into a texture as it is, and read back.
+ */
+export async function decodeImageBytes(rhi, bytes) {
+  const bitmap = await createImageBitmap(new Blob([bytes]), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+  const { width, height } = bitmap;
+  const device = rhi.device;
+  const texture = device.createTexture({
+    label: 'decode-image', size: [width, height], format: 'rgba8unorm',
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  const tightRow = width * 4;
+  const paddedRow = Math.ceil(tightRow / 256) * 256;
+  const staging = device.createBuffer({ label: 'decode-image', size: paddedRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  try {
+    device.queue.copyExternalImageToTexture({ source: bitmap }, { texture, premultipliedAlpha: false }, [width, height]);
+    const encoder = device.createCommandEncoder({ label: 'decode-image' });
+    encoder.copyTextureToBuffer({ texture }, { buffer: staging, bytesPerRow: paddedRow, rowsPerImage: height }, [width, height]);
+    device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const padded = new Uint8Array(staging.getMappedRange());
+    const rgba = new Uint8Array(tightRow * height);
+    for (let row = 0; row < height; row++) rgba.set(padded.subarray(row * paddedRow, row * paddedRow + tightRow), row * tightRow);
+    staging.unmap();
+    return { width, height, rgba };
+  } finally {
+    bitmap.close();
+    texture.destroy();
+    staging.destroy();
+  }
+}

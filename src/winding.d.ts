@@ -82,6 +82,8 @@ export interface LUT {
 /** From `engine.loadSplats`. */
 export interface Splats {
   readonly count: number;
+  /** The degree of its spherical harmonics, 0 to 3: 0 is one colour from every side. */
+  readonly degree: number;
   readonly min: Float32Array;
   readonly max: Float32Array;
 }
@@ -123,12 +125,21 @@ export interface DeviceLost {
   action: 'reload';
 }
 
+/** Auto exposure's settings. Ranges in stops, speeds in stops a second. */
+export interface AutoExposure {
+  min?: number;
+  max?: number;
+  brighten?: number;
+  darken?: number;
+}
+
 export interface WindingOptions {
   label?: string;
   powerPreference?: 'high-performance' | 'low-power';
   onDeviceLost?: ((detail: DeviceLost) => void) | null;
   onError?: ((error: GPUError) => void) | null;
   exposure?: number;
+  autoExposure?: AutoExposure | boolean | null;
   antialias?: boolean;
   grading?: Grading | null;
   post?: PostOptions;
@@ -137,6 +148,7 @@ export interface WindingOptions {
   lightDistance?: number | null;
   ao?: boolean | { radius: number | null };
   oit?: boolean;
+  taa?: boolean;
   fog?: Fog | null;
   dof?: DepthOfField | null;
   /** Settings for the default environment, not an `Environment`. */
@@ -237,11 +249,14 @@ export interface Post {
 
 export interface Renderer {
   exposure: number;
+  autoExposure: AutoExposure | boolean | null;
   resolution: number;
   fog: Fog | null;
   dof: DepthOfField | null;
   ao: { radius: number | null } | null;
   oit: boolean;
+  softShadows: boolean;
+  taa: boolean;
   readonly shadows: ShadowMaps;
   skybox: boolean;
   shadowDistance: number | null;
@@ -338,6 +353,8 @@ export interface LightOptions extends Placed {
   innerAngle?: number;
   outerAngle?: number;
   castShadow?: boolean;
+  /** The light's own size, for soft shadows: a radius for a point or spot, an angle across for a directional. */
+  size?: number;
 }
 
 export interface Light {
@@ -345,6 +362,7 @@ export interface Light {
   color: number[];
   intensity: number;
   castShadow: boolean;
+  size: number;
   radius?: number;
   innerAngle?: number;
   outerAngle?: number;
@@ -494,7 +512,7 @@ export class Scene {
   pick(camera: Camera2D, x: number, y: number, width: number, height: number): Hit2D | null;
 
   addLight(options?: LightOptions): Node;
-  setLight(node: Node, changes: Pick<LightOptions, 'color' | 'intensity' | 'castShadow' | 'radius' | 'innerAngle' | 'outerAngle'>): void;
+  setLight(node: Node, changes: Pick<LightOptions, 'color' | 'intensity' | 'castShadow' | 'size' | 'radius' | 'innerAngle' | 'outerAngle'>): void;
   lightOf(node: Node): Light | null;
 
   addEmitter(options: EmitterOptions): Node;

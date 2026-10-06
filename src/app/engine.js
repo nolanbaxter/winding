@@ -27,9 +27,9 @@ import { parseHDR } from '../render/hdr.js';
 import { Renderer, RenderTarget } from '../render/renderer.js';
 import { Splats } from '../render/splats.js';
 import { openSurface } from '../render/shadows.js';
-import { parseSplats } from '../scene/splats.js';
+import { readSplats } from '../scene/splats.js';
 import { GLTFTextures } from '../render/textures.js';
-import { createTexture2D, uploadImage, generateMipmaps } from '../rhi/texture.js';
+import { createTexture2D, uploadImage, generateMipmaps, decodeImageBytes } from '../rhi/texture.js';
 import { Font } from '../render/text.js';
 import { parseCube, uploadLUT } from '../render/grading.js';
 import { packSkinVertices } from '../render/vertex.js';
@@ -42,6 +42,7 @@ import { Clock } from '../core/time.js';
 import { JobSystem, JOB_COMPOSE_TRANSFORMS } from '../core/jobs.js';
 import { composeRange } from '../scene/transformJob.js';
 import { sharedMemoryAvailable } from '../core/shared.js';
+import { TAA_SETTLE } from '../render/taa.js';
 
 
 /**
@@ -142,6 +143,8 @@ export class Winding {
         ao: options.ao,
         fog: options.fog,
         dof: options.dof,
+        autoExposure: options.autoExposure,
+        taa: options.taa,
       });
 
       const environment = new Environment(rhi, options.environment ?? {});
@@ -198,6 +201,8 @@ export class Winding {
     this.onDemand = true;
     /** Frames run() skipped because nothing had changed. */
     this.skippedFrames = 0;
+    /** Frames drawn while still, for TAA to settle: see run(). */
+    this._taaStill = 0;
     /** What the last frame run() drew was drawn from; see _idle. */
     this._drawn = null;
 
@@ -361,7 +366,11 @@ export class Winding {
       bytes = new Uint8Array(await response.arrayBuffer());
       this._assertAlive('loadSplats');
     }
-    return new Splats(this.gpu, parseSplats(bytes));
+    const data = await readSplats(bytes, { decodeImage: (image) => decodeImageBytes(this.gpu, image) });
+    // The pipeline for its harmonics, built before it can be drawn.
+    await this.renderer.splats.ready(data.degree);
+    this._assertAlive('loadSplats');
+    return new Splats(this.gpu, data);
   }
 
   /**
@@ -702,11 +711,15 @@ export class Winding {
       if (frame) frame(this.clock.alpha, this.clock);
       // update() or frame() may have stopped the loop, or destroyed the engine.
       if (!this._running) return;
-      if (this.onDemand && this._idle(scene, camera, hud)) {
+      const idle = this.onDemand && this._idle(scene, camera, hud);
+      // With TAA a still view keeps drawing a little longer: each frame adds a
+      // sample to every pixel, until the picture has settled.
+      if (idle && !(this.renderer.taa && this._taaStill < TAA_SETTLE)) {
         this.skippedFrames++;
       } else {
         this.renderer.render(scene, camera, this.jobs, null, hud);
         this._remember(scene, camera, hud);
+        this._taaStill = idle ? this._taaStill + 1 : 0;
       }
 
       this._fpsAccum += this.clock.realDelta;
@@ -753,6 +766,8 @@ export class Winding {
     // and neither is the next while it builds. Asking only now missed a build
     // that finished between two frames: the one drawn without it stayed up.
     if (last.building || this._building()) return false;
+    // Still easing toward its exposure: the image changes with nothing moved.
+    if (renderer.autoExposure && renderer.post.autoExposure.adapting) return false;
     // With the size and pixel ratio, as a frame updates it: a Camera2D's view
     // changes with the ratio alone, when the page is zoomed.
     camera.update(this.gpu.width / this.gpu.height, this.gpu.width, this.gpu.height, this.gpu.pixelRatio);
@@ -782,6 +797,7 @@ export class Winding {
     const renderer = this.renderer;
     for (const set of renderer._variantSets.values()) if (!set.ready) return true;
     if (renderer.post.antialias && renderer.post.fxaaPipeline === undefined) return true;
+    if (renderer.taa && renderer.taaPass === null) return true;
     return renderer.upscaler.pending;
   }
 
@@ -816,7 +832,7 @@ export class Winding {
   _settings() {
     const r = this.renderer, p = r.post;
     return settingsSignature([
-      r.exposure, r.resolution, r.fog, r.dof, r.skybox, r.shadowDistance, r.lightDistance, r.ao, r.oit, r.debug.depthTest,
+      r.exposure, r.autoExposure, r.softShadows, r.taa, r.resolution, r.fog, r.dof, r.skybox, r.shadowDistance, r.lightDistance, r.ao, r.oit, r.debug.depthTest,
       p.threshold, p.knee, p.filterRadius, p.strength, p.levels, p.antialias, p.grading,
       // The shadow settings a frame reads; the rest are fixed at creation.
       r.shadows.lambda, r.shadows.casterExtent, r.shadows.normalBias,
