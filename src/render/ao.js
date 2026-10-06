@@ -16,13 +16,19 @@
 // reverse-subtract, so the scene colour is never copied. Blended geometry is
 // drawn after that, because what is behind glass is not occluded by the glass.
 //
-// Three passes, two of them at half resolution, because occlusion changes
+// Four passes, three of them at half resolution, because occlusion changes
 // slowly across a surface and its taps are scattered wide: at full resolution
 // on integrated graphics it cost 4 ms at 720p, most of it cache misses.
 //
-//   ao        half res: the horizons, for each 2x2 block's top-left pixel
-//   ao-blur   half res: the 4x4 tile average that removes the noise below
-//   composite full res: a depth-aware 2x2 upsample, subtracted from the scene
+//   ao-surface half res: each 2x2 block's view depth and normal, worked out once
+//   ao         half res: the horizons, for each 2x2 block's top-left pixel
+//   ao-blur    half res: the 4x4 tile average that removes the noise below
+//   composite  full res: a depth-aware 2x2 upsample, subtracted from the scene
+//
+// The surface pass is XeGTAO's idea: the blur and the composite weigh their
+// neighbours by where each one's surface is, and finding that from the depth
+// buffer means five depth reads and five matrix products a neighbour for its
+// normal. Read once into a texture, a neighbour is one load.
 //
 // Noise and its removal are one design: each pixel of a 4x4 tile turns the
 // slice directions by a different sixteenth and offsets its steps by another,
@@ -39,9 +45,11 @@ import { createBuffer } from '../rhi/buffer.js';
 /** Where the forward passes put their ambient term. RGB, HDR, like the scene. */
 export const AMBIENT_FORMAT = 'rgba16float';
 const AO_FORMAT = 'r16float';
+/** A half-resolution block's view normal (xyz) and view z (w; 1 for sky). */
+const SURFACE_FORMAT = 'rgba32float';
 
-/** inverseProjection(64) + size, projection y scale and w terms, radius. */
-const PARAMS_BYTES = 96;
+/** inverseProjection(64), size, the projection's scales, w and shift terms, radius. */
+const PARAMS_BYTES = 112;
 
 /**
  * Slices and steps per side. A budget, as the shadow PCF's nine taps are:
@@ -63,7 +71,12 @@ struct Params {
   wz                : f32,
   w1                : f32,
   radius            : f32,
-  pad               : vec2<f32>,
+  // The rest of the projection, to rebuild a position from its view z alone:
+  // clip x = xScale x + shiftZ.x z + shift1.x, and the same for y with yScale.
+  xScale            : f32,
+  pad               : f32,
+  shiftZ            : vec2<f32>,
+  shift1            : vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> params : Params;
 @group(0) @binding(1) var depthMap : texture_depth_2d;
@@ -86,6 +99,20 @@ fn viewPosition(p : vec2<i32>) -> vec3<f32> {
   );
   let v = params.inverseProjection * vec4<f32>(ndc, depth, 1.0);
   return v.xyz / v.w;
+}
+
+/** The view position of the full-resolution pixel p, given its view z. */
+fn fromZ(p : vec2<i32>, z : f32) -> vec3<f32> {
+  let ndc = vec2<f32>(
+    (f32(p.x) + 0.5) / params.size.x * 2.0 - 1.0,
+    1.0 - (f32(p.y) + 0.5) / params.size.y * 2.0,
+  );
+  let w = z * params.wz + params.w1;
+  return vec3<f32>(
+    (ndc.x * w - params.shiftZ.x * z - params.shift1.x) / params.xScale,
+    (ndc.y * w - params.shiftZ.y * z - params.shift1.y) / params.yScale,
+    z,
+  );
 }
 
 /**
@@ -121,8 +148,32 @@ fn vs(@builtin(vertex_index) index : u32) -> VertexOut {
 }
 `;
 
+const SURFACE_SHADER = /* wgsl */ `
+${COMMON}
+
+/** Each block's top-left pixel: its normal, and its view z (1, never a real z, for sky). */
+@fragment
+fn fsSurface(v : VertexOut) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(v.position.xy) * 2;
+  if (isSky(p)) { return vec4<f32>(0.0, 0.0, 1.0, 1.0); }
+  let center = viewPosition(p);
+  return vec4<f32>(viewNormal(p, center), center.z);
+}
+`;
+
+/** Reading the surface pass: a block's normal (xyz) and view z (w, 1 for sky). */
+const SURFACE_READ = /* wgsl */ `
+@group(0) @binding(2) var surfaceMap : texture_2d<f32>;
+
+fn surfaceAt(q : vec2<i32>) -> vec4<f32> {
+  let last = vec2<i32>(textureDimensions(surfaceMap)) - vec2<i32>(1);
+  return textureLoad(surfaceMap, clamp(q, vec2<i32>(0), last), 0);
+}
+`;
+
 const AO_SHADER = /* wgsl */ `
 ${COMMON}
+${SURFACE_READ}
 
 /**
  * The view position at a screen offset that lies ON the slice's line, not
@@ -187,10 +238,11 @@ fn horizon(p : vec2<i32>, center : vec3<f32>, view : vec3<f32>, span : vec2<f32>
 fn fsAO(v : VertexOut) -> @location(0) vec4<f32> {
   let q = vec2<i32>(v.position.xy);
   let p = q * 2;
-  if (isSky(p)) { return vec4<f32>(1.0); }
+  let surface = surfaceAt(q);
+  if (surface.w > 0.0) { return vec4<f32>(1.0); }
 
-  let center = viewPosition(p);
-  let normal = viewNormal(p, center);
+  let center = fromZ(p, surface.w);
+  let normal = surface.xyz;
   let view = normalize(-center);
 
   // The radius in full-resolution pixels at this depth: clip w is how far
@@ -248,16 +300,17 @@ fn fsAO(v : VertexOut) -> @location(0) vec4<f32> {
 
 const BLUR_SHADER = /* wgsl */ `
 ${COMMON}
-@group(0) @binding(2) var aoMap : texture_2d<f32>;
+${SURFACE_READ}
+@group(0) @binding(3) var aoMap : texture_2d<f32>;
 
 /** The 4x4 tile the rotations were spread over, off-plane samples left out. */
 @fragment
 fn fsBlur(v : VertexOut) -> @location(0) vec4<f32> {
   let q = vec2<i32>(v.position.xy);
-  let p = q * 2;
-  if (isSky(p)) { return vec4<f32>(1.0); }
-  let center = viewPosition(p);
-  let normal = viewNormal(p, center);
+  let surface = surfaceAt(q);
+  if (surface.w > 0.0) { return vec4<f32>(1.0); }
+  let center = fromZ(q * 2, surface.w);
+  let normal = surface.xyz;
   let last = vec2<i32>(textureDimensions(aoMap)) - vec2<i32>(1);
 
   var sum = 0.0;
@@ -265,7 +318,8 @@ fn fsBlur(v : VertexOut) -> @location(0) vec4<f32> {
   for (var y = -2; y < 2; y = y + 1) {
     for (var x = -2; x < 2; x = x + 1) {
       let r = clamp(q + vec2<i32>(x, y), vec2<i32>(0), last);
-      let weight = planeWeight(center, normal, viewPosition(r * 2));
+      let z = surfaceAt(r).w;
+      let weight = select(planeWeight(center, normal, fromZ(r * 2, z)), 0.0, z > 0.0);
       sum = sum + weight * textureLoad(aoMap, r, 0).r;
       weights = weights + weight;
     }
@@ -276,20 +330,22 @@ fn fsBlur(v : VertexOut) -> @location(0) vec4<f32> {
 
 const COMPOSITE_SHADER = /* wgsl */ `
 ${COMMON}
-@group(0) @binding(2) var aoMap : texture_2d<f32>;
-@group(0) @binding(3) var ambientMap : texture_2d<f32>;
+${SURFACE_READ}
+@group(0) @binding(3) var aoMap : texture_2d<f32>;
+@group(0) @binding(4) var ambientMap : texture_2d<f32>;
 
 /**
  * The ambient light the occlusion removes; blending subtracts it from the
  * scene. The half-resolution occlusion is brought up bilinearly, with each of
- * the four samples weighted by how near it lies to this pixel's plane.
+ * the four samples weighted by how near this pixel lies to the sample's plane:
+ * the sample's own normal, read with it, so this pixel needs no normal of its
+ * own and reads the depth buffer once.
  */
 @fragment
 fn fsComposite(v : VertexOut) -> @location(0) vec4<f32> {
   let p = vec2<i32>(v.position.xy);
   if (isSky(p)) { return vec4<f32>(0.0); }
   let center = viewPosition(p);
-  let normal = viewNormal(p, center);
 
   let at = (vec2<f32>(p) + 0.5) * 0.5 - 0.5;
   let base = vec2<i32>(floor(at));
@@ -303,7 +359,8 @@ fn fsComposite(v : VertexOut) -> @location(0) vec4<f32> {
     let r = clamp(base + corner, vec2<i32>(0), last);
     let bilinear = select(1.0 - f.x, f.x, corner.x == 1) * select(1.0 - f.y, f.y, corner.y == 1);
     let value = textureLoad(aoMap, r, 0).r;
-    let weight = bilinear * planeWeight(center, normal, viewPosition(r * 2));
+    let surface = surfaceAt(r);
+    let weight = select(bilinear * planeWeight(fromZ(r * 2, surface.w), surface.xyz, center), 0.0, surface.w > 0.0);
     sum = sum + weight * value;
     weights = weights + weight;
     plain = plain + bilinear * value;
@@ -316,7 +373,8 @@ fn fsComposite(v : VertexOut) -> @location(0) vec4<f32> {
 
 export class AmbientOcclusion {
   static async create(rhi, pipelines) {
-    const [aoShader, blurShader, compositeShader] = await Promise.all([
+    const [surfaceShader, aoShader, blurShader, compositeShader] = await Promise.all([
+      compileShader(rhi.device, SURFACE_SHADER, 'ao-surface.wgsl'),
       compileShader(rhi.device, AO_SHADER, 'ao.wgsl'),
       compileShader(rhi.device, BLUR_SHADER, 'ao-blur.wgsl'),
       compileShader(rhi.device, COMPOSITE_SHADER, 'ao-composite.wgsl'),
@@ -325,9 +383,12 @@ export class AmbientOcclusion {
     const depth = { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } };
     const texture = (binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } });
     const layouts = {
-      ao: rhi.device.createBindGroupLayout({ label: 'ao', entries: [params, depth] }),
-      blur: rhi.device.createBindGroupLayout({ label: 'ao-blur', entries: [params, depth, texture(2)] }),
-      composite: rhi.device.createBindGroupLayout({ label: 'ao-composite', entries: [params, depth, texture(2), texture(3)] }),
+      surface: rhi.device.createBindGroupLayout({ label: 'ao-surface', entries: [params, depth] }),
+      ao: rhi.device.createBindGroupLayout({ label: 'ao', entries: [params, depth, texture(2)] }),
+      blur: rhi.device.createBindGroupLayout({ label: 'ao-blur', entries: [params, depth, texture(2), texture(3)] }),
+      composite: rhi.device.createBindGroupLayout({
+        label: 'ao-composite', entries: [params, depth, texture(2), texture(3), texture(4)],
+      }),
     };
     // The full-screen triangle winds clockwise; culling would drop it.
     const primitive = { topology: 'triangle-list', cullMode: 'none' };
@@ -337,6 +398,7 @@ export class AmbientOcclusion {
       shader, fragmentEntry: entry, targets, primitive, depth: null,
     });
     const descriptors = {
+      surface: descriptor('ao-surface', layouts.surface, surfaceShader, 'fsSurface', [{ format: SURFACE_FORMAT }]),
       ao: descriptor('ao', layouts.ao, aoShader, 'fsAO', [{ format: AO_FORMAT }]),
       blur: descriptor('ao-blur', layouts.blur, blurShader, 'fsBlur', [{ format: AO_FORMAT }]),
       composite: descriptor('ao-composite', layouts.composite, compositeShader, 'fsComposite', [{
@@ -374,6 +436,11 @@ export class AmbientOcclusion {
     d[19] = camera.projection[11];
     d[20] = camera.projection[15];
     d[21] = radius;
+    d[22] = camera.projection[0];
+    d[24] = camera.projection[8];
+    d[25] = camera.projection[9];
+    d[26] = camera.projection[12];
+    d[27] = camera.projection[13];
     this.rhi.queue.writeBuffer(this.buffer, 0, d);
   }
 
@@ -383,27 +450,34 @@ export class AmbientOcclusion {
       width: Math.ceil(width / 2), height: Math.ceil(height / 2), format: AO_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     };
+    const surface = graph.createTexture('ao-surface', { ...half, format: SURFACE_FORMAT });
     const raw = graph.createTexture('ao', half);
     const blurred = graph.createTexture('ao-blurred', half);
     const clear = { r: 1, g: 1, b: 1, a: 1 };
     graph.addPass({
-      name: 'ao',
+      name: 'ao-surface',
       reads: [depth],
+      color: [{ resource: surface, clear: { r: 0, g: 0, b: 1, a: 1 } }],
+      execute: (pass) => this._draw(pass, 'surface', [graph.viewOf(depth)]),
+    });
+    graph.addPass({
+      name: 'ao',
+      reads: [depth, surface],
       color: [{ resource: raw, clear }],
-      execute: (pass) => this._draw(pass, 'ao', [graph.viewOf(depth)]),
+      execute: (pass) => this._draw(pass, 'ao', [graph.viewOf(depth), graph.viewOf(surface)]),
     });
     graph.addPass({
       name: 'ao-blur',
-      reads: [depth, raw],
+      reads: [depth, surface, raw],
       color: [{ resource: blurred, clear }],
-      execute: (pass) => this._draw(pass, 'blur', [graph.viewOf(depth), graph.viewOf(raw)]),
+      execute: (pass) => this._draw(pass, 'blur', [graph.viewOf(depth), graph.viewOf(surface), graph.viewOf(raw)]),
     });
     graph.addPass({
       name: 'ao-composite',
-      reads: [depth, blurred, ambient],
+      reads: [depth, surface, blurred, ambient],
       color: [{ resource: sceneColor }],
       execute: (pass) => this._draw(pass, 'composite',
-        [graph.viewOf(depth), graph.viewOf(blurred), graph.viewOf(ambient)]),
+        [graph.viewOf(depth), graph.viewOf(surface), graph.viewOf(blurred), graph.viewOf(ambient)]),
     });
   }
 

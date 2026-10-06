@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compiles and runs every shader: a WGSL mistake now fails the build instead of waiting for someone
   to open the page.
 
+### Changed
+
+- **Ambient occlusion is 14% cheaper.** A half-resolution pass now works out each block's view depth
+  and normal once, as XeGTAO does, and the occlusion, its blur and the composite read that instead of
+  rebuilding them from the depth buffer -- the composite read the depth buffer nine times a pixel,
+  and now reads it once. 2.21 -> 1.91 ms on Sponza at 1280x720 on Intel Iris Xe, measured A/B in
+  one page. The look is the same but for a pixel's width at screen borders and the thinnest
+  geometry. Walking the horizons on the half-resolution data, a fast `acos`, and depth turned to
+  position without the matrix were measured too, and gained nothing.
+
 ### Fixed
 
 - **A GPU check too strict about lines.** The 2D debug-circle check read the one pixel where two
