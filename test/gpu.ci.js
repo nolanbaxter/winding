@@ -3,8 +3,8 @@
 // Serves the repo, opens test/gpu.html in Chrome with no window, waits for the
 // page's own verdict (globalThis.__gpuTest, set by finish() in gpu.test.js) and
 // exits 0 only if every check passed. CI runs it on a runner with no GPU, where
-// Mesa's lavapipe stands in as a software Vulkan device: slow, but it compiles
-// and runs every shader, which is the point of the suite.
+// Chrome falls back to SwiftShader, its own software device: slow, but it
+// compiles and runs every shader, which is the point of the suite.
 //
 // No Puppeteer: Chrome is driven over its DevTools protocol with Node's own
 // WebSocket (Node 22+), so nothing is installed and nothing is downloaded.

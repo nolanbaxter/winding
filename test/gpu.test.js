@@ -2542,7 +2542,14 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     probe.destroy();
     canvas.remove();
     const show = (p) => `rgb(${p.join(',')})`;
-    const read = { edge: first(80, 150), side: first(40, 170), inside: first(80, 170), circle: first(220, 170), gone: second(80, 150) };
+    // The circle's rightmost point is where two of its segments meet, and which
+    // pixel a line's end covers is the implementation's choice (SwiftShader and
+    // a real GPU differ), so the grey is looked for a pixel either side.
+    const circle = [219, 220, 221].map((x) => first(x, 170));
+    const read = {
+      edge: first(80, 150), side: first(40, 170), inside: first(80, 170), gone: second(80, 150),
+      circle: circle.find((p) => p.some((c) => c > 0)) ?? circle[1],
+    };
     const report = `box edge ${show(read.edge)}, side ${show(read.side)}, inside ${show(read.inside)}; grey circle ${show(read.circle)}; `
       + `the next frame ${show(read.gone)}`;
     if (error) throw new Error(`${report}; ${error.message}`);

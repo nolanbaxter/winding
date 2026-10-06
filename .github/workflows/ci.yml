@@ -5,8 +5,8 @@
 # a green run and a red one.
 #
 # The GPU suite runs test/gpu.html in headless Chrome. The runner has no GPU,
-# so Mesa's lavapipe stands in: a software Vulkan device, slow, but it compiles
-# and runs every shader and reads back every frame, which is the point -- nearly
+# so Chrome's own SwiftShader stands in: a software device, slow, but it
+# compiles and runs every shader and reads back every frame, which is the point -- nearly
 # everything this engine has got wrong was invisible to the Node
 # suites. A pass there is not a pass on every real GPU; the page at
 # test/gpu.html still is the test of one.
@@ -41,5 +41,4 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
       - run: node test/gpu.ci.js
