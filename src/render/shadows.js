@@ -43,7 +43,8 @@ import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW } from '../rhi/bindgroups.js';
 import { ALPHA_MASK, MATERIAL_WGSL, VARIANT_DOUBLE_SIDED } from './material.js';
 import { CULL_SHADOW, NOT_BATCHED } from './gpudriven.js';
-import { boxInOrtho } from '../scene/bounds.js';
+import { boxInOrtho, CHUNK_TRIANGLES } from '../scene/bounds.js';
+import { aabbTransform } from '../core/math/aabb.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
 import { VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 import { createBuffer } from '../rhi/buffer.js';
@@ -1062,6 +1063,7 @@ export class ShadowMaps {
    * alone, so every light shares them; only the matrices are per light.
    */
   update(camera, scene, changes = null, sceneMin = null, sceneMax = null) {
+    this._scene = scene;
     const count = this.cascadeCount;
     const generation = this._cascadeGeneration;
     let drawn = 0;
@@ -1545,7 +1547,15 @@ export class ShadowMaps {
         boundVariant = variant;
       }
       if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-      this._drawBatch(pass, gpu, b, primitive);
+      // A strip of a scrolled cascade, and a mesh drawn once: only its chunks
+      // that reach the strip. Not skinned or morphed, whose vertices leave the
+      // boxes; not with LOD, whose draws are indirect.
+      if (!useMerged && cull !== null && primitive.chunks && gpu.batchSize[b] === 1 && !skinned
+        && primitive.morphCountStride === 0 && !gpu.hasLod) {
+        this._drawChunks(pass, gpu, b, primitive, cull, at);
+      } else {
+        this._drawBatch(pass, gpu, b, primitive);
+      }
     }
     if (grouped) this._encodeMergedCasters(pass, materials, cull, at, false);
     if (alpha) this._encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch);
@@ -1583,6 +1593,39 @@ export class ShadowMaps {
     }
     // What follows draws from the arena's own indices again.
     if (bound) this.geometry.bind(pass);
+  }
+
+  /**
+   * One object's batch, chunk by chunk (chunkBoxes): runs of consecutive
+   * chunks whose boxes, through its world matrix, reach the view at cull[at].
+   * A strip is thin, and its cost is every vertex of every mesh it touches.
+   */
+  _drawChunks(pass, gpu, b, primitive, cull, at) {
+    const scene = this._scene;
+    const slot = scene.renderableMatrixSlot[gpu.batchOrder[gpu.batchFirst[b]]];
+    const chunks = primitive.chunks;
+    const box = (this._chunkBox ??= new Float32Array(6));
+    const min = (this._chunkMin ??= new Float32Array(3));
+    const max = (this._chunkMax ??= new Float32Array(3));
+    pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
+    const triangles = primitive.indexCount / 3;
+    let run = -1;
+    for (let k = 0; k <= chunks.count; k++) {
+      let reaches = false;
+      if (k < chunks.count) {
+        aabbTransform(min, max, chunks.min, chunks.max, scene.transforms.world, slot * 16, 0, k * 3);
+        box.set(min, 0);
+        box.set(max, 3);
+        reaches = boxInOrtho(box, 0, cull, at);
+      }
+      if (reaches && run < 0) run = k;
+      if (!reaches && run >= 0) {
+        const first = run * CHUNK_TRIANGLES;
+        const count = Math.min(k * CHUNK_TRIANGLES, triangles) - first;
+        pass.drawIndexed(count * 3, 1, primitive.firstIndex + first * 3, primitive.baseVertex, 0);
+        run = -1;
+      }
+    }
   }
 
   /**

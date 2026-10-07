@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Big meshes are drawn a chunk at a time.** Each mesh's triangles are boxed in runs of 128 at
+  load. A strip of a scrolled shadow cascade draws only a mesh's chunks that reach it -- a strip
+  is thin, and its cost was every vertex of every mesh it touched -- and a merged mesh's chunks
+  out of view are dropped from the camera's draw as its whole was. Sponza walking the nave, against
+  the last change: GPU -8%, the nearest cascade's strips 0.49 -> 0.18 ms; the same pixels.
 - **Their shadows too, when a shadow map is drawn whole.** Each material's merged meshes also
   keep a list of every one's triangles, copied once, and a shadow view drawn whole -- a cascade
   under a turning sun, a point or spot light's -- is a draw per material rather than per mesh.

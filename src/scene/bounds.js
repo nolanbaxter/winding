@@ -9,6 +9,33 @@ import { aabbTransform } from '../core/math/aabb.js';
 import { handleIndex } from '../core/handle.js';
 
 /** Boxes, six floats each (min then max), in a buffer that grows. */
+/** Triangles in a chunk: see chunkBoxes. */
+export const CHUNK_TRIANGLES = 128;
+
+/**
+ * A primitive's triangles in runs of CHUNK_TRIANGLES, in the order the file
+ * gives them, each with the box round its own vertices: what a shadow strip
+ * tests to draw only the part of a mesh that reaches it. Exporters write
+ * triangles in spatially coherent order, so a run is a patch, not a scatter.
+ * Null for a primitive of one chunk, which its own box already covers.
+ */
+export function chunkBoxes(positions, indices) {
+  const triangles = indices.length / 3;
+  const count = Math.ceil(triangles / CHUNK_TRIANGLES);
+  if (count < 2) return null;
+  const min = new Float32Array(count * 3).fill(Infinity);
+  const max = new Float32Array(count * 3).fill(-Infinity);
+  for (let i = 0; i < indices.length; i++) {
+    const k = Math.floor(i / (CHUNK_TRIANGLES * 3)) * 3, v = indices[i] * 3;
+    for (let a = 0; a < 3; a++) {
+      const x = positions[v + a];
+      if (x < min[k + a]) min[k + a] = x;
+      if (x > max[k + a]) max[k + a] = x;
+    }
+  }
+  return { count, min, max };
+}
+
 /**
  * Whether the box at data[k..k+6] (min xyz, max xyz) reaches into the view of
  * the orthographic matrix at m[o..o+16]: its clip-space box overlaps x and y

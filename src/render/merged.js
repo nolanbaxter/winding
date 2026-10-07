@@ -16,13 +16,16 @@
 // and reads the vertex out of the geometry arena by hand -- an index is no
 // longer a vertex buffer's address.
 //
-// An object out of view keeps its place, filled with its slot's tag alone:
-// triangles of one repeated vertex, which the GPU discards before anything is
-// rasterized, and which its vertex cache shades at most once. Each frame, a
-// thread per object tests it against the view; only one that came into view
-// or left it has its place rewritten -- its real indices copied in from the
+// It is drawn a CHUNK at a time (chunkBoxes in bounds.js: runs of 128
+// triangles, each with its own box). A chunk out of view keeps its place,
+// filled with its object's tag alone: triangles of one repeated vertex, which
+// the GPU discards before anything is rasterized, and which its vertex cache
+// shades at most once. Each frame, a thread per chunk tests its box, through
+// its object's world matrix, against the view; only one that came into view or
+// left it has its place rewritten -- its real indices copied in from the
 // arena, or the tag -- by a copy dispatched over exactly that work. A still
-// view rewrites nothing.
+// view rewrites nothing, and the half of a wall behind the camera costs
+// nothing either.
 //
 // A first version rebuilt every group's list each phase, from what the cull
 // kept: 0.75 ms of Sponza's frame to save 0.6. This tests the view only,
@@ -35,8 +38,9 @@
 // objects than its slots can number is split in two.
 //
 // Batches of several objects stay as they are: one draw already, and merging
-// them would copy every instance's indices into a list. So do skinned ones, and
-// any in an LOD group, whose shadows cast only the level the camera shows.
+// them would copy every instance's indices into a list. So do skinned and
+// morphed ones, whose vertices leave the chunks' boxes, and any in an LOD
+// group, whose shadows cast only the level the camera shows.
 //
 // SHADOWS draw every caster, in view or not, so each group has a second list
 // holding every object's real indices, copied once when the batches are built:
@@ -50,9 +54,11 @@ import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { FRUSTUM_PLANE_COUNT } from '../core/math/frustum.js';
 import { CULL_PHASES, BATCH_BYTES, TABLE_WORDS } from './gpudriven.js';
+import { CHUNK_TRIANGLES } from '../scene/bounds.js';
 
 const ARGS_WORDS = 5;
-const INFO_WORDS = 8;
+/** A chunk's record: eight u32s, then its box in its mesh's space, min and max as vec4s. */
+const INFO_WORDS = 16;
 const WORKGROUP_SIZE = 64;
 /** Indices one copy workgroup takes. */
 const SPAN = 1024;
@@ -85,29 +91,32 @@ struct CullParams {
   projectionScale : f32,
 };
 
-struct Bounds {
-  minPoint : vec4<f32>,
-  maxPoint : vec4<f32>,
-  lod      : vec4<f32>,
+/** gpudriven.js's draw data: only the model matrix is read. */
+struct DrawData {
+  model : mat4x4<f32>,
+  rest  : array<vec4<f32>, 4>,
 };
 
-/** A merged object: its renderable, its group, its primitive, and its place. */
+/** A merged chunk: its object, its group, its triangles, its place, and its box. */
 struct Merged {
   item       : u32,
   group      : u32,
   indexCount : u32,
   firstIndex : u32,
-  // Where its run starts in the lists, and its slot's tag.
+  // Where its run starts in the lists, and its object's slot's tag.
   place      : u32,
   tag        : u32,
-  // Its first span: spans of SPAN indices are numbered object after object.
+  // Its first span: spans of SPAN indices are numbered chunk after chunk.
   spanFirst  : u32,
   spans      : u32,
+  // Its box, in its mesh's own space.
+  lo         : vec4<f32>,
+  hi         : vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform>             params  : Params;
 @group(0) @binding(1) var<uniform>             view    : CullParams;
-@group(0) @binding(2) var<storage, read>       bounds  : array<Bounds>;
+@group(0) @binding(2) var<storage, read>       draws   : array<DrawData>;
 @group(0) @binding(3) var<storage, read>       merged  : array<Merged>;
 // Each object's state (1 in view), then the work count and the work list of
 // spans to rewrite: one flat array, so the count can be the atomic that hands
@@ -119,32 +128,30 @@ struct Merged {
 // a dispatch reads its size from may not also be writable in that dispatch.
 @group(1) @binding(0) var<storage, read_write> dispatch : array<u32>;
 
-/** The cull shader's test, over the same five planes, and its choice of level of detail. */
-fn inView(b : Bounds) -> bool {
+/**
+ * The chunk's box, through its object's world matrix, against the view's five
+ * planes: centre and half extent, the extent through the matrix's absolute
+ * values -- the world box round the moved one, as aabbTransform makes it.
+ */
+fn inView(m : Merged) -> bool {
+  let model = draws[m.item].model;
+  let centre = (model * vec4<f32>((m.lo.xyz + m.hi.xyz) * 0.5, 1.0)).xyz;
+  let half = (m.hi.xyz - m.lo.xyz) * 0.5;
+  let extent = abs(model[0].xyz) * half.x + abs(model[1].xyz) * half.y + abs(model[2].xyz) * half.z;
   for (var p = 0u; p < ${FRUSTUM_PLANE_COUNT}u; p = p + 1u) {
     let plane = view.planes[p];
-    let corner = vec3<f32>(
-      select(b.minPoint.x, b.maxPoint.x, plane.x >= 0.0),
-      select(b.minPoint.y, b.maxPoint.y, plane.y >= 0.0),
-      select(b.minPoint.z, b.maxPoint.z, plane.z >= 0.0),
-    );
-    if (dot(plane.xyz, corner) + plane.w < 0.0) { return false; }
-  }
-  if (b.lod.w > 0.0) {
-    let w = (view.viewProj * vec4<f32>(b.lod.xyz, 1.0)).w;
-    let coverage = select(3.0e38, b.lod.w * view.projectionScale / w, w > 0.0);
-    return coverage >= b.minPoint.w && coverage < b.maxPoint.w;
+    if (dot(plane.xyz, centre) + plane.w + dot(abs(plane.xyz), extent) < 0.0) { return false; }
   }
   return true;
 }
 
-// A thread per object: in view or not, and if that changed, its spans onto the list.
+// A thread per chunk: in view or not, and if that changed, its spans onto the list.
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn flip(@builtin(global_invocation_id) id : vec3<u32>) {
   let j = id.y * (65535u * ${WORKGROUP_SIZE}u) + id.x;
   if (j >= params.count) { return; }
   let m = merged[j];
-  let now = select(0u, 1u, inView(bounds[m.item]));
+  let now = select(0u, 1u, inView(m));
   if (atomicExchange(&work[params.stateBase + j], now) == now) { return; }
   let at = atomicAdd(&work[params.countBase], m.spans);
   for (var k = 0u; k < m.spans; k = k + 1u) {
@@ -269,6 +276,8 @@ export class MergedDraws {
     for (let b = 0; b < gpu.batchCount; b++) {
       if (gpu.batchSize[b] !== 1 || gpu.batchSkinned[b] === 1) continue;
       if (scene.renderableLodSlot[gpu.batchOrder[gpu.batchFirst[b]]] >= 0) continue;
+      // Morphed vertices leave the chunks' boxes, which are the rest pose's.
+      if (gpu.batchPrimitive[b].morphCountStride !== 0) continue;
       const key = gpu.batchMaterial[b] * 2 + gpu.batchMirrored[b];
       let list = byKey.get(key);
       if (!list) byKey.set(key, (list = []));
@@ -302,26 +311,48 @@ export class MergedDraws {
 
     const STORAGE = GPUBufferUsage.STORAGE;
     const queue = this.rhi.queue;
-    const info = new Uint32Array(itemTotal * INFO_WORDS);
+    // A record per chunk: CHUNK_TRIANGLES of a primitive with chunks, the
+    // whole of one without, its box its own.
+    let records = 0;
+    for (const group of this.groups) for (const b of group.batches) records += gpu.batchPrimitive[b].chunks?.count ?? 1;
+    const infoBytes = new ArrayBuffer(records * INFO_WORDS * 4);
+    const info = new Uint32Array(infoBytes);
+    const infoF32 = new Float32Array(infoBytes);
     const table = new Uint32Array(itemTotal * TABLE_WORDS);
     const args = new Uint32Array(this.groupCount * ARGS_WORDS);
-    let j = 0, spans = 0;
+    let j = 0, spans = 0, slotTotal = 0;
     this.groups.forEach((group, g) => {
       let place = group.indexBase;
       group.batches.forEach((b, slot) => {
         const p = gpu.batchPrimitive[b];
         const item = gpu.batchOrder[gpu.batchFirst[b]];
-        const count = Math.ceil(p.indexCount / SPAN);
-        info.set([item, g, p.indexCount, p.firstIndex, place, (slot << group.shift) >>> 0, spans, count], j * INFO_WORDS);
-        table.set([item, p.baseVertex], j * TABLE_WORDS);
+        const tag = (slot << group.shift) >>> 0;
+        table.set([item, p.baseVertex], slotTotal++ * TABLE_WORDS);
+        const chunks = p.chunks;
+        const count = chunks?.count ?? 1;
+        for (let k = 0; k < count; k++) {
+          const first = chunks ? k * CHUNK_TRIANGLES * 3 : 0;
+          const indices = chunks ? Math.min(CHUNK_TRIANGLES * 3, p.indexCount - first) : p.indexCount;
+          const span = Math.ceil(indices / SPAN);
+          const o = j * INFO_WORDS;
+          info.set([item, g, indices, p.firstIndex + first, place + first, tag, spans, span], o);
+          if (chunks) {
+            infoF32.set(chunks.min.subarray(k * 3, k * 3 + 3), o + 8);
+            infoF32.set(chunks.max.subarray(k * 3, k * 3 + 3), o + 12);
+          } else {
+            infoF32.set(p.bounds.min, o + 8);
+            infoF32.set(p.bounds.max, o + 12);
+          }
+          spans += span;
+          j++;
+        }
         place += p.indexCount;
-        spans += count;
-        j++;
       });
       group.indexCount = place - group.indexBase;
       args.set([group.indexCount, 1, group.indexBase, 0, 0], g * ARGS_WORDS);
     });
     this.spanCount = spans;
+    this.recordCount = records;
     queue.writeBuffer(this._buffer('info', info.byteLength, STORAGE), 0, info);
     queue.writeBuffer(this._buffer('args', args.byteLength, GPUBufferUsage.INDIRECT), 0, args);
     // Past every cull phase's slice of the visible list: the groups' tables.
@@ -330,8 +361,8 @@ export class MergedDraws {
     // Every object starts out of view, its place all zeros: its group's slot
     // 0, vertex 0, three at a time, nothing drawn. The first frame brings in the rest.
     const indices = this._buffer('indices', indexTotal * 4, GPUBufferUsage.INDEX | STORAGE);
-    this._countBase = itemTotal;
-    this._listBase = itemTotal + 1;
+    this._countBase = records;
+    this._listBase = records + 1;
     const work = this._buffer('work', (this._listBase + spans) * 4, STORAGE);
     this._buffer('dispatch', 12, GPUBufferUsage.INDIRECT | STORAGE);
     const shadowIndices = this._buffer('shadowIndices', indexTotal * 4, GPUBufferUsage.INDEX | STORAGE);
@@ -343,7 +374,7 @@ export class MergedDraws {
         .set([gpu.capacity * CULL_PHASES + group.tableBase * TABLE_WORDS, group.shift]);
     });
     queue.writeBuffer(this._buffer('uniforms', uniforms.byteLength, GPUBufferUsage.UNIFORM), 0, uniforms);
-    const params = Uint32Array.of(itemTotal, spans, 0, this._countBase, 0, this._listBase, 0, 0);
+    const params = Uint32Array.of(records, spans, 0, this._countBase, 0, this._listBase, 0, 0);
     queue.writeBuffer(this._buffer('params', PARAMS_BYTES, GPUBufferUsage.UNIFORM), 0, params);
 
     // Cleared, and the shadow lists filled, now: the writes above go first, in queue order.
@@ -352,14 +383,14 @@ export class MergedDraws {
     encoder.clearBuffer(work, 0, this._listBase * 4);
     const pass = encoder.beginComputePass({ label: 'merged-shadow-lists' });
     pass.setPipeline(this.copyAllPipeline);
-    pass.setBindGroup(0, this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.boundsBuffer, this._arena.indexBuffer, shadowIndices));
+    pass.setBindGroup(0, this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.drawDataBuffer, this._arena.indexBuffer, shadowIndices));
     pass.dispatchWorkgroups(Math.min(spans, 65535), Math.ceil(spans / 65535));
     pass.end();
     queue.submit([encoder.finish()]);
   }
 
   /** The bind group every step uses, writing into `indices`: the camera's lists, or the shadows'. */
-  _makeBindGroup(cullParams, cullBytes, bounds, arenaIndices, indices) {
+  _makeBindGroup(cullParams, cullBytes, draws, arenaIndices, indices) {
     const b = this._buffers;
     return this.rhi.device.createBindGroup({
       label: 'merged',
@@ -367,7 +398,7 @@ export class MergedDraws {
       entries: [
         { binding: 0, resource: { buffer: b.params, size: PARAMS_BYTES } },
         { binding: 1, resource: { buffer: cullParams, offset: 0, size: cullBytes } },
-        { binding: 2, resource: { buffer: bounds } },
+        { binding: 2, resource: { buffer: draws } },
         { binding: 3, resource: { buffer: b.info } },
         { binding: 4, resource: { buffer: b.work } },
         { binding: 5, resource: { buffer: arenaIndices } },
@@ -396,30 +427,30 @@ export class MergedDraws {
 
   /**
    * The pass that brings the groups' lists up to date with this frame's view,
-   * reading `gpu`'s bounds and its cull parameters. Returns the resource the
-   * forward pass reads, or null with nothing merged.
+   * reading `gpu`'s draw data (`drawsResource`) and its cull parameters.
+   * Returns the resource the forward pass reads, or null with nothing merged.
    */
-  addPass(graph, gpu, arena, boundsResource) {
+  addPass(graph, gpu, arena, drawsResource) {
     if (this.groupCount === 0) return null;
     const key = `${this.revision}:${gpu.buffersRevision}:${arena.revision}`;
     if (this._bindKey !== key) {
       this._bindKey = key;
       const b = this._buffers;
-      this._bindGroup = this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.boundsBuffer, arena.indexBuffer, b.indices);
+      this._bindGroup = this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.drawDataBuffer, arena.indexBuffer, b.indices);
       this._dispatchGroup = this.rhi.device.createBindGroup({
         label: 'merged-dispatch', layout: this.dispatchLayout, entries: [{ binding: 0, resource: { buffer: b.dispatch } }],
       });
       this.drawBindGroup = undefined;
     }
     const lists = graph.importBuffer('merged', this._buffers.indices);
-    graph.addPass({ name: 'merge', type: 'compute', reads: [boundsResource], writes: [lists], execute: this._execute });
+    graph.addPass({ name: 'merge', type: 'compute', reads: [drawsResource], writes: [lists], execute: this._execute });
     return lists;
   }
 
   _dispatch(pass) {
     pass.setBindGroup(0, this._bindGroup);
     // Dispatches in one pass see each other's writes: each step reads the last.
-    const threads = Math.ceil(this.mergedCount / WORKGROUP_SIZE);
+    const threads = Math.ceil(this.recordCount / WORKGROUP_SIZE);
     pass.setPipeline(this.flipPipeline);
     pass.dispatchWorkgroups(Math.min(threads, 65535), Math.ceil(threads / 65535));
     pass.setPipeline(this.sizePipeline);

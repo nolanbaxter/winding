@@ -27,6 +27,7 @@ import { parseHDR } from '../render/hdr.js';
 import { Renderer, RenderTarget } from '../render/renderer.js';
 import { Splats } from '../render/splats.js';
 import { openSurface } from '../render/shadows.js';
+import { chunkBoxes } from '../scene/bounds.js';
 import { readSplats } from '../scene/splats.js';
 import { GLTFTextures } from '../render/textures.js';
 import { createTexture2D, uploadImage, generateMipmaps, decodeImageBytes } from '../rhi/texture.js';
@@ -516,6 +517,8 @@ export class Winding {
             bounds: primitive.bounds,
             /** Whether an edge has one triangle: the shadow pass draws it whole. See openSurface. */
             open: openSurface(primitive.positions, primitive.indices),
+            /** Its triangles in chunks, with their boxes: see chunkBoxes. */
+            chunks: chunkBoxes(primitive.positions, primitive.indices),
             // How far each target reaches, which is all a bound needs. The deltas
             // themselves are a GPU buffer; this is the one number the CPU keeps.
             morphExtent: primitive.morph?.extent ?? null,

@@ -16,7 +16,7 @@ import {
 } from '../src/render/shadows.js';
 import { Scene, LIGHT_FLOATS, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
 import { frustumCreate } from '../src/core/math/frustum.js';
-import { farthestDistance, BoxList, boxInOrtho } from '../src/scene/bounds.js';
+import { farthestDistance, BoxList, boxInOrtho, chunkBoxes, CHUNK_TRIANGLES } from '../src/scene/bounds.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -43,6 +43,23 @@ function orthoNdc(m, x, y, z) {
 // --------------------------------------------------- orthographic reverse-Z
 
 console.log('\northographic reverse-Z');
+
+test('a mesh in chunks: each run of triangles boxed by its own vertices, none for a mesh of one chunk', () => {
+  // A row of triangles along x, triangle t from x = t to t + 1: chunk k spans k * N to (k + 1) * N.
+  const N = CHUNK_TRIANGLES, triangles = N * 2 + 10;
+  const positions = new Float32Array((triangles + 1) * 2 * 3);
+  for (let i = 0; i <= triangles; i++) {
+    positions.set([i, 0, 0], i * 6);
+    positions.set([i, 1, 0], i * 6 + 3);
+  }
+  const indices = new Uint32Array(triangles * 3);
+  for (let t = 0; t < triangles; t++) indices.set([t * 2, t * 2 + 2, t * 2 + 1], t * 3);
+  const chunks = chunkBoxes(positions, indices);
+  assert.equal(chunks.count, 3);
+  assert.deepEqual([...chunks.min.subarray(3, 6), ...chunks.max.subarray(3, 6)], [N, 0, 0, 2 * N, 1, 0], 'the second chunk');
+  assert.deepEqual([chunks.min[6], chunks.max[6]], [2 * N, triangles], 'the short last one');
+  assert.equal(chunkBoxes(positions, indices.subarray(0, 30)), null, 'one chunk: none');
+});
 
 test('a cascade skips exactly the boxes the GPU would clip', () => {
   // Looking down -z from the origin: x and y in [-10, 10], depth 1 to 100.
