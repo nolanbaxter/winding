@@ -106,20 +106,22 @@ takes, what it returns and what it throws, with an index to look any of them up 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/compare-dark.svg">
-  <img src="docs/images/compare-light.svg" width="760" alt="Frame time in milliseconds, lower is better. Sponza with sun shadows: Winding 4.6, Three.js 2.6, Babylon.js 5.8, PlayCanvas 3.8. 10,000 moving cubes: Winding 2.7, Three.js 49, Babylon.js 10, PlayCanvas 19. 256 point lights: Winding 9.2, Three.js 6.6, Babylon.js 23, PlayCanvas 9.7.">
+  <img src="docs/images/compare-light.svg" width="760" alt="Frame time in milliseconds, lower is better. Desktop, RTX 5060 Ti: Sponza with sun shadows: Winding 0.63, Three.js 0.49, Babylon.js 2.1, PlayCanvas 0.95. 10,000 moving cubes: Winding 3.7, Three.js 53, Babylon.js 23, PlayCanvas 33. 256 point lights: Winding 0.69, Three.js 0.75, Babylon.js 1.3, PlayCanvas 0.89. Laptop, Intel Iris Xe: Sponza: Winding 4.2, Three.js 2.6, Babylon.js 6.0, PlayCanvas 4.0. Cubes: Winding 2.6, Three.js 49, Babylon.js 9.9, PlayCanvas 19. Lights: Winding 6.6, Three.js 6.7, Babylon.js 23, PlayCanvas 9.7.">
 </picture>
 
-The same three scenes through each engine's WebGPU renderer, in one page, taking turns. Winding is
-the fastest by far with many moving objects. With shadows it is behind Three.js and PlayCanvas, and
-with many lights behind Three.js.
+The same three scenes through each engine's WebGPU renderer, in one page, taking turns, on a desktop
+and a laptop. Winding is the fastest by far with many moving objects, and with many lights the
+fastest on the desktop and level with Three.js on the laptop. With shadows Three.js is ahead on
+both.
 
-<sub>Intel Iris Xe, Chrome 154, 1280×720. Each number is the median of eight alternating blocks of 30
-frames, timed to the GPU finishing, averaged over two runs; Three.js r186, Babylon.js 9.29,
-PlayCanvas 2.23. Matched: four 1024×1024 shadow cascades to 40 m, ACES tone mapping, and no
-antialiasing, bloom, ambient occlusion or TAA. Not matched: Winding lights its ambient from an
-environment map where the others use a flat term, and it culls by occlusion as well as by view.
-To rerun it, serve the repository (<code>node serve.js</code>) and open
-<code>bench/compare.html?scene=sponza</code>, <code>cubes</code> or <code>lights</code>.</sub>
+<sub>Desktop: NVIDIA GeForce RTX 5060 Ti, AMD Ryzen 5 5500, Edge 154. Laptop: Intel Iris Xe,
+Chrome 154. Both at 1280×720. Each number is the median of eight alternating blocks of 30 frames,
+timed to the GPU finishing, averaged over two runs; Three.js r186, Babylon.js 9.29, PlayCanvas 2.23.
+Matched: four 1024×1024 shadow cascades to 40 m, ACES tone mapping, and no antialiasing, bloom,
+ambient occlusion or TAA. Not matched: Winding lights its ambient from an environment map where the
+others use a flat term, and it culls by occlusion as well as by view. To rerun it, open
+<code>bench/compare.html</code> as a file in Chrome or Edge: it runs every scene twice and shows the
+results.</sub>
 
 ## Install
 

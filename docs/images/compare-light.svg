@@ -1,32 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" width="760" height="380" role="img" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-<title>Frame time by scene: Winding, Three.js, Babylon.js and PlayCanvas</title>
-<desc>Sponza, sun shadows: Winding 4.6 ms, Three.js 2.6 ms, Babylon.js 5.8 ms, PlayCanvas 3.8 ms. 10,000 moving cubes: Winding 2.7 ms, Three.js 49 ms, Babylon.js 10 ms, PlayCanvas 19 ms. 256 point lights: Winding 9.2 ms, Three.js 6.6 ms, Babylon.js 23 ms, PlayCanvas 9.7 ms. Lower is better.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 668" width="760" height="668" role="img" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>Frame time by scene: Winding, Three.js, Babylon.js and PlayCanvas, on a desktop and a laptop</title>
+<desc>Desktop: NVIDIA RTX 5060 Ti, AMD Ryzen 5 5500, Edge 154. Sponza, sun shadows: Winding 0.63 ms, Three.js 0.49 ms, Babylon.js 2.1 ms, PlayCanvas 0.95 ms. 10,000 moving cubes: Winding 3.7 ms, Three.js 53 ms, Babylon.js 23 ms, PlayCanvas 33 ms. 256 point lights: Winding 0.69 ms, Three.js 0.75 ms, Babylon.js 1.3 ms, PlayCanvas 0.89 ms. Laptop: Intel Iris Xe, Chrome 154. Sponza, sun shadows: Winding 4.2 ms, Three.js 2.6 ms, Babylon.js 6.0 ms, PlayCanvas 4.0 ms. 10,000 moving cubes: Winding 2.6 ms, Three.js 49 ms, Babylon.js 9.9 ms, PlayCanvas 19 ms. 256 point lights: Winding 6.6 ms, Three.js 6.7 ms, Babylon.js 23 ms, PlayCanvas 9.7 ms. Lower is better.</desc>
 <text x="12" y="26" font-size="15" font-weight="600" fill="#0b0b0b">Frame time, ms (lower is better)</text>
 <rect x="12" y="42" width="11" height="11" rx="2" fill="#2a78d6"/><text x="29" y="52" font-size="13" fill="#52514e">Winding</text>
 <rect x="102.80000000000001" y="42" width="11" height="11" rx="2" fill="#eb6834"/><text x="119.80000000000001" y="52" font-size="13" fill="#52514e">Three.js</text>
 <rect x="201" y="42" width="11" height="11" rx="2" fill="#1baf7a"/><text x="218" y="52" font-size="13" fill="#52514e">Babylon.js</text>
 <rect x="314" y="42" width="11" height="11" rx="2" fill="#eda100"/><text x="331" y="52" font-size="13" fill="#52514e">PlayCanvas</text>
-<line x1="52" x2="740" y1="320" y2="320" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="324" font-size="12" text-anchor="end" fill="#6b6a65">0</text>
-<line x1="52" x2="740" y1="271.6" y2="271.6" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="275.6" font-size="12" text-anchor="end" fill="#6b6a65">5</text>
-<line x1="52" x2="740" y1="223.2" y2="223.2" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="227.2" font-size="12" text-anchor="end" fill="#6b6a65">10</text>
-<line x1="52" x2="740" y1="174.8" y2="174.8" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="178.8" font-size="12" text-anchor="end" fill="#6b6a65">15</text>
-<line x1="52" x2="740" y1="126.39999999999998" y2="126.39999999999998" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="130.39999999999998" font-size="12" text-anchor="end" fill="#6b6a65">20</text>
-<line x1="52" x2="740" y1="78" y2="78" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="82" font-size="12" text-anchor="end" fill="#6b6a65">25</text>
-<path d="M102.16666666666667,320 V279.0848 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#2a78d6"/><text x="117.16666666666667" y="269.0848" font-size="12" text-anchor="middle" fill="#0b0b0b">4.6</text>
-<path d="M135.16666666666669,320 V299.1224 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#eb6834"/><text x="150.16666666666669" y="289.1224" font-size="12" text-anchor="middle" fill="#0b0b0b">2.6</text>
-<path d="M168.16666666666669,320 V267.5656 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#1baf7a"/><text x="183.16666666666669" y="257.5656" font-size="12" text-anchor="middle" fill="#0b0b0b">5.8</text>
-<path d="M201.16666666666669,320 V286.92560000000003 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#eda100"/><text x="216.16666666666669" y="276.92560000000003" font-size="12" text-anchor="middle" fill="#0b0b0b">3.8</text>
-<text x="166.66666666666669" y="344" font-size="13" text-anchor="middle" fill="#52514e">Sponza, sun shadows</text>
-<path d="M331.50000000000006,320 V297.9608 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#2a78d6"/><text x="346.50000000000006" y="287.9608" font-size="12" text-anchor="middle" fill="#0b0b0b">2.7</text>
-<path d="M364.50000000000006,320 V82 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#eb6834"/><path d="M362.50000000000006,98 l34,-8 v6 l-34,8 Z" fill="#ffffff"/><text x="379.50000000000006" y="72" font-size="12" text-anchor="middle" fill="#0b0b0b">49</text>
-<path d="M397.50000000000006,320 V226.61919999999998 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#1baf7a"/><text x="412.50000000000006" y="216.61919999999998" font-size="12" text-anchor="middle" fill="#0b0b0b">10</text>
-<path d="M430.50000000000006,320 V141.04800000000003 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#eda100"/><text x="445.50000000000006" y="131.04800000000003" font-size="12" text-anchor="middle" fill="#0b0b0b">19</text>
-<text x="396.00000000000006" y="344" font-size="13" text-anchor="middle" fill="#52514e">10,000 moving cubes</text>
-<path d="M560.8333333333334,320 V235.2344 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#2a78d6"/><text x="575.8333333333334" y="225.2344" font-size="12" text-anchor="middle" fill="#0b0b0b">9.2</text>
-<path d="M593.8333333333334,320 V260.0152 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#eb6834"/><text x="608.8333333333334" y="250.0152" font-size="12" text-anchor="middle" fill="#0b0b0b">6.6</text>
-<path d="M626.8333333333334,320 V100.87599999999998 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#1baf7a"/><text x="641.8333333333334" y="90.87599999999998" font-size="12" text-anchor="middle" fill="#0b0b0b">23</text>
-<path d="M659.8333333333334,320 V229.7168 q0,-4 4,-4 h22 q4,0 4,4 V320 Z" fill="#eda100"/><text x="674.8333333333334" y="219.7168" font-size="12" text-anchor="middle" fill="#0b0b0b">9.7</text>
-<text x="625.3333333333334" y="344" font-size="13" text-anchor="middle" fill="#52514e">256 point lights</text>
-<line x1="52" x2="740" y1="320" y2="320" stroke="#c3c2b7" stroke-width="1"/>
-<text x="52" y="368" font-size="11" fill="#6b6a65">Axis cut at 25 ms: the Three.js cubes bar is 49 ms.</text>
+<text x="12" y="92" font-size="13" font-weight="600" fill="#52514e">Desktop: NVIDIA RTX 5060 Ti, AMD Ryzen 5 5500, Edge 154</text>
+<line x1="52" x2="740" y1="314" y2="314" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="318" font-size="12" text-anchor="end" fill="#6b6a65">0</text>
+<line x1="52" x2="740" y1="264.5" y2="264.5" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="268.5" font-size="12" text-anchor="end" fill="#6b6a65">1</text>
+<line x1="52" x2="740" y1="215" y2="215" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="219" font-size="12" text-anchor="end" fill="#6b6a65">2</text>
+<line x1="52" x2="740" y1="165.5" y2="165.5" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="169.5" font-size="12" text-anchor="end" fill="#6b6a65">3</text>
+<line x1="52" x2="740" y1="116" y2="116" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="120" font-size="12" text-anchor="end" fill="#6b6a65">4</text>
+<path d="M102.16666666666667,314 V286.815 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#2a78d6"/><text x="117.16666666666667" y="276.815" font-size="12" text-anchor="middle" fill="#0b0b0b">0.63</text>
+<path d="M135.16666666666669,314 V293.745 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#eb6834"/><text x="150.16666666666669" y="283.745" font-size="12" text-anchor="middle" fill="#0b0b0b">0.49</text>
+<path d="M168.16666666666669,314 V212.565 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#1baf7a"/><text x="183.16666666666669" y="202.565" font-size="12" text-anchor="middle" fill="#0b0b0b">2.1</text>
+<path d="M201.16666666666669,314 V270.975 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#eda100"/><text x="216.16666666666669" y="260.975" font-size="12" text-anchor="middle" fill="#0b0b0b">0.95</text>
+<text x="166.66666666666669" y="338" font-size="13" text-anchor="middle" fill="#52514e">Sponza, sun shadows</text>
+<path d="M331.50000000000006,314 V133.365 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#2a78d6"/><text x="346.50000000000006" y="123.36500000000001" font-size="12" text-anchor="middle" fill="#0b0b0b">3.7</text>
+<path d="M364.50000000000006,314 V120 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#eb6834"/><path d="M362.50000000000006,136 l34,-8 v6 l-34,8 Z" fill="#ffffff"/><text x="379.50000000000006" y="110" font-size="12" text-anchor="middle" fill="#0b0b0b">53</text>
+<path d="M397.50000000000006,314 V120 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#1baf7a"/><path d="M395.50000000000006,136 l34,-8 v6 l-34,8 Z" fill="#ffffff"/><text x="412.50000000000006" y="110" font-size="12" text-anchor="middle" fill="#0b0b0b">23</text>
+<path d="M430.50000000000006,314 V120 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#eda100"/><path d="M428.50000000000006,136 l34,-8 v6 l-34,8 Z" fill="#ffffff"/><text x="445.50000000000006" y="110" font-size="12" text-anchor="middle" fill="#0b0b0b">33</text>
+<text x="396.00000000000006" y="338" font-size="13" text-anchor="middle" fill="#52514e">10,000 moving cubes</text>
+<path d="M560.8333333333334,314 V283.845 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#2a78d6"/><text x="575.8333333333334" y="273.845" font-size="12" text-anchor="middle" fill="#0b0b0b">0.69</text>
+<path d="M593.8333333333334,314 V280.875 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#eb6834"/><text x="608.8333333333334" y="270.875" font-size="12" text-anchor="middle" fill="#0b0b0b">0.75</text>
+<path d="M626.8333333333334,314 V251.67000000000002 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#1baf7a"/><text x="641.8333333333334" y="241.67000000000002" font-size="12" text-anchor="middle" fill="#0b0b0b">1.3</text>
+<path d="M659.8333333333334,314 V273.945 q0,-4 4,-4 h22 q4,0 4,4 V314 Z" fill="#eda100"/><text x="674.8333333333334" y="263.945" font-size="12" text-anchor="middle" fill="#0b0b0b">0.89</text>
+<text x="625.3333333333334" y="338" font-size="13" text-anchor="middle" fill="#52514e">256 point lights</text>
+<line x1="52" x2="740" y1="314" y2="314" stroke="#c3c2b7" stroke-width="1"/>
+<text x="12" y="382" font-size="13" font-weight="600" fill="#52514e">Laptop: Intel Iris Xe, Chrome 154</text>
+<line x1="52" x2="740" y1="604" y2="604" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="608" font-size="12" text-anchor="end" fill="#6b6a65">0</text>
+<line x1="52" x2="740" y1="564.4" y2="564.4" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="568.4" font-size="12" text-anchor="end" fill="#6b6a65">5</text>
+<line x1="52" x2="740" y1="524.8" y2="524.8" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="528.8" font-size="12" text-anchor="end" fill="#6b6a65">10</text>
+<line x1="52" x2="740" y1="485.2" y2="485.2" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="489.2" font-size="12" text-anchor="end" fill="#6b6a65">15</text>
+<line x1="52" x2="740" y1="445.6" y2="445.6" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="449.6" font-size="12" text-anchor="end" fill="#6b6a65">20</text>
+<line x1="52" x2="740" y1="406" y2="406" stroke="#e1e0d9" stroke-width="1"/><text x="44" y="410" font-size="12" text-anchor="end" fill="#6b6a65">25</text>
+<path d="M102.16666666666667,604 V575.132 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#2a78d6"/><text x="117.16666666666667" y="565.132" font-size="12" text-anchor="middle" fill="#0b0b0b">4.2</text>
+<path d="M135.16666666666669,604 V587.4872 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#eb6834"/><text x="150.16666666666669" y="577.4872" font-size="12" text-anchor="middle" fill="#0b0b0b">2.6</text>
+<path d="M168.16666666666669,604 V560.7176 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#1baf7a"/><text x="183.16666666666669" y="550.7176" font-size="12" text-anchor="middle" fill="#0b0b0b">6.0</text>
+<path d="M201.16666666666669,604 V576.3992 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#eda100"/><text x="216.16666666666669" y="566.3992" font-size="12" text-anchor="middle" fill="#0b0b0b">4.0</text>
+<text x="166.66666666666669" y="628" font-size="13" text-anchor="middle" fill="#52514e">Sponza, sun shadows</text>
+<path d="M331.50000000000006,604 V587.4872 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#2a78d6"/><text x="346.50000000000006" y="577.4872" font-size="12" text-anchor="middle" fill="#0b0b0b">2.6</text>
+<path d="M364.50000000000006,604 V410 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#eb6834"/><path d="M362.50000000000006,426 l34,-8 v6 l-34,8 Z" fill="#ffffff"/><text x="379.50000000000006" y="400" font-size="12" text-anchor="middle" fill="#0b0b0b">49</text>
+<path d="M397.50000000000006,604 V529.8296 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#1baf7a"/><text x="412.50000000000006" y="519.8296" font-size="12" text-anchor="middle" fill="#0b0b0b">9.9</text>
+<path d="M430.50000000000006,604 V456.728 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#eda100"/><text x="445.50000000000006" y="446.728" font-size="12" text-anchor="middle" fill="#0b0b0b">19</text>
+<text x="396.00000000000006" y="628" font-size="13" text-anchor="middle" fill="#52514e">10,000 moving cubes</text>
+<path d="M560.8333333333334,604 V555.4112 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#2a78d6"/><text x="575.8333333333334" y="545.4112" font-size="12" text-anchor="middle" fill="#0b0b0b">6.6</text>
+<path d="M593.8333333333334,604 V554.6984 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#eb6834"/><text x="608.8333333333334" y="544.6984" font-size="12" text-anchor="middle" fill="#0b0b0b">6.7</text>
+<path d="M626.8333333333334,604 V425.84000000000003 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#1baf7a"/><text x="641.8333333333334" y="415.84000000000003" font-size="12" text-anchor="middle" fill="#0b0b0b">23</text>
+<path d="M659.8333333333334,604 V531.2552000000001 q0,-4 4,-4 h22 q4,0 4,4 V604 Z" fill="#eda100"/><text x="674.8333333333334" y="521.2552000000001" font-size="12" text-anchor="middle" fill="#0b0b0b">9.7</text>
+<text x="625.3333333333334" y="628" font-size="13" text-anchor="middle" fill="#52514e">256 point lights</text>
+<line x1="52" x2="740" y1="604" y2="604" stroke="#c3c2b7" stroke-width="1"/>
+<text x="52" y="656" font-size="11" fill="#6b6a65">Each machine on its own axis, cut at 4 ms and 25 ms: a bar that passes it is broken, its value above.</text>
 </svg>
