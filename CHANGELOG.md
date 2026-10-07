@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Meshes drawn once each share one draw call per material.** A scene of distinct meshes -- a
+  level, Sponza, a town of separate buildings -- was a draw call per mesh, and each costs the GPU
+  about 7 us whether it draws anything or not. Now every mesh part drawn once is pooled with the
+  others of its material into one indexed draw, its vertices read straight from the geometry arena;
+  a part out of view keeps its place as triangles of one repeated vertex, which the GPU discards,
+  and only a part that comes into view or leaves it is rewritten. A town of 900 buildings: 900
+  draws -> 1, GPU 14.8 -> 4.0 ms, frame 23.3 -> 9.6 ms; Sponza: 103 draws -> 25, GPU -14%. The same
+  pixels. These parts are culled to the view, not by occlusion; meshes drawn many times are drawn
+  instanced, as before. `stats.draws` counts the calls.
 - **Every mesh's geometry lives in one arena.** One vertex buffer and one index buffer for every
   primitive loaded, where each had its own; a pass binds them once instead of per batch, and a
   freed range is reused by the next load. Groundwork for drawing many meshes in one call.

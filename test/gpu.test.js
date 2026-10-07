@@ -1074,6 +1074,35 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   });
 
 
+  await step('meshes of one material draw in one call, and come and go with the view', async () => {
+    // One quad loaded three times: three meshes, one shared material, so one
+    // merged draw. The camera turns to each in turn and then to none: each
+    // must show exactly while it is in view, its place in the merged list
+    // rewritten as it comes and goes.
+    const bytes = buildFeatureGLB({ baseColorFactor: [0.9, 0.15, 0.1, 1], roughnessFactor: 0.9 });
+    const scene = engine.createScene();
+    for (let i = 0; i < 3; i++) scene.add(await engine.load(bytes)).setPosition(i * 12 - 12, 0, 0);
+    scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity: 4 });
+    const cam = new Camera({ fovY: 0.6, near: 0.1 });
+    const centre = async (x) => {
+      cam.position.set([x, 0, 6]);
+      cam.target.set([x, 0, 0]);
+      engine.renderFrame(scene, cam);
+      const px = await engine.gpu.readPixels();
+      const i = ((engine.gpu.height >> 1) * engine.gpu.width + (engine.gpu.width >> 1)) * 4;
+      // Clearly red, against the grey sky.
+      return px[i] > 150 && px[i] - px[i + 2] > 80 ? 'quad' : 'none';
+    };
+    engine.renderFrame(scene, cam);
+    await engine.renderer._pipelinesBuilt();
+    const { groupCount, mergedCount } = engine.renderer.merged;
+    const seen = [];
+    for (const x of [-12, 12, 6, 0, -12, 6]) seen.push(await centre(x));
+    const report = `${mergedCount} meshes in ${groupCount} draw(s); centre at x = -12, 12, 6, 0, -12, 6: ${seen.join(', ')}`;
+    if (groupCount !== 1 || mergedCount !== 3 || seen.join() !== 'quad,quad,none,quad,quad,none') throw new Error(report);
+    return report;
+  });
+
   await step('a walking camera scrolls the cascades, and they match the ones drawn whole', async () => {
     // A row of blocks on a long ground under a slanting sun, the camera walking
     // along it: the cascades should scroll rather than redraw, and throwing

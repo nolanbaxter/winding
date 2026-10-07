@@ -481,7 +481,7 @@ Counts from the last frame drawn. Read only. The first five fields start at 0; t
 | Field | Set by | Meaning |
 |---|---|---|
 | `renderables` | 3D | Meshes in the scene. |
-| `draws` | 3D | Indirect draw batches (one per mesh part and material). |
+| `draws` | 3D | Opaque draw calls: one per mesh part and material, except that parts each drawn once share one call per material. |
 | `recomposed` | 3D, 2D | Transforms recomputed this frame. |
 | `transparent` | 3D | Blended objects this frame. |
 | `transparentDraws` | 3D | Draw calls for blended objects. |

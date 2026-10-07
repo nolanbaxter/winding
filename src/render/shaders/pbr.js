@@ -161,6 +161,8 @@ struct DrawData {
 /** The only thing still bound per draw: where this batch's slice begins. */
 struct Batch {
   firstVisible : u32,
+  // A merged draw's split of each index: the slot above this bit, the vertex below.
+  shift        : u32,
 };
 
 ${MATERIAL_WGSL}
@@ -201,6 +203,8 @@ struct CascadeView {
 @group(0) @binding(17) var<storage, read> cascadeViews  : array<CascadeView>;
 // Wraps, where shadowSampler clamps: a cascade's map is scrolled, not redrawn.
 @group(0) @binding(23) var          cascadeSampler : sampler_comparison;
+// Every primitive's vertices, VERTEX_STRIDE floats each, for vsMerged.
+@group(0) @binding(24) var<storage, read> geometry : array<f32>;
 // The opaque scene, mipped, for transmissive surfaces (render/transmission.js).
 @group(0) @binding(18) var         behindMap : texture_2d<f32>;
 // Reflection probes' prefiltered cubes, and their boxes, smallest first.
@@ -310,8 +314,6 @@ fn vs(
   @location(4) uv1      : vec2<f32>,
   @location(5) color    : vec4<f32>,
 ) -> VertexOut {
-  var out : VertexOut;
-
   // For the batched draws: instance_index counts from 0 within the draw, and
   // batch.firstVisible turns it into an index into the frame-wide visible list.
   // WebGPU only allows a non-zero firstInstance behind an optional feature,
@@ -321,6 +323,40 @@ fn vs(
   // draws, which may set firstInstance freely, so they pass the absolute slot
   // there and bind a firstVisible of 0. Both end up indexing the same list.
   let draw = drawData[visibleItems[batch.firstVisible + instance]];
+  return shadeVertex(draw, vertex, position, normal, uv, tangent, uv1, color);
+}
+
+/**
+ * A merged draw's vertex (merged.js). Its index is no vertex buffer's
+ * address: the slot of its object in the group's table above batch.shift, its
+ * vertex below. The table holds the object and where its primitive starts in
+ * the geometry arena, and the vertex is read from the arena by hand -- the
+ * same fifteen floats, in the same order, VERTEX_BUFFER_LAYOUT gives vs.
+ */
+@vertex
+fn vsMerged(@builtin(vertex_index) code : u32) -> VertexOut {
+  let at = batch.firstVisible + (code >> batch.shift) * 2u;
+  let first = visibleItems[at + 1u];
+  let vertex = first + (code & ((1u << batch.shift) - 1u));
+  let o = vertex * 15u;
+  let g = &geometry;
+  return shadeVertex(
+    drawData[visibleItems[at]], vertex,
+    vec3<f32>((*g)[o], (*g)[o + 1u], (*g)[o + 2u]),
+    vec3<f32>((*g)[o + 3u], (*g)[o + 4u], (*g)[o + 5u]),
+    vec2<f32>((*g)[o + 6u], (*g)[o + 7u]),
+    vec4<f32>((*g)[o + 8u], (*g)[o + 9u], (*g)[o + 10u], (*g)[o + 11u]),
+    vec2<f32>((*g)[o + 12u], (*g)[o + 13u]),
+    unpack4x8unorm(bitcast<u32>((*g)[o + 14u])),
+  );
+}
+
+/** What vs and vsMerged share: one vertex of the drawn object, morphed, into the world and onto the screen. */
+fn shadeVertex(
+  draw : DrawData, vertex : u32,
+  position : vec3<f32>, normal : vec3<f32>, uv : vec2<f32>, tangent : vec4<f32>, uv1 : vec2<f32>, color : vec4<f32>,
+) -> VertexOut {
+  var out : VertexOut;
   let m = applyMorph(draw, vertex, position, normal, tangent.xyz);
 
   let world = draw.model * vec4<f32>(m.position, 1.0);
