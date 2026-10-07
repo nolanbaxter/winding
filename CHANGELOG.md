@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-07
+
+**Fewer draws, less overdraw, shadows that scroll.** Every mesh's geometry now lives in one
+arena, and every mesh drawn once is pooled with the others of its material into one draw; the
+sun's shadow maps scroll with the camera instead of being redrawn; shadow passes read positions
+alone; and the merged meshes draw their depth before they shade. Each change A/B'd before it was
+kept, with the same pixels. On Iris Xe at 720p: Sponza 4.64 -> 4.15 ms a frame, 256 point lights
+9.17 -> 6.64 ms, a town of 900 separate buildings 14.8 -> 4.0 ms of GPU.
+
 ### Changed
 
 - **Merged meshes draw their depth first.** With no depth prepass, a pixel's cost depended on draw
@@ -2358,7 +2367,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/nolanbaxter/winding/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/nolanbaxter/winding/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/nolanbaxter/winding/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/nolanbaxter/winding/compare/v1.2.0...v1.3.0
