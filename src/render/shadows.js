@@ -42,9 +42,11 @@ import { vec3Create, vec3Normalize } from '../core/math/vec3.js';
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW } from '../rhi/bindgroups.js';
 import { ALPHA_MASK, MATERIAL_WGSL, VARIANT_DOUBLE_SIDED } from './material.js';
-import { CULL_SHADOW } from './gpudriven.js';
+import { CULL_SHADOW, NOT_BATCHED } from './gpudriven.js';
+import { boxInOrtho, CHUNK_TRIANGLES } from '../scene/bounds.js';
+import { aabbTransform } from '../core/math/aabb.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
-import { VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
+import { VERTEX_BUFFER_LAYOUT, POSITION_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { createTexture } from '../rhi/texture.js';
 
@@ -54,6 +56,15 @@ export const MAX_CASCADES = 4;
 export const LOCAL_VIEW_FLOATS = 20;
 /** The grid a cascade's box is snapped to, in texels: see _fitCascade. */
 const CASCADE_SNAP = 16;
+/** A cascade's mode this frame: kept as it is, drawn whole, or scrolled. */
+const KEEP = 0, FULL = 1, SCROLL = 2;
+/**
+ * Rectangles a scrolled cascade redraws, at most: the strip of new columns
+ * and the strip of new rows, each split in two by the wrap on either axis.
+ */
+const MAX_PIECES = 8;
+/** Floats a cascade gives the forward pass: its matrix, then where its map's origin sits. */
+const CASCADE_VIEW_FLOATS = 20;
 
 /**
  * How far past its own edge each local view reaches, as a tangent scale: the
@@ -106,6 +117,8 @@ struct DrawData {
 
 struct Batch {
   firstVisible : u32,
+  // A merged draw's split of each index (merged.js): the slot above this bit, the vertex below.
+  shift        : u32,
 };
 
 @group(0) @binding(0) var<uniform> cascade : Cascade;
@@ -117,6 +130,12 @@ struct Batch {
 @group(0) @binding(4) var<storage, read> morphDeltas : array<f32>;
 @group(0) @binding(5) var<storage, read> morphWeights : array<f32>;
 @group(3) @binding(0) var<uniform> batch : Batch;
+// For merged draws: the groups' tables (in the visible list, past the cull
+// slices), and every primitive's vertices.
+@group(0) @binding(6) var<storage, read> table : array<u32>;
+@group(0) @binding(7) var<storage, read> arena : array<f32>;
+// The arena's positions alone, three floats a vertex: what a depth-only caster reads.
+@group(0) @binding(8) var<storage, read> positions : array<f32>;
 
 // The material, for the casters whose shape comes from alpha. Only the fields
 // alpha needs are read, but the struct is the forward pass's, byte for byte.
@@ -145,6 +164,15 @@ fn morphPosition(draw : DrawData, vertex : u32, position : vec3<f32>) -> vec3<f3
   return moved;
 }
 
+// A rectangle of a scrolled cascade back to empty, ahead of its casters: one
+// triangle over the whole map, cut to the rectangle by the scissor, writing
+// the clear depth whatever was there.
+@vertex
+fn vsClear(@builtin(vertex_index) i : u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0;
+  return vec4<f32>(p, ${DEPTH_CLEAR_VALUE.toFixed(1)}, 1.0);
+}
+
 @vertex
 fn vs(
   @builtin(instance_index) instance : u32,
@@ -153,6 +181,26 @@ fn vs(
 ) -> @builtin(position) vec4<f32> {
   let draw = drawData[order[batch.firstVisible + instance]];
   let moved = morphPosition(draw, vertex, position);
+  return cascade.viewProjection * draw.model * vec4<f32>(moved, 1.0);
+}
+
+/** A merged draw's vertex: its object, and where in the arena it is. See vsMerged in pbr.js. */
+struct Pulled {
+  item   : u32,
+  vertex : u32,
+};
+
+fn pull(code : u32) -> Pulled {
+  let at = batch.firstVisible + (code >> batch.shift) * 2u;
+  return Pulled(table[at], table[at + 1u] + (code & ((1u << batch.shift) - 1u)));
+}
+
+@vertex
+fn vsMerged(@builtin(vertex_index) code : u32) -> @builtin(position) vec4<f32> {
+  let p = pull(code);
+  let o = p.vertex * 3u;
+  let draw = drawData[p.item];
+  let moved = morphPosition(draw, p.vertex, vec3<f32>(positions[o], positions[o + 1u], positions[o + 2u]));
   return cascade.viewProjection * draw.model * vec4<f32>(moved, 1.0);
 }
 
@@ -203,6 +251,19 @@ fn vsSkinnedAlpha(
   out.uv = uv;
   out.uv1 = uv1;
   out.alpha = color.a;
+  return out;
+}
+
+@vertex
+fn vsMergedAlpha(@builtin(vertex_index) code : u32) -> AlphaOut {
+  let p = pull(code);
+  let o = p.vertex * 15u;
+  let draw = drawData[p.item];
+  var out : AlphaOut;
+  out.clip = cascade.viewProjection * draw.model * vec4<f32>(morphPosition(draw, p.vertex, vec3<f32>(arena[o], arena[o + 1u], arena[o + 2u])), 1.0);
+  out.uv = vec2<f32>(arena[o + 6u], arena[o + 7u]);
+  out.uv1 = vec2<f32>(arena[o + 12u], arena[o + 13u]);
+  out.alpha = unpack4x8unorm(bitcast<u32>(arena[o + 14u])).a;
   return out;
 }
 
@@ -500,6 +561,8 @@ export class ShadowMaps {
     this.rhi = rhi;
     this.size = size;
     this.cascadeCount = cascades;
+    this._batchBoxes = new Float32Array(0);
+    this._groupBoxes = new Float32Array(0);
     /**
      * Cascades fitted this frame. Zero when there is no sun to fit them to,
      * which is what keeps the shadow passes off the graph entirely.
@@ -529,6 +592,19 @@ export class ShadowMaps {
       addressModeU: 'clamp-to-edge',
       addressModeV: 'clamp-to-edge',
     });
+    // The cascades wrap. One that moves keeps its texels where they lie and
+    // draws only the strip it moved onto (see _redrawCascade), so the map's
+    // origin wanders and a lookup wraps round its edge instead of clamping.
+    this.cascadeSampler = rhi.device.createSampler({
+      label: 'shadow-compare-cascades',
+      compare: DEPTH_COMPARE,
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'repeat',
+      addressModeV: 'repeat',
+    });
+    /** Cascades scrolled this frame rather than drawn whole. */
+    this.cascadesScrolled = 0;
 
     /** Every cascade of every casting light, a mat4 each, light by light. */
     this.matrices = new Float32Array(0);
@@ -539,6 +615,9 @@ export class ShadowMaps {
     this.texelSizes = new Float32Array(MAX_CASCADES);
 
     this._lightView = mat4Create();
+    this._depthRange = new Float64Array(2);
+    /** Per layer, the rectangles a scroll redraws: see _redrawCascade. */
+    this._pieces = [];
     this._projection = mat4Create();
     this._spheres = Array.from({ length: MAX_CASCADES }, () => new Float32Array(4));
     this._lightDirection = vec3Create(0, -1, 0);
@@ -549,6 +628,8 @@ export class ShadowMaps {
 
   async _init(pipelines, drawLayout, materialLayout = null) {
     const rhi = this.rhi;
+    // The batch group's layout, for the merged groups' own (merged.js).
+    this._drawLayout = drawLayout;
     this.shader = await compileShader(rhi.device, SHADOW_SHADER, 'shadow.wgsl');
 
     this.cascadeLayout = rhi.device.createBindGroupLayout({
@@ -564,6 +645,9 @@ export class ShadowMaps {
         { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 5, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 6, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 7, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 8, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
 
@@ -579,6 +663,9 @@ export class ShadowMaps {
         { binding: 3, resource: { buffer: palette.buffer } },
         { binding: 4, resource: { buffer: morph.deltaBuffer } },
         { binding: 5, resource: { buffer: morph.weightBuffer } },
+        { binding: 6, resource: { buffer: gpu.visibleBuffer } },
+        { binding: 7, resource: { buffer: this.geometry.vertexBuffer } },
+        { binding: 8, resource: { buffer: this.geometry.positionBuffer } },
       ],
     });
 
@@ -594,7 +681,8 @@ export class ShadowMaps {
       vertexEntry: 'vs',
       // No fragment stage: nothing is written but depth.
       fragmentEntry: undefined,
-      buffers: [VERTEX_BUFFER_LAYOUT],
+      // Positions alone: see geometry.js.
+      buffers: [POSITION_BUFFER_LAYOUT],
       targets: [],
       primitive: {
         topology: 'triangle-list',
@@ -626,7 +714,7 @@ export class ShadowMaps {
       ...this.descriptor,
       label: 'shadow-skinned',
       vertexEntry: 'vsSkinned',
-      buffers: [VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT],
+      buffers: [POSITION_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT],
     };
     this._pipelines = pipelines;
     // And both again with the winding reversed, for mirrored instances --
@@ -684,7 +772,25 @@ export class ShadowMaps {
         }
       }
     }
-    await pipelines.warm([...this.descriptors, ...this.alphaDescriptors]);
+    this.clearDescriptor = {
+      ...this.descriptor,
+      label: 'shadow-clear',
+      layout: createPipelineLayout(rhi.device, {}, 'shadow-clear'),
+      vertexEntry: 'vsClear',
+      buffers: [],
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depth: { format: DEPTH_FORMAT, depthCompare: 'always', depthWriteEnabled: true },
+    };
+    // Merged casters (merged.js): their vertices pulled from the arena. Never
+    // skinned. Indexed by doubleSided * 2 + mirrored, and the alpha-tested one.
+    this.mergedDescriptors = [0, 1, 4, 5].map((v) => ({
+      ...this.descriptors[v], label: `${this.descriptors[v].label}-merged`, vertexEntry: 'vsMerged', buffers: [],
+    }));
+    this.mergedAlphaDescriptor = this.alphaDescriptors.length > 0
+      ? { ...this.alphaDescriptors[0], label: 'shadow-mask-merged', vertexEntry: 'vsMergedAlpha', buffers: [] }
+      : null;
+    await pipelines.warm([...this.descriptors, ...this.alphaDescriptors, this.clearDescriptor,
+      ...this.mergedDescriptors, ...(this.mergedAlphaDescriptor ? [this.mergedAlphaDescriptor] : [])]);
 
     // One bound executor per layer, built as the arrays grow. The graph stores
     // a function per pass, and building them per frame would allocate a
@@ -730,28 +836,38 @@ export class ShadowMaps {
         dimension: '2d', baseArrayLayer: i, arrayLayerCount: 1, label: `cascade-${i}`,
       }));
     }
+    // A slot a layer, then MAX_PIECES a layer for the rectangles a scroll draws.
     this.cascadeBuffer = createBuffer(rhi, {
       label: 'shadow-cascades',
-      size: this.alignment * capacity,
+      size: this.alignment * capacity * (1 + MAX_PIECES),
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     // Grown mid-frame, between one light's cascades and the next: what the
     // lights before it already wrote comes across, or their shadows are lost
     // for the frame the array grew in.
-    const staging = new ArrayBuffer(this.alignment * capacity);
+    const staging = new ArrayBuffer(this.alignment * capacity * (1 + MAX_PIECES));
     if (this.cascadeStaging) new Uint8Array(staging).set(new Uint8Array(this.cascadeStaging));
     this.cascadeStaging = staging;
     this._cascadeStagingF32 = new Float32Array(this.cascadeStaging);
     this.cascadeList = createBuffer(rhi, {
       label: 'shadow-cascade-list',
-      size: capacity * 64,
+      size: capacity * CASCADE_VIEW_FLOATS * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     const matrices = new Float32Array(capacity * 16);
     matrices.set(this.matrices);
     this.matrices = matrices;
+    const views = new Float32Array(capacity * CASCADE_VIEW_FLOATS);
+    views.set(this._views ?? []);
+    this._views = views;
+    // Each layer's fit, for the next frame to compare against: the grid cell
+    // its box sits on (x, y), its texel, and its depth range (near, far).
+    const fits = new Float64Array(capacity * 5);
+    fits.set(this._fits ?? []);
+    this._fits = fits;
     for (let layer = this._executors.length; layer < capacity; layer++) {
-      this._executors.push((pass) => this._encodeView(pass, this.cascadeBindGroup, layer * this.alignment));
+      this._pieces.push({ count: 0, rects: new Int32Array(MAX_PIECES * 4), cull: new Float32Array(MAX_PIECES * 16) });
+      this._executors.push((pass) => this._encodeCascade(pass, layer));
     }
     this.cascadeCapacity = capacity;
     this.cascadeBindGroup = undefined;
@@ -951,10 +1067,12 @@ export class ShadowMaps {
    * The slices, their spheres and their texel sizes depend on the camera
    * alone, so every light shares them; only the matrices are per light.
    */
-  update(camera, scene, changes = null) {
+  update(camera, scene, changes = null, sceneMin = null, sceneMax = null) {
+    this._scene = scene;
     const count = this.cascadeCount;
     const generation = this._cascadeGeneration;
     let drawn = 0;
+    let scrolled = 0;
     const splits = cascadeSplits(camera.near, this.shadowDistance, count, this.lambda);
     let sliceNear = camera.near;
     for (let i = 0; i < count; i++) {
@@ -982,9 +1100,13 @@ export class ShadowMaps {
       this._growCascades((lights + 1) * count);
       this._lightDirection[0] = x; this._lightDirection[1] = y; this._lightDirection[2] = z;
       vec3Normalize(this._lightDirection, this._lightDirection);
+      this._lightBasis();
+      const depth = sceneMin === null ? null : this._sceneDepth(sceneMin, sceneMax);
       for (let c = 0; c < count; c++) {
-        this._fitCascade(lights * count + c, c);
-        if (this._redrawCascade(lights * count + c, scene.directionalEntity[d], changes)) drawn++;
+        this._fitCascade(lights * count + c, c, depth);
+        const mode = this._redrawCascade(lights * count + c, scene.directionalEntity[d], changes);
+        if (mode === FULL) drawn++;
+        else if (mode === SCROLL) scrolled++;
       }
       directionals[o + 3] = lights + 1;
       lights++;
@@ -1000,19 +1122,68 @@ export class ShadowMaps {
     }
     this._cascadeFrame++;
     if (this._cascadeGeneration !== generation) {
-      this.cascadeRedraw.fill(1, 0, layers);
+      // Growing replaced the array: every map starts again, its origin with it.
+      this.cascadeRedraw.fill(FULL, 0, layers);
+      for (let l = 0; l < layers; l++) this._views.fill(0, l * CASCADE_VIEW_FLOATS + 16, (l + 1) * CASCADE_VIEW_FLOATS);
       drawn = layers;
+      scrolled = 0;
     }
     this.cascadesDrawn = drawn;
+    this.cascadesScrolled = scrolled;
     if (lights === 0) return;
-    this.rhi.queue.writeBuffer(this.cascadeBuffer, 0, this.cascadeStaging, 0, this.alignment * layers);
-    this.rhi.queue.writeBuffer(this.cascadeList, 0, this.matrices, 0, layers * 16);
+    for (let l = 0; l < layers; l++) this._views.set(this.matrices.subarray(l * 16, l * 16 + 16), l * CASCADE_VIEW_FLOATS);
+    // The layers' own slots, then the slots of their pieces, which sit past every layer's.
+    this.rhi.queue.writeBuffer(this.cascadeBuffer, 0, this.cascadeStaging, 0,
+      this.alignment * (this.cascadeCapacity + layers * MAX_PIECES));
+    this.rhi.queue.writeBuffer(this.cascadeList, 0, this._views, 0, layers * CASCADE_VIEW_FLOATS);
+  }
+
+  /** The light-space basis for _lightDirection, anchored at the world origin: see _fitCascade. */
+  _lightBasis() {
+    const d = this._lightDirection;
+    chooseUp(this._up, d);
+    this._eye.set([0, 0, 0]);
+    this._target.set([d[0], d[1], d[2]]);
+    mat4LookAt(this._lightView, this._eye, this._target, this._up);
   }
 
   /**
-   * Whether cascade layer `layer`, just fitted for the light `entity`, must
-   * be drawn: it has no record, another light's, a different matrix, or
-   * something changed inside what it draws.
+   * The scene's extent along the light, as light-space z [low, high], rounded
+   * out to a step of a power of two near a quarter of it. Every cascade takes
+   * its depth range from this rather than from where the camera is: a range
+   * that followed the camera changed whenever it moved, and a changed range
+   * means every texel already in the map is wrong, so no cascade could ever
+   * be scrolled. Rounded, so a mover at the scene's edge changes it rarely.
+   * It also means every caster in the scene casts, however far up the light
+   * it stands -- `casterExtent` used to cut those off.
+   */
+  _sceneDepth(min, max) {
+    const v = this._lightView;
+    let low = Infinity, high = -Infinity;
+    for (let corner = 0; corner < 8; corner++) {
+      const x = corner & 1 ? max[0] : min[0], y = corner & 2 ? max[1] : min[1], z = corner & 4 ? max[2] : min[2];
+      const lz = v[2] * x + v[6] * y + v[10] * z + v[14];
+      if (lz < low) low = lz;
+      if (lz > high) high = lz;
+    }
+    const step = 2 ** Math.ceil(Math.log2(Math.max((high - low) / 4, 1e-3)));
+    this._depthRange[0] = Math.floor(low / step) * step - step;
+    this._depthRange[1] = Math.ceil(high / step) * step + step;
+    return this._depthRange;
+  }
+
+  /**
+   * What cascade layer `layer`, just fitted for the light `entity`, needs:
+   * KEEP, it is as it was; SCROLL, its box moved along the grid and nothing
+   * else changed; or FULL, a new map -- no record, another light's, a turned
+   * light, a new texel or depth range, a jump of half the map, or something
+   * changed inside what it draws.
+   *
+   * A scroll is the camera walking. The map keeps every texel where it lies
+   * and only its origin moves: a world point's texel is (u + origin) mod size,
+   * so the strip the box moved onto falls exactly where the strip it left
+   * was, and that strip is all that is drawn. Sponza at 720p on Iris Xe,
+   * walking: each redraw of a near cascade was 1.5 to 1.9 ms.
    */
   _redrawCascade(layer, entity, changes) {
     if (this.cascadeRedraw.length < this.cascadeCapacity) {
@@ -1021,35 +1192,135 @@ export class ShadowMaps {
       this.cascadeRedraw = grown;
     }
     const at = layer * 16;
+    const f = layer * 5;
+    const fits = this._fits;
     const cached = this._cascadeCache[layer];
-    let redraw = changes === null || changes.all || cached === undefined || cached.entity !== entity
-      || changes.boxes.touchesOrtho(this.matrices, at);
-    for (let k = 0; !redraw && k < 16; k++) redraw = cached.data[k] !== this.matrices[at + k];
-    this.cascadeRedraw[layer] = redraw ? 1 : 0;
-    if (redraw) {
-      const data = cached?.data ?? new Float32Array(16);
-      data.set(this.matrices.subarray(at, at + 16));
-      this._cascadeCache[layer] = { entity, data, frame: this._cascadeFrame };
+    const d = this._lightDirection;
+    let mode = changes === null || changes.all || cached === undefined || cached.entity !== entity
+      || cached.fit[2] !== fits[f + 2] || cached.fit[3] !== fits[f + 3] || cached.fit[4] !== fits[f + 4]
+      || cached.direction[0] !== d[0] || cached.direction[1] !== d[1] || cached.direction[2] !== d[2]
+      || changes.boxes.touchesOrtho(this.matrices, at) ? FULL : KEEP;
+    // Grid steps the box moved, then texels: u runs with light-space x, v against y.
+    const du = mode === FULL ? 0 : (fits[f] - cached.fit[0]) * CASCADE_SNAP;
+    const dv = mode === FULL ? 0 : -(fits[f + 1] - cached.fit[1]) * CASCADE_SNAP;
+    if (mode === KEEP && (du !== 0 || dv !== 0)) {
+      mode = Math.abs(du) * 2 >= this.size || Math.abs(dv) * 2 >= this.size ? FULL : SCROLL;
+    }
+    this.cascadeRedraw[layer] = mode;
+    const view = layer * CASCADE_VIEW_FLOATS + 16;
+    // The origin, in uv and again in texels: the forward pass samples with
+    // one and loads with the other.
+    if (mode === FULL) {
+      this._views.fill(0, view, view + 4);
+    } else if (mode === SCROLL) {
+      const size = this.size;
+      const ou = (((this._views[view + 2] + du) % size) + size) % size;
+      const ov = (((this._views[view + 3] + dv) % size) + size) % size;
+      this._views[view] = ou / size;
+      this._views[view + 1] = ov / size;
+      this._views[view + 2] = ou;
+      this._views[view + 3] = ov;
+      this._scrollPieces(layer, du, dv, ou, ov);
+    }
+    if (mode !== KEEP) {
+      const record = cached ?? { fit: new Float64Array(5), direction: new Float32Array(3) };
+      record.entity = entity;
+      record.fit.set(fits.subarray(f, f + 5));
+      record.direction.set(d);
+      record.frame = this._cascadeFrame;
+      this._cascadeCache[layer] = record;
     } else {
       cached.frame = this._cascadeFrame;
     }
-    return redraw;
+    return mode;
   }
 
-  /** One cascade of the light along _lightDirection, into array layer `layer`. */
-  _fitCascade(layer, cascade) {
+  /**
+   * The rectangles a scroll of (du, dv) texels redraws, with the map's origin
+   * now at (ou, ov): the new columns at full height, the new rows at full
+   * width, each cut where it wraps. Each gets a scissor, a matrix that puts
+   * its texels where they now live -- the layer's, moved by the origin, less
+   * a whole map where it wraps -- into its uniform slot, and a matrix that
+   * stretches the rectangle over [-1, 1] for the caster cull.
+   */
+  _scrollPieces(layer, du, dv, ou, ov) {
+    const size = this.size;
+    const piece = this._pieces[layer];
+    piece.count = 0;
+    // Logical rectangles, [u0, u1) x [v0, v1), in the moved box.
+    const columns = du > 0 ? [size - du, size] : du < 0 ? [0, -du] : null;
+    const rows = dv > 0 ? [size - dv, size] : dv < 0 ? [0, -dv] : null;
+    const rects = [];
+    if (columns !== null) rects.push([columns[0], columns[1], 0, size]);
+    if (rows !== null) rects.push([0, size, rows[0], rows[1]]);
+    // Where a logical range lands: [start, end) in texels, moved by `origin`
+    // and wrapped, as up to two ranges, each with the wrap it took.
+    const spans = (start, end, origin) => {
+      const a = start + origin, b = end + origin;
+      if (b <= size) return [[a, b, 0]];
+      if (a >= size) return [[a - size, b - size, size]];
+      return [[a, size, 0], [0, b - size, size]];
+    };
+    const m = this.matrices, at = layer * 16;
+    for (const [u0, u1, v0, v1] of rects) {
+      for (const [x0, x1, wrapU] of spans(u0, u1, ou)) {
+        for (const [y0, y1, wrapV] of spans(v0, v1, ov)) {
+          const p = piece.count++;
+          piece.rects.set([x0, y0, x1 - x0, y1 - y0], p * 4);
+          // Logical texels of this piece, for the cull.
+          const lu0 = x0 - ou + wrapU, lu1 = x1 - ou + wrapU, lv0 = y0 - ov + wrapV, lv1 = y1 - ov + wrapV;
+          // Draw matrix: NDC moved by the origin, less the wrap. u = (x + 1) / 2 * size,
+          // v = (1 - y) / 2 * size, and an orthographic w is 1, so translation is all it takes.
+          const slot = (this.cascadeCapacity + layer * MAX_PIECES + p) * this.alignment / 4;
+          this._cascadeStagingF32.set(m.subarray(at, at + 16), slot);
+          this._cascadeStagingF32[slot + 12] += (2 * (ou - wrapU)) / size;
+          this._cascadeStagingF32[slot + 13] -= (2 * (ov - wrapV)) / size;
+          // Cull matrix: the piece's logical NDC box stretched to [-1, 1].
+          const nx0 = (2 * lu0) / size - 1, nx1 = (2 * lu1) / size - 1;
+          const ny0 = 1 - (2 * lv1) / size, ny1 = 1 - (2 * lv0) / size;
+          const cx = (nx0 + nx1) / 2, hx = (nx1 - nx0) / 2, cy = (ny0 + ny1) / 2, hy = (ny1 - ny0) / 2;
+          const c = piece.cull, o = p * 16;
+          c.set(m.subarray(at, at + 16), o);
+          for (const k of [0, 4, 8]) { c[o + k] /= hx; c[o + k + 1] /= hy; }
+          c[o + 12] = (c[o + 12] - cx) / hx;
+          c[o + 13] = (c[o + 13] - cy) / hy;
+        }
+      }
+    }
+  }
+
+  /** Cascade `layer`, as this frame needs it: whole, or its scrolled pieces. */
+  _encodeCascade(pass, layer) {
+    if (this.cascadeRedraw[layer] !== SCROLL) {
+      this._encodeView(pass, this.cascadeBindGroup, layer * this.alignment, this.matrices, layer * 16);
+      return;
+    }
+    const piece = this._pieces[layer];
+    const r = piece.rects;
+    for (let p = 0; p < piece.count; p++) {
+      pass.setScissorRect(r[p * 4], r[p * 4 + 1], r[p * 4 + 2], r[p * 4 + 3]);
+      pass.setPipeline(this._pipelines.get(this.clearDescriptor));
+      // Its layout is all empty groups, which still have to be bound.
+      this.clearDescriptor.layout.bindEmptyGroups(pass);
+      pass.draw(3);
+      const slot = (this.cascadeCapacity + layer * MAX_PIECES + p) * this.alignment;
+      // Mesh by mesh, not merged: a strip is small, and culling each mesh to
+      // it skips far more than a group's box can.
+      this._encodeView(pass, this.cascadeBindGroup, slot, piece.cull, p * 16, false);
+    }
+  }
+
+  /**
+   * One cascade of the light along _lightDirection, into array layer `layer`.
+   * `depth` is the scene's light-space z range (_sceneDepth), or null for none.
+   */
+  _fitCascade(layer, cascade, depth = null) {
     const sphere = this._spheres[cascade];
     const radius = sphere[3];
 
-    // A light-space basis anchored at the WORLD origin, not at the camera.
-    // Texel snapping below is only meaningful against a grid that does not
-    // move when the camera does.
-    const d = this._lightDirection;
-    chooseUp(this._up, d);
-    this._eye.set([0, 0, 0]);
-    this._target.set([d[0], d[1], d[2]]);
-    mat4LookAt(this._lightView, this._eye, this._target, this._up);
-
+    // The light-space basis (_lightBasis) is anchored at the WORLD origin, not
+    // at the camera: texel snapping below is only meaningful against a grid
+    // that does not move when the camera does.
     // Sphere centre in light space.
     const v = this._lightView;
     const cx = v[0] * sphere[0] + v[4] * sphere[1] + v[8] * sphere[2] + v[12];
@@ -1088,8 +1359,17 @@ export class ShadowMaps {
     // distance. This used to be clamped to at least 0.01, a perspective habit
     // an orthographic box has no use for -- and that clamp cut every one of
     // those casters out of the map. Nothing above the floor cast a shadow.
-    const nearDistance = -(snappedZ + radius + step) - radius * this.casterExtent;
-    const farDistance = -(snappedZ - radius - step);
+    //
+    // From the scene's extent when there is one, so it does not move with the
+    // camera at all (see _sceneDepth); casterExtent is the fallback.
+    const nearDistance = depth !== null ? -depth[1] : -(snappedZ + radius + step) - radius * this.casterExtent;
+    const farDistance = depth !== null ? -depth[0] : -(snappedZ - radius - step);
+    const f = layer * 5;
+    this._fits[f] = Math.floor(cx / step);
+    this._fits[f + 1] = Math.floor(cy / step);
+    this._fits[f + 2] = texelSize;
+    this._fits[f + 3] = nearDistance;
+    this._fits[f + 4] = farDistance;
 
     mat4OrthographicReverseZ(
       this._projection,
@@ -1127,11 +1407,13 @@ export class ShadowMaps {
     // when it grows. Caching on first use alone would hold a group pointing at
     // destroyed buffers.
     if (this.cascadeBindGroup === undefined
+      || this._geometryRevision !== this.geometry.revision
       || this._gpuRevision !== gpu.buffersRevision
       || this._paletteRevision !== palette.revision
       || this._morphRevision !== morph.revision
       || this._hasLod !== gpu.hasLod) {
       this._hasLod = gpu.hasLod;
+      this._geometryRevision = this.geometry.revision;
       this.cascadeBindGroup = this._makeCascadeBindGroup(gpu, palette, morph);
       this.localBindGroup = undefined;
       this._gpuRevision = gpu.buffersRevision;
@@ -1141,15 +1423,15 @@ export class ShadowMaps {
 
     for (let layer = 0; layer < this.shadowedCount * this.cascadeCount; layer++) {
       // A kept cascade is neither drawn nor cleared; the array is imported.
-      if (this.cascadeRedraw[layer] === 0) continue;
+      // A scrolled one keeps what it has and clears only what it redraws.
+      const mode = this.cascadeRedraw[layer];
+      if (mode === KEEP) continue;
       graph.addPass({
         name: `shadow:${Math.floor(layer / this.cascadeCount)}:${layer % this.cascadeCount}`,
         reads,
-        depth: {
-          resource,
-          view: this.layerViews[layer],
-          clear: DEPTH_CLEAR_VALUE,
-        },
+        depth: mode === FULL
+          ? { resource, view: this.layerViews[layer], clear: DEPTH_CLEAR_VALUE }
+          : { resource, view: this.layerViews[layer], keep: true },
         // Prebuilt as the array grew, so declaring a frame allocates no closures.
         execute: this._executors[layer],
       });
@@ -1170,9 +1452,70 @@ export class ShadowMaps {
     }
   }
 
-  /** Every caster, into one view: a cascade or a point or spot light's. */
-  _encodeView(pass, bindGroup, offset) {
+  /**
+   * Each batch's casters as one world box, min xyz then max xyz: what a
+   * cascade tests before drawing the batch. Rebuilt when the batches are, or
+   * when what moved was not listed; otherwise grown by the renderables that
+   * moved (`items`, Scene.movedRenderables). Too big costs a draw the GPU
+   * clips away; it never loses a shadow. Skins and morphs move boxes without
+   * moving nodes, so a scene with either rebuilds every frame.
+   */
+  boundBatches(scene, gpu, items, anyMoved) {
+    const count = gpu.batchCount;
+    const rebuild = this._boxedScene !== scene || this._boxedRevision !== gpu.sceneRevision
+      || (anyMoved && items === null) || scene.skins.length > 0 || scene.morphs.length > 0;
+    const { worldMin, worldMax } = scene;
+    const grow = (b, i) => {
+      const k = b * 6, o = i * 3, box = this._batchBoxes;
+      for (let a = 0; a < 3; a++) {
+        if (worldMin[o + a] < box[k + a]) box[k + a] = worldMin[o + a];
+        if (worldMax[o + a] > box[k + 3 + a]) box[k + 3 + a] = worldMax[o + a];
+      }
+    };
+    if (rebuild) {
+      if (this._batchBoxes.length < count * 6) this._batchBoxes = new Float32Array(count * 6);
+      for (let b = 0; b < count; b++) {
+        this._batchBoxes.fill(Infinity, b * 6, b * 6 + 3);
+        this._batchBoxes.fill(-Infinity, b * 6 + 3, b * 6 + 6);
+        const first = gpu.batchFirst[b];
+        for (let k = 0; k < gpu.batchSize[b]; k++) grow(b, gpu.batchOrder[first + k]);
+      }
+      this._boxedScene = scene;
+      this._boxedRevision = gpu.sceneRevision;
+    } else if (anyMoved) {
+      for (const i of items) if (gpu.itemBatch[i] !== NOT_BATCHED) grow(gpu.itemBatch[i], i);
+    }
+    // And each merged group's, from its batches': a cascade draws a group or not.
+    const merged = this.merged;
+    if (!merged || merged.groupCount === 0) return;
+    if (this._groupBoxes.length < merged.groupCount * 6) this._groupBoxes = new Float32Array(merged.groupCount * 6);
+    const boxes = this._batchBoxes, out = this._groupBoxes;
+    for (let g = 0; g < merged.groupCount; g++) {
+      const k = g * 6;
+      out.fill(Infinity, k, k + 3);
+      out.fill(-Infinity, k + 3, k + 6);
+      for (const b of merged.groups[g].batches) {
+        for (let a = 0; a < 3; a++) {
+          if (boxes[b * 6 + a] < out[k + a]) out[k + a] = boxes[b * 6 + a];
+          if (boxes[b * 6 + 3 + a] > out[k + 3 + a]) out[k + 3 + a] = boxes[b * 6 + 3 + a];
+        }
+      }
+    }
+  }
+
+  /**
+   * Every caster, into one view: a cascade or a point or spot light's. A
+   * cascade passes `cull`, an orthographic matrix at cull[at], and draws only
+   * the batches whose box reaches into it: anything else the GPU would
+   * transform and clip, all of it, cascade after cascade. Point and spot
+   * views are perspective, which that test is not.
+   */
+  _encodeView(pass, bindGroup, offset, cull = null, at = 0, useMerged = true) {
     const gpu = this._gpu;
+    // Every depth-only caster's positions, bound once for the view; the alpha
+    // casters below bind the full vertices they need for their UVs.
+    this.geometry.bindPositions(pass);
+    const casts = (b) => cull === null || boxInOrtho(this._batchBoxes, b * 6, cull, at);
     pass.setBindGroup(GROUP_FRAME, bindGroup, [offset]);
     this.pipelineLayout.bindEmptyGroups(pass);
     // Batches arrive sorted by pipeline, so these come in runs and this
@@ -1183,16 +1526,22 @@ export class ShadowMaps {
     // instance count is simply the batch size and the shader walks the static
     // batch-ordered list rather than the compacted one.
     //
-    // ponytail: every caster is still drawn into every cascade. Proper CSM runs
-    // the cull compute once per cascade against its own ortho box, which needs
-    // a six-plane frustum -- the extraction in frustum.js assumes a perspective
-    // matrix and produces five.
+    // ponytail: culled a batch at a time, by the box around all its casters.
+    // A batch of many instances spread wide still draws all of them into a
+    // cascade that one reaches; per-instance needs the cull compute per cascade.
     // Depth-only casters first. The alpha ones bind a material in group 2,
     // where these pipelines expect the empty group, so they come after.
     const materials = gpu.materials;
     const alpha = this.alphaDescriptors.length > 0;
+    const merged = this.merged;
+    // The merged groups draw a whole view in a draw each (merged.js); a scrolled
+    // strip draws mesh by mesh -- see _encodeCascade.
+    const grouped = useMerged && merged?.groupCount > 0;
+    const mergedBatch = grouped ? merged.batchMerged : null;
     for (let b = 0; b < gpu.batchCount; b++) {
+      if (mergedBatch?.[b] === 1) continue;
       if (alpha && materials.alphaModes[gpu.batchMaterial[b]] === ALPHA_MASK) continue;
+      if (!casts(b)) continue;
       const primitive = gpu.batchPrimitive[b];
       const skinned = gpu.batchSkinned[b];
       // Both sides for a double-sided material, and for an open surface:
@@ -1203,12 +1552,89 @@ export class ShadowMaps {
         pass.setPipeline(this._pipelines.get(this.descriptors[variant]));
         boundVariant = variant;
       }
-      pass.setVertexBuffer(0, primitive.vertexBuffer);
-      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
-      this._drawBatch(pass, gpu, b, primitive);
+      if (skinned) pass.setVertexBuffer(1, this.geometry.skinBuffer);
+      // A strip of a scrolled cascade, and a mesh drawn once: only its chunks
+      // that reach the strip. Not skinned or morphed, whose vertices leave the
+      // boxes; not with LOD, whose draws are indirect.
+      if (!useMerged && cull !== null && primitive.chunks && gpu.batchSize[b] === 1 && !skinned
+        && primitive.morphCountStride === 0 && !gpu.hasLod) {
+        this._drawChunks(pass, gpu, b, primitive, cull, at);
+      } else {
+        this._drawBatch(pass, gpu, b, primitive);
+      }
     }
-    if (alpha) this._encodeAlphaCasters(pass, gpu, materials);
+    if (grouped) this._encodeMergedCasters(pass, materials, cull, at, false);
+    if (alpha) {
+      this.geometry.bind(pass);
+      this._encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch);
+    }
+    if (alpha && grouped) this._encodeMergedCasters(pass, materials, cull, at, true);
+  }
+
+  /**
+   * The merged groups (merged.js), a draw each from their shadow lists: the
+   * depth-only ones, or with `masked` the alpha-tested ones, which bind their
+   * material. Culled to the view, a group at a time, by the box round its casters.
+   */
+  _encodeMergedCasters(pass, materials, cull, at, masked) {
+    const merged = this.merged;
+    const drawGroup = merged.drawGroup(this._drawLayout);
+    let bound = false;
+    for (let g = 0; g < merged.groupCount; g++) {
+      const group = merged.groups[g];
+      const isMasked = materials.alphaModes[group.material] === ALPHA_MASK && this.mergedAlphaDescriptor !== null;
+      if (isMasked !== masked) continue;
+      if (cull !== null && !boxInOrtho(this._groupBoxes, g * 6, cull, at)) continue;
+      if (!bound) {
+        pass.setIndexBuffer(merged.shadowIndices, 'uint32');
+        bound = true;
+      }
+      if (masked) {
+        pass.setPipeline(this._pipelines.get(this.mergedAlphaDescriptor));
+        pass.setBindGroup(GROUP_MATERIAL, materials.bindGroup(group.material));
+      } else {
+        const doubleSided = (materials.variants[group.material] & VARIANT_DOUBLE_SIDED) !== 0
+          || group.batches.some((b) => this._gpu.batchPrimitive[b].open === true);
+        pass.setPipeline(this._pipelines.get(this.mergedDescriptors[(doubleSided ? 2 : 0) + group.mirrored]));
+      }
+      pass.setBindGroup(GROUP_DRAW, drawGroup, [g * merged.alignment]);
+      pass.drawIndexed(group.indexCount, 1, group.indexBase, 0, 0);
+    }
+    // What follows draws from the arena's own indices again: the alpha casters, with the full vertices.
+    if (bound) (masked ? this.geometry.bind(pass) : this.geometry.bindPositions(pass));
+  }
+
+  /**
+   * One object's batch, chunk by chunk (chunkBoxes): runs of consecutive
+   * chunks whose boxes, through its world matrix, reach the view at cull[at].
+   * A strip is thin, and its cost is every vertex of every mesh it touches.
+   */
+  _drawChunks(pass, gpu, b, primitive, cull, at) {
+    const scene = this._scene;
+    const slot = scene.renderableMatrixSlot[gpu.batchOrder[gpu.batchFirst[b]]];
+    const chunks = primitive.chunks;
+    const box = (this._chunkBox ??= new Float32Array(6));
+    const min = (this._chunkMin ??= new Float32Array(3));
+    const max = (this._chunkMax ??= new Float32Array(3));
+    pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
+    const triangles = primitive.indexCount / 3;
+    let run = -1;
+    for (let k = 0; k <= chunks.count; k++) {
+      let reaches = false;
+      if (k < chunks.count) {
+        aabbTransform(min, max, chunks.min, chunks.max, scene.transforms.world, slot * 16, 0, k * 3);
+        box.set(min, 0);
+        box.set(max, 3);
+        reaches = boxInOrtho(box, 0, cull, at);
+      }
+      if (reaches && run < 0) run = k;
+      if (!reaches && run >= 0) {
+        const first = run * CHUNK_TRIANGLES;
+        const count = Math.min(k * CHUNK_TRIANGLES, triangles) - first;
+        pass.drawIndexed(count * 3, 1, primitive.firstIndex + first * 3, primitive.baseVertex, 0);
+        run = -1;
+      }
+    }
   }
 
   /**
@@ -1221,12 +1647,12 @@ export class ShadowMaps {
       pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, CULL_SHADOW));
     } else {
       pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
-      pass.drawIndexed(primitive.indexCount, gpu.batchSize[b]);
+      pass.drawIndexed(primitive.indexCount, gpu.batchSize[b], primitive.firstIndex, primitive.baseVertex);
     }
   }
 
   /** MASK batches, then blended items, each shaped by its material's alpha. */
-  _encodeAlphaCasters(pass, gpu, materials) {
+  _encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch = null) {
     let bound = null;
     let boundMaterial = -1;
     const draw = (hashed, skinned, material, primitive) => {
@@ -1236,14 +1662,12 @@ export class ShadowMaps {
         pass.setBindGroup(GROUP_MATERIAL, materials.bindGroup(material));
         boundMaterial = material;
       }
-      pass.setVertexBuffer(0, primitive.vertexBuffer);
-      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
+      if (skinned) pass.setVertexBuffer(1, this.geometry.skinBuffer);
     };
 
     for (let b = 0; b < gpu.batchCount; b++) {
       const material = gpu.batchMaterial[b];
-      if (materials.alphaModes[material] !== ALPHA_MASK) continue;
+      if (materials.alphaModes[material] !== ALPHA_MASK || !casts(b) || mergedBatch?.[b] === 1) continue;
       const primitive = gpu.batchPrimitive[b];
       draw(false, gpu.batchSkinned[b] === 1, material, primitive);
       this._drawBatch(pass, gpu, b, primitive);
@@ -1265,7 +1689,7 @@ export class ShadowMaps {
         && casters[k + run].material === material && casters[k + run].skinned === skinned
         && (!gpu.hasLod || selected[k + run] === 1)) run++;
       draw(true, skinned, material, primitive);
-      pass.drawIndexed(primitive.indexCount, run, 0, 0, gpu.opaqueCount + k);
+      pass.drawIndexed(primitive.indexCount, run, primitive.firstIndex, primitive.baseVertex, gpu.opaqueCount + k);
       k += run;
     }
   }

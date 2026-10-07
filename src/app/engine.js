@@ -27,6 +27,7 @@ import { parseHDR } from '../render/hdr.js';
 import { Renderer, RenderTarget } from '../render/renderer.js';
 import { Splats } from '../render/splats.js';
 import { openSurface } from '../render/shadows.js';
+import { chunkBoxes } from '../scene/bounds.js';
 import { readSplats } from '../scene/splats.js';
 import { GLTFTextures } from '../render/textures.js';
 import { createTexture2D, uploadImage, generateMipmaps, decodeImageBytes } from '../rhi/texture.js';
@@ -473,12 +474,17 @@ export class Winding {
 
     try {
       // Materials first: a primitive needs its material id before it can be
-      // turned into something the draw list can sort.
-      for (const material of model.materials) {
-        asset.materialIds.push(
-          this.renderer.materials.register(material, textures.texturesFor(material)),
-        );
+      // turned into something the draw list can sort. Shared with an identical
+      // one already loaded (see MaterialRegistry.share), unless a clip drives it.
+      const animated = new Set();
+      for (const animation of model.animations ?? []) {
+        for (const channel of animation.channels) if (channel.kind === 'material') animated.add(channel.index);
       }
+      model.materials.forEach((material, m) => {
+        const registry = this.renderer.materials;
+        const bound = textures.texturesFor(material);
+        asset.materialIds.push(animated.has(m) ? registry.register(material, bound) : registry.share(material, bound));
+      });
 
       // Every image that was going to be uploaded now has been, so the decoded
       // copies are dead weight. An ImageBitmap holds native memory the collector
@@ -498,17 +504,19 @@ export class Winding {
         });
         mesh.primitives.forEach((primitive, p) => {
           const built = {
-            vertexBuffer: null,
-            indexBuffer: null,
+            // Where its vertices and indices sit in the geometry arena.
+            baseVertex: 0,
+            firstIndex: 0,
+            vertexCount: primitive.vertexCount,
             /** Whether this primitive carries influences. The scene reads this. */
             skinned: primitive.jointIndices != null,
-            // Null unless the mesh is rigged. A second vertex buffer, bound at
-            // slot 1 by skinned pipelines only, so static meshes carry nothing.
-            skinBuffer: null,
+
             indexCount: primitive.indexCount,
             bounds: primitive.bounds,
             /** Whether an edge has one triangle: the shadow pass draws it whole. See openSurface. */
             open: openSurface(primitive.positions, primitive.indices),
+            /** Its triangles in chunks, with their boxes: see chunkBoxes. */
+            chunks: chunkBoxes(primitive.positions, primitive.indices),
             // How far each target reaches, which is all a bound needs. The deltas
             // themselves are a GPU buffer; this is the one number the CPU keeps.
             morphExtent: primitive.morph?.extent ?? null,
@@ -541,25 +549,14 @@ export class Winding {
           };
           primitives.push(built);
 
-          built.vertexBuffer = createBuffer(this.gpu, {
-            label: `${mesh.name}[${p}].vertices`,
-            data: primitive.vertices,
-            usage: GPUBufferUsage.VERTEX,
-          });
-          built.indexBuffer = createBuffer(this.gpu, {
-            label: `${mesh.name}[${p}].indices`,
-            data: primitive.indices,
-            usage: GPUBufferUsage.INDEX,
-          });
-          if (primitive.jointIndices) {
-            built.skinBuffer = createBuffer(this.gpu, {
-              label: `${mesh.name}[${p}].skin`,
-              data: new Uint8Array(packSkinVertices(
-                primitive.jointIndices, primitive.jointWeights, primitive.vertexCount,
-              )),
-              usage: GPUBufferUsage.VERTEX,
-            });
-          }
+          // A rigged one's joints and weights go in the arena too, at its vertices' numbering.
+          const skin = primitive.jointIndices
+            ? new Uint8Array(packSkinVertices(primitive.jointIndices, primitive.jointWeights, primitive.vertexCount))
+            : null;
+          const at = this.renderer.geometry.allocate(primitive.vertices, primitive.indices, skin);
+          built.baseVertex = at.baseVertex;
+          built.firstIndex = at.firstIndex;
+          built.placed = true;
           if (primitive.morph) {
             built.morphBase = this.renderer.morph.allocate(primitive.morph.deltas);
             built.morphFloats = primitive.morph.deltas.length;
@@ -641,9 +638,10 @@ export class Winding {
     asset.unloaded = true;
     for (const mesh of asset.meshes) {
       for (const primitive of mesh.primitives) {
-        primitive.vertexBuffer?.destroy();
-        primitive.indexBuffer?.destroy();
-        primitive.skinBuffer?.destroy();
+        if (primitive.placed) {
+          this.renderer.geometry.free(primitive.baseVertex, primitive.vertexCount, primitive.firstIndex, primitive.indexCount);
+          primitive.placed = false;
+        }
         if (primitive.morphFloats > 0) {
           this.renderer.morph.free(primitive.morphBase, primitive.morphFloats);
         }

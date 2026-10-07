@@ -252,6 +252,13 @@ export class MaterialRegistry {
     this._extensions = [];
     /** Ids given back by release(), handed out again before new ones. */
     this._free = [];
+    /** share(): each shared material's key to its id, and how many hold each id. */
+    this._shared = new Map();
+    this._keys = [];
+    this._holders = [];
+    /** A number for each texture or sampler a key names, so a key compares them by identity. */
+    this._identities = new WeakMap();
+    this._identityCount = 0;
     this.variants = new Uint8Array(capacity);
     this.alphaModes = new Uint8Array(capacity);
     this.transmissive = new Uint8Array(capacity);
@@ -313,6 +320,42 @@ export class MaterialRegistry {
     this._makeBindGroups(id);
 
     return id;
+  }
+
+  /**
+   * register(), but a material identical to one already registered -- every
+   * factor but its name, and the very same textures -- gets that one's id.
+   * The same asset loaded nine hundred times is one material, not nine
+   * hundred: one draw where a draw can only hold one material. Each call
+   * holds the id once; release() frees it when the last holder lets go.
+   *
+   * Not for a material an animation drives: a clip writes the asset's own
+   * record and uploads it by id, and would recolour every holder.
+   */
+  share(material, textures = {}) {
+    const key = this._keyOf(material, textures);
+    const id = this._shared.get(key);
+    if (id !== undefined) {
+      this._holders[id]++;
+      return id;
+    }
+    const fresh = this.register(material, textures);
+    this._shared.set(key, fresh);
+    this._keys[fresh] = key;
+    this._holders[fresh] = 1;
+    return fresh;
+  }
+
+  /** What share() compares: the record as JSON, less its name, and which textures it binds. */
+  _keyOf(material, textures) {
+    const identity = (object) => {
+      let n = this._identities.get(object);
+      if (n === undefined) this._identities.set(object, (n = ++this._identityCount));
+      return n;
+    };
+    const json = JSON.stringify(material, (field, value) => (field === 'name' ? undefined : value));
+    const bound = Object.keys(textures).sort().map((slot) => `${slot}:${textures[slot] ? identity(textures[slot]) : 0}`);
+    return `${json}|${bound.join(',')}`;
   }
 
   /**
@@ -469,6 +512,16 @@ export class MaterialRegistry {
    * The references go too, so the textures behind it are not kept alive.
    */
   release(id) {
+    // A shared id is freed by its last holder.
+    if (this._holders[id] > 1) {
+      this._holders[id]--;
+      return;
+    }
+    if (this._keys[id] !== undefined) {
+      this._shared.delete(this._keys[id]);
+      this._keys[id] = undefined;
+      this._holders[id] = 0;
+    }
     this._textures[id] = undefined;
     this._records[id] = undefined;
     this._extensions[id] = undefined;

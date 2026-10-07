@@ -84,6 +84,14 @@ export function addToRuns(runs, i, mergeGap) {
 export const CULL_PHASES = 3;
 export const CULL_SHADOW = 2;
 
+/** Words a merged object takes in its group's table (merged.js): the object, its first vertex. */
+export const TABLE_WORDS = 2;
+/**
+ * u32s the visible list holds per renderable: a slot in each cull phase's
+ * slice, then room in the merged groups' tables, which sit past every slice.
+ */
+const VISIBLE_WORDS = CULL_PHASES + TABLE_WORDS;
+
 /** An item's bounds: min, max (w = coverage range), and its LOD sphere. */
 const BOUNDS_FLOATS = 12;
 
@@ -368,7 +376,7 @@ export class GpuDriven {
     // sits past opaqueCount inside the early slice.
     this.visibleBuffer = createBuffer(rhi, {
       label: 'visible-items',
-      size: capacity * CULL_PHASES * 4,
+      size: capacity * VISIBLE_WORDS * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
@@ -546,7 +554,7 @@ export class GpuDriven {
     this.drawDataBuffer = createBuffer(this.rhi, { label: 'draw-data', size: capacity * DRAW_DATA_BYTES, usage: STORAGE });
     this.boundsBuffer = createBuffer(this.rhi, { label: 'cull-bounds', size: capacity * BOUNDS_FLOATS * 4, usage: STORAGE });
     this.itemBatchBuffer = createBuffer(this.rhi, { label: 'item-batch', size: capacity * 4, usage: STORAGE });
-    this.visibleBuffer = createBuffer(this.rhi, { label: 'visible-items', size: capacity * CULL_PHASES * 4, usage: STORAGE });
+    this.visibleBuffer = createBuffer(this.rhi, { label: 'visible-items', size: capacity * VISIBLE_WORDS * 4, usage: STORAGE });
     // Fresh and therefore all zero: after a grow, item indices have moved and
     // last frame's flags describe objects that are no longer at those slots.
     this.visibleFlagsBuffer = createBuffer(this.rhi, { label: 'visible-last-frame', size: capacity * 4, usage: STORAGE });
@@ -768,6 +776,9 @@ export class GpuDriven {
     this.stats.batches = this.batchCount;
     this.stats.items = count;
     this.stats.transparent = this.transparentCount;
+    // The one-object batches, pooled into a draw per material (merged.js).
+    this.merged?.rebuild(this, scene);
+    this.stats.mergedGroups = this.merged?.groupCount ?? 0;
   }
 
   /**
@@ -832,7 +843,14 @@ export class GpuDriven {
       // rewritten whole every frame, precisely because they are not.
       const m = scene.renderableMorph[i];
       const primitive = scene.renderablePrimitive[i];
-      this.drawDataU32[drawFloat + 29] = m >= 0 ? primitive.morphBase : 0;
+      // Less the primitive's place in the geometry arena: vertex_index counts
+      // from the arena's start, its deltas from the primitive's first vertex.
+      // u32 arithmetic wraps on the GPU as >>> 0 does here, so the sum lands
+      // right even where this one is "negative".
+      const cs = primitive.morphCountStride;
+      this.drawDataU32[drawFloat + 29] = m >= 0
+        ? (primitive.morphBase - primitive.baseVertex * (cs & 0xffff) * (cs >>> 16)) >>> 0
+        : 0;
       this.drawDataU32[drawFloat + 30] = m >= 0 ? morph.offsets[m] : 0;
       this.drawDataU32[drawFloat + 31] = m >= 0 ? primitive.morphCountStride : 0;
 
@@ -885,8 +903,9 @@ export class GpuDriven {
         const o = (phase * this.batchCapacity + b) * 5;
         this.indirectData[o] = primitive.indexCount;
         this.indirectData[o + 1] = 0;
-        this.indirectData[o + 2] = 0;
-        this.indirectData[o + 3] = 0;
+        // Where the primitive starts in the geometry arena.
+        this.indirectData[o + 2] = primitive.firstIndex;
+        this.indirectData[o + 3] = primitive.baseVertex;
         this.indirectData[o + 4] = 0;
       }
     }
@@ -916,6 +935,7 @@ export class GpuDriven {
     // Both halves: phase 1 writes at capacity, so a partial write would leave
     // its counts at whatever the previous frame accumulated.
     queue.writeBuffer(this.indirectBuffer, 0, this.indirectData);
+    this.merged?.reset();
 
     // One params slot per phase. Only the last four words differ, but writing
     // whole slots keeps the two descriptions independent rather than sharing a

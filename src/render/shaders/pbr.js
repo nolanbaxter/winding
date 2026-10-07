@@ -83,6 +83,8 @@ override PROBES : bool = true;
 override DECALS : bool = true;
 /** Soft shadows (PCSS), for lights given a size: compiled in only when one is. */
 override SOFT_SHADOWS : bool = false;
+// False for a scene with no point or spot light: the loop over them goes.
+override POINT_LIGHTS : bool = true;
 
 /**
  * The ambient term of the fragment shade() last ran, for fsAO to write out
@@ -159,6 +161,8 @@ struct DrawData {
 /** The only thing still bound per draw: where this batch's slice begins. */
 struct Batch {
   firstVisible : u32,
+  // A merged draw's split of each index: the slot above this bit, the vertex below.
+  shift        : u32,
 };
 
 ${MATERIAL_WGSL}
@@ -191,7 +195,16 @@ ${MATERIAL_WGSL}
 @group(0) @binding(14) var<storage, read> directionals  : array<Directional>;
 // Their cascade matrices: slot * cascades + cascade, the same index as the
 // layer of shadowMap they were drawn into.
-@group(0) @binding(17) var<storage, read> cascadeViews  : array<mat4x4<f32>>;
+/** A cascade: its matrix, and where its map's origin sits (xy in uv, zw in texels): see shadows.js. */
+struct CascadeView {
+  viewProjection : mat4x4<f32>,
+  origin         : vec4<f32>,
+};
+@group(0) @binding(17) var<storage, read> cascadeViews  : array<CascadeView>;
+// Wraps, where shadowSampler clamps: a cascade's map is scrolled, not redrawn.
+@group(0) @binding(23) var          cascadeSampler : sampler_comparison;
+// Every primitive's vertices, VERTEX_STRIDE floats each, for vsMerged.
+@group(0) @binding(24) var<storage, read> geometry : array<f32>;
 // The opaque scene, mipped, for transmissive surfaces (render/transmission.js).
 @group(0) @binding(18) var         behindMap : texture_2d<f32>;
 // Reflection probes' prefiltered cubes, and their boxes, smallest first.
@@ -213,7 +226,7 @@ ${Array.from({ length: extensionSlots }, (_, i) => `@group(2) @binding(${EXTENSI
 @group(3) @binding(0) var<uniform> batch : Batch;
 
 struct VertexOut {
-  @builtin(position) clip     : vec4<f32>,
+  @builtin(position) @invariant clip : vec4<f32>,
   @location(0)       world    : vec3<f32>,
   @location(1)       normal   : vec3<f32>,
   @location(2)       tangent  : vec3<f32>,
@@ -301,8 +314,6 @@ fn vs(
   @location(4) uv1      : vec2<f32>,
   @location(5) color    : vec4<f32>,
 ) -> VertexOut {
-  var out : VertexOut;
-
   // For the batched draws: instance_index counts from 0 within the draw, and
   // batch.firstVisible turns it into an index into the frame-wide visible list.
   // WebGPU only allows a non-zero firstInstance behind an optional feature,
@@ -312,6 +323,40 @@ fn vs(
   // draws, which may set firstInstance freely, so they pass the absolute slot
   // there and bind a firstVisible of 0. Both end up indexing the same list.
   let draw = drawData[visibleItems[batch.firstVisible + instance]];
+  return shadeVertex(draw, vertex, position, normal, uv, tangent, uv1, color);
+}
+
+/**
+ * A merged draw's vertex (merged.js). Its index is no vertex buffer's
+ * address: the slot of its object in the group's table above batch.shift, its
+ * vertex below. The table holds the object and where its primitive starts in
+ * the geometry arena, and the vertex is read from the arena by hand -- the
+ * same fifteen floats, in the same order, VERTEX_BUFFER_LAYOUT gives vs.
+ */
+@vertex
+fn vsMerged(@builtin(vertex_index) code : u32) -> VertexOut {
+  let at = batch.firstVisible + (code >> batch.shift) * 2u;
+  let first = visibleItems[at + 1u];
+  let vertex = first + (code & ((1u << batch.shift) - 1u));
+  let o = vertex * 15u;
+  let g = &geometry;
+  return shadeVertex(
+    drawData[visibleItems[at]], vertex,
+    vec3<f32>((*g)[o], (*g)[o + 1u], (*g)[o + 2u]),
+    vec3<f32>((*g)[o + 3u], (*g)[o + 4u], (*g)[o + 5u]),
+    vec2<f32>((*g)[o + 6u], (*g)[o + 7u]),
+    vec4<f32>((*g)[o + 8u], (*g)[o + 9u], (*g)[o + 10u], (*g)[o + 11u]),
+    vec2<f32>((*g)[o + 12u], (*g)[o + 13u]),
+    unpack4x8unorm(bitcast<u32>((*g)[o + 14u])),
+  );
+}
+
+/** What vs and vsMerged share: one vertex of the drawn object, morphed, into the world and onto the screen. */
+fn shadeVertex(
+  draw : DrawData, vertex : u32,
+  position : vec3<f32>, normal : vec3<f32>, uv : vec2<f32>, tangent : vec4<f32>, uv1 : vec2<f32>, color : vec4<f32>,
+) -> VertexOut {
+  var out : VertexOut;
   let m = applyMorph(draw, vertex, position, normal, tangent.xyz);
 
   let world = draw.model * vec4<f32>(m.position, 1.0);
@@ -919,7 +964,8 @@ fn searchTap(i : u32) -> vec2<f32> { return softTapOf(i, SEARCH_TAPS); }
  */
 fn softDirectional(layer : i32, uv : vec2<f32>, depth : f32, texelWorld : f32, angle : f32) -> f32 {
   let size = frame.shadowParams.y;
-  let m = cascadeViews[layer];
+  let m = cascadeViews[layer].viewProjection;
+  let origin = cascadeViews[layer].origin;
   let depthPerWorld = length(vec3<f32>(m[0].z, m[1].z, m[2].z));
   let last = vec2<i32>(i32(size) - 1);
   // Search as far as a caster at the light's near plane could throw its penumbra.
@@ -929,8 +975,8 @@ fn softDirectional(layer : i32, uv : vec2<f32>, depth : f32, texelWorld : f32, a
   var blockers = 0.0;
   var found = 0.0;
   for (var i = 0u; i < SEARCH_TAPS; i++) {
-    let at = clamp(vec2<i32>((uv + searchTap(i) * search / size) * size), vec2<i32>(0), last);
-    let d = textureLoad(shadowMap, at, layer, 0);
+    let logical = clamp(vec2<i32>((uv + searchTap(i) * search / size) * size), vec2<i32>(0), last);
+    let d = textureLoad(shadowMap, (logical + vec2<i32>(origin.zw)) % vec2<i32>(i32(size)), layer, 0);
     // Reverse-Z: nearer the light is greater.
     if (d > depth) { blockers += d; found += 1.0; }
   }
@@ -941,7 +987,7 @@ fn softDirectional(layer : i32, uv : vec2<f32>, depth : f32, texelWorld : f32, a
   let penumbra = clamp(gap * angle / texelWorld, 1.0, SOFT_MOST);
   var total = 0.0;
   for (var i = 0u; i < SOFT_TAPS; i++) {
-    total += textureSampleCompareLevel(shadowMap, shadowSampler, uv + softTap(i) * penumbra / size, layer, depth);
+    total += textureSampleCompareLevel(shadowMap, cascadeSampler, uv + origin.xy + softTap(i) * penumbra / size, layer, depth);
   }
   return total / f32(SOFT_TAPS);
 }
@@ -1010,7 +1056,7 @@ fn directionalVisibility(slot : i32, worldPosition : vec3<f32>, normal : vec3<f3
   let offset = cascadeTexelSize(cascade) * spacing * frame.shadowParams.x * (1.0 + slope * 2.0);
   let biased = worldPosition + normal * offset;
 
-  let lightClip = cascadeViews[layer] * vec4<f32>(biased, 1.0);
+  let lightClip = cascadeViews[layer].viewProjection * vec4<f32>(biased, 1.0);
   let ndc = lightClip.xyz / lightClip.w;
 
   // NDC y is up, texture v is down.
@@ -1028,12 +1074,14 @@ fn directionalVisibility(slot : i32, worldPosition : vec3<f32>, normal : vec3<f3
   // about three texels wide -- enough to hide the staircase without the cost
   // of a real soft-shadow kernel.
   let texel = spacing / frame.shadowParams.y;
+  // Where this texel lives now that the map has scrolled; the sampler wraps.
+  let at = uv + cascadeViews[layer].origin.xy;
   var total = 0.0;
   for (var y = -1; y <= 1; y = y + 1) {
     for (var x = -1; x <= 1; x = x + 1) {
       total = total + textureSampleCompareLevel(
-        shadowMap, shadowSampler,
-        uv + vec2<f32>(f32(x), f32(y)) * texel,
+        shadowMap, cascadeSampler,
+        at + vec2<f32>(f32(x), f32(y)) * texel,
         layer, ndc.z,
       );
     }
@@ -1459,7 +1507,8 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   //
   // Lights append themselves concurrently, so a crowded cell's count can run
   // past what its slice of the index list holds. Only that many are real.
-  let lightCount = min(clusterCounts[cluster], ${MAX_LIGHTS_PER_CLUSTER}u);
+  var lightCount = 0u;
+  if (POINT_LIGHTS) { lightCount = min(clusterCounts[cluster], ${MAX_LIGHTS_PER_CLUSTER}u); }
   let clusterBase = cluster * ${MAX_LIGHTS_PER_CLUSTER}u;
 
   // Four at a time: their indices, then where they are, then each one in
@@ -1537,6 +1586,10 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // infinity to spread as NaN. One min per fragment, so it stays.
   return vec4<f32>(min(direct + ambient + emissive, vec3<f32>(65504.0)), sampled.a);
 }
+
+/** The merged groups' depth prepass: depth only, the targets masked off. */
+@fragment
+fn fsDepth() {}
 
 @fragment
 fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) vec4<f32> {

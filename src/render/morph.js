@@ -20,7 +20,7 @@
 // the life of the engine to serve a reallocation that may never happen, and a
 // face rig is tens of megabytes. copyBufferToBuffer is what COPY_SRC is for.
 
-import { grownCapacity } from '../core/grow.js';
+import { grownCapacity, RangeAllocator } from '../core/grow.js';
 import { storageCapacity, createBuffer } from '../rhi/buffer.js';
 
 /** Bytes per stored float, in both buffers. */
@@ -46,12 +46,10 @@ export class MorphStore {
   constructor(rhi, { deltaCapacity = 4096, weightCapacity = 256 } = {}) {
     this.rhi = rhi;
 
-    /** Floats of delta storage handed out so far. */
-    this.deltaCount = 0;
     this.deltaCapacity = deltaCapacity;
     this.deltaBuffer = this._createDeltaBuffer(deltaCapacity);
-    /** Freed ranges below deltaCount, as { base, length }, sorted by base. */
-    this._holes = [];
+    /** Which floats of the deltas are handed out. */
+    this._ranges = new RangeAllocator();
 
     this.weightCapacity = weightCapacity;
     this.weightData = new Float32Array(weightCapacity);
@@ -87,24 +85,16 @@ export class MorphStore {
    * Called at load, never during a frame. The returned base goes into the
    * primitive's draw data and is what makes one arena addressable.
    */
+  /** Floats of delta storage handed out so far. */
+  get deltaCount() {
+    return this._ranges.end;
+  }
+
   allocate(deltas) {
     // A hole an unloaded asset left behind first, if one is big enough.
-    // ponytail: first fit, no compaction -- a hole smaller than every later
-    // asset stays a hole. Compacting means moving live deltas and rewriting
-    // every primitive's morphBase; worth it only if fragmentation shows up.
-    for (let h = 0; h < this._holes.length; h++) {
-      const hole = this._holes[h];
-      if (hole.length < deltas.length) continue;
-      const base = hole.base;
-      hole.base += deltas.length;
-      hole.length -= deltas.length;
-      if (hole.length === 0) this._holes.splice(h, 1);
-      this.rhi.queue.writeBuffer(this.deltaBuffer, base * MORPH_FLOAT_BYTES, deltas);
-      return base;
-    }
-
-    const base = this.deltaCount;
-    const needed = base + deltas.length;
+    const written = this._ranges.end;
+    const base = this._ranges.alloc(deltas.length);
+    const needed = this._ranges.end;
 
     if (needed > this.deltaCapacity) {
       // Two high-end face rigs are enough to pass the default binding limit.
@@ -115,10 +105,10 @@ export class MorphStore {
 
       // Only the part that has been written. Copying the whole old buffer
       // would be legal and would move uninitialized bytes.
-      if (base > 0) {
+      if (written > 0) {
         const encoder = this.rhi.device.createCommandEncoder({ label: 'morph-grow' });
         encoder.copyBufferToBuffer(
-          this.deltaBuffer, 0, grown, 0, base * MORPH_FLOAT_BYTES,
+          this.deltaBuffer, 0, grown, 0, written * MORPH_FLOAT_BYTES,
         );
         this.rhi.queue.submit([encoder.finish()]);
       }
@@ -130,7 +120,6 @@ export class MorphStore {
     }
 
     this.rhi.queue.writeBuffer(this.deltaBuffer, base * MORPH_FLOAT_BYTES, deltas);
-    this.deltaCount = needed;
     return base;
   }
 
@@ -142,26 +131,7 @@ export class MorphStore {
    * are kept sorted and merged; one that reaches the end shortens the arena.
    */
   free(base, length) {
-    let at = 0;
-    while (at < this._holes.length && this._holes[at].base < base) at++;
-    this._holes.splice(at, 0, { base, length });
-
-    const next = this._holes[at + 1];
-    if (next && base + length === next.base) {
-      this._holes[at].length += next.length;
-      this._holes.splice(at + 1, 1);
-    }
-    const previous = this._holes[at - 1];
-    if (previous && previous.base + previous.length === base) {
-      previous.length += this._holes[at].length;
-      this._holes.splice(at, 1);
-    }
-
-    const last = this._holes[this._holes.length - 1];
-    if (last && last.base + last.length === this.deltaCount) {
-      this.deltaCount = last.base;
-      this._holes.pop();
-    }
+    this._ranges.free(base, length);
   }
 
   /**

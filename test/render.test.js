@@ -28,6 +28,7 @@ import { Scene } from '../src/scene/scene.js';
 import { GpuDriven, DRAW_DATA_BYTES, CULL_PHASES } from '../src/render/gpudriven.js';
 import { SkinPalette } from '../src/render/skin.js';
 import { MorphStore } from '../src/render/morph.js';
+import { GeometryArena } from '../src/render/geometry.js';
 import { PipelineCache } from '../src/rhi/pipeline.js';
 import { createBuffer, storageCapacity } from '../src/rhi/buffer.js';
 import { grownCapacity } from '../src/core/grow.js';
@@ -1587,6 +1588,7 @@ function blendedFrame(items) {
   renderer.pipelines = { get: (v) => `pipeline:${v}` };
   renderer.drawBindGroup = 'draws';
   renderer.stats = { transparentDraws: 0 };
+  renderer.geometry = { skinBuffer: 'arena-skin', bind: (pass) => { pass.setVertexBuffer(0, 'arena'); pass.setIndexBuffer('arena-indices', 'uint32'); } };
 
   const calls = [];
   const log = (name) => (...args) => calls.push([name, ...args]);
@@ -1639,14 +1641,45 @@ test('a different material, skinning or mirroring splits a run', () => {
   assert.equal(draws.length, 4);
 });
 
-test('buffers are bound when the mesh or its skinning changes, not per object', () => {
-  const { calls } = blendedFrame([glass, glass, { ...glass, material: 9 }, { ...glass, skinned: true }]);
+test('the geometry is bound once, and a skin buffer only when a skinned mesh changes', () => {
+  const { calls, draws } = blendedFrame([glass, glass, { ...glass, material: 9 }, { ...glass, skinned: true }, { ...glass, skinned: true, material: 9 }]);
   const vertexBinds = calls.filter((c) => c[0] === 'setVertexBuffer').map((c) => [c[1], c[2]]);
   assert.deepEqual(vertexBinds, [
-    [0, 'vb:pane'],                       // first run
-    // the material-9 run reuses them: same mesh, same skinning
-    [0, 'vb:pane'], [1, 'sb:pane'],       // skinned needs its skin buffer, so it rebinds
+    [0, 'arena'],                         // every primitive's vertices, once
+    [1, 'arena-skin'],                    // the first skinned run; the second shares it
   ]);
+  assert.equal(draws.length, 4);
+});
+
+console.log('\ngeometry arena');
+
+test('primitives land one after another, a freed range is reused, and growing carries what was written', () => {
+  const writes = [], copies = [];
+  const rhi = {
+    limits: { maxStorageBufferBindingSize: 1 << 30, maxBufferSize: 1 << 30 },
+    device: {
+      createBuffer: (d) => ({ label: d.label, size: d.size, destroy() {} }),
+      createCommandEncoder: () => ({ copyBufferToBuffer: (from, a, to, b, bytes) => copies.push([from.label, bytes]), finish() {} }),
+    },
+    queue: { writeBuffer: (buffer, offset, data, start, bytes) => writes.push([buffer.label, offset, bytes]), submit() {} },
+  };
+  const arena = new GeometryArena(rhi, { vertexCapacity: 8, indexCapacity: 16 });
+  const mesh = (vertices, indices) => [new Float32Array(vertices * 15), new Uint32Array(indices)];
+  const a = arena.allocate(...mesh(3, 3));
+  const b = arena.allocate(...mesh(4, 6));
+  assert.deepEqual([a, b], [{ baseVertex: 0, firstIndex: 0 }, { baseVertex: 3, firstIndex: 3 }]);
+  assert.deepEqual(writes.filter((w) => w[0] === 'geometry-vertices').at(-1), ['geometry-vertices', 3 * 60, 4 * 60], 'written at its own vertex');
+  assert.equal(writes.filter((w) => w[0] === 'geometry-positions').at(-1)[1], 3 * 12, 'and its positions at the same numbering');
+
+  arena.free(a.baseVertex, 3, a.firstIndex, 3);
+  const c = arena.allocate(...mesh(2, 3));
+  assert.deepEqual(c, { baseVertex: 0, firstIndex: 0 }, 'into the hole the first left');
+
+  const revision = arena.revision;
+  const d = arena.allocate(...mesh(6, 12));
+  assert.equal(d.baseVertex, 7);
+  assert.ok(arena.vertexCapacity >= 13 && arena.indexCapacity >= 21 && arena.revision > revision, 'grown');
+  assert.deepEqual(copies, [['geometry-vertices', 7 * 60], ['geometry-positions', 7 * 12], ['geometry-indices', 9 * 4]], 'only what had been written');
 });
 
 console.log('\nmorph arena');
@@ -1681,7 +1714,7 @@ test('freed morph ranges are reused, merged, and shrink the arena from the end',
   store.free(0, 20);
   store.free(c, 10);
   assert.equal(store.deltaCount, 0, 'freeing the tail gives back every hole touching it');
-  assert.equal(store._holes.length, 0);
+  assert.equal(store._ranges._holes.length, 0);
 });
 
 console.log('\ndevice limits');

@@ -139,7 +139,7 @@ Creates an engine on a `<canvas>`: requests the WebGPU device, compiles the rend
 | `size` | `2048` | Texels on a side of each directional shadow cascade. |
 | `cascades` | `4` | Cascades per shadow-casting directional light, 1 to 4. |
 | `lambda` | `0.7` | How cascades split the range: `0` uniform, `1` logarithmic. |
-| `casterExtent` | `4` | How far behind each cascade casters are still caught, as a multiple of the cascade's radius. |
+| `casterExtent` | `4` | Deprecated, and no longer used for a scene with anything in it: every caster in the scene casts into every cascade, however far toward the light it stands. It was how far behind each cascade casters were still caught, as a multiple of the cascade's radius. |
 | `normalBias` | `1.5` | Offset along the surface normal at lookup, in texels. Raise it for shadow acne. |
 | `depthBiasSlope` | `-2` | Slope-scaled depth bias while drawing the map. Fixed at creation. |
 | `depthBiasConstant` | `-1` | Constant depth bias while drawing the map. Fixed at creation. |
@@ -481,13 +481,14 @@ Counts from the last frame drawn. Read only. The first five fields start at 0; t
 | Field | Set by | Meaning |
 |---|---|---|
 | `renderables` | 3D | Meshes in the scene. |
-| `draws` | 3D | Indirect draw batches (one per mesh part and material). |
+| `draws` | 3D | Opaque draw calls: one per mesh part and material, except that parts each drawn once share one call per material. |
 | `recomposed` | 3D, 2D | Transforms recomputed this frame. |
 | `transparent` | 3D | Blended objects this frame. |
 | `transparentDraws` | 3D | Draw calls for blended objects. |
 | `shadowViews` | 3D | Point and spot shadow views. |
 | `shadowViewsDrawn` | 3D | Of those, how many were redrawn (the rest were cached). |
-| `cascadesDrawn` | 3D | Directional shadow cascades redrawn. |
+| `cascadesDrawn` | 3D | Directional shadow cascades redrawn whole. |
+| `cascadesScrolled` | 3D | Directional shadow cascades scrolled: the camera moved, and only the strip of map it moved onto was drawn. |
 | `sprites2D` | 2D | Sprites and glyphs in the 2D view. |
 | `sprites2DWritten` | 2D | Of those, how many were re-uploaded. |
 | `tiles2DWritten` | 2D | Tile-map tiles re-uploaded. |
@@ -757,7 +758,9 @@ engine.renderer.softShadows = false;
 <a id="renderer-shadows"></a>
 ### `engine.renderer.shadows` → `ShadowMaps`
 
-The shadow maps. Three of the [`shadows` options](#winding-create) can change at any time as fields here: `lambda`, `casterExtent` and `normalBias`.
+The shadow maps. Three of the [`shadows` options](#winding-create) can change at any time as fields here: `lambda`, `casterExtent` (deprecated, no longer used) and `normalBias`.
+
+A directional light's cascades follow the camera on a grid of 16 texels. When the camera moves and nothing else changes, a cascade is scrolled rather than redrawn: its map keeps every texel where it is and only the strip it moved onto is drawn. The shadows are the same as a full redraw. Anything moving inside a cascade, the light turning, or the shadow distance changing, draws it whole.
 
 ```js
 engine.renderer.shadows.normalBias = 2.5;   // less acne
@@ -810,7 +813,7 @@ Default `1`. Blur radius of each bloom upsample, in texels. Larger is a wider, s
 <a id="post-strength"></a>
 ### `engine.renderer.post.strength` → `number`
 
-Default `0.06`. How much of the image is bloom, 0 to 1 (clamped). Bloom is mixed in, not added, so raising it moves light into the halo without brightening the image.
+Default `0.06`. How much of the image is bloom, 0 to 1 (clamped). Bloom is mixed in, not added, so raising it moves light into the halo without brightening the image. `0` turns bloom off, and its passes are not drawn.
 
 ```js
 engine.renderer.post.strength = 0.15;

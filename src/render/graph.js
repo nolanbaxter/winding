@@ -307,10 +307,11 @@ export class RenderGraph {
     }
 
     for (const attachment of desc.color ?? []) {
-      const slot = pass.color[pass.colorCount++] ??= { resource: 0, view: null, clear: undefined };
+      const slot = pass.color[pass.colorCount++] ??= { resource: 0, view: null, clear: undefined, keep: false };
       slot.resource = attachment.resource;
       slot.view = attachment.view ?? null;
       slot.clear = attachment.clear;
+      slot.keep = attachment.keep === true;
       this._recordWrite(attachment.resource, index);
     }
 
@@ -319,6 +320,7 @@ export class RenderGraph {
       pass.depth.resource = desc.depth.resource;
       pass.depth.view = desc.depth.view ?? null;
       pass.depth.clear = desc.depth.clear;
+      pass.depth.keep = desc.depth.keep === true;
       this._recordWrite(desc.depth.resource, index);
     }
 
@@ -404,10 +406,10 @@ export class RenderGraph {
       s[n++] = pass.colorCount;
       for (let c = 0; c < pass.colorCount; c++) {
         s[n++] = pass.color[c].resource;
-        s[n++] = pass.color[c].clear === undefined ? 0 : 1;
+        s[n++] = pass.color[c].clear !== undefined ? 1 : pass.color[c].keep ? 2 : 0;
       }
       s[n++] = pass.depth ? pass.depth.resource : -1;
-      s[n++] = pass.depth && pass.depth.clear !== undefined ? 1 : 0;
+      s[n++] = !pass.depth ? 0 : pass.depth.clear !== undefined ? 1 : pass.depth.keep ? 2 : 0;
       s[n++] = pass.readCount;
       for (let r = 0; r < pass.readCount; r++) s[n++] = pass.reads[r];
       s[n++] = pass.writeCount;
@@ -776,7 +778,9 @@ export class RenderGraph {
     const writtenEarlier = this._writtenBefore(attachment.resource, step);
     if (attachment.clear !== undefined) {
       attachment.loadOp = 'clear';
-    } else if (writtenEarlier) {
+    } else if (writtenEarlier || attachment.keep) {
+      // `keep`: an imported texture whose last frame's contents are the point
+      // -- a shadow map drawn into a piece at a time.
       attachment.loadOp = 'load';
     } else {
       // Loading a texture nothing has written yields undefined contents. That
@@ -906,7 +910,7 @@ function makePassRecord() {
     color: [],
     colorCount: 0,
     depth: null,
-    _depth: { resource: 0, view: null, clear: undefined, loadOp: 'clear', storeOp: 'store' },
+    _depth: { resource: 0, view: null, clear: undefined, keep: false, loadOp: 'clear', storeOp: 'store' },
     reads: [],
     readCount: 0,
     writes: [],

@@ -27,7 +27,7 @@ import { handleIndex } from '../core/handle.js';
 import { DIRECTIONAL_FLOATS } from '../scene/scene.js';
 
 import {
-  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND,
+  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND, ALPHA_OPAQUE,
 } from './material.js';
 import { pbrShader, FRAME_BYTES } from './shaders/pbr.js';
 import { SHEEN_ALBEDO } from './sheen.js';
@@ -49,6 +49,8 @@ import { RenderGraph, CANVAS } from './graph.js';
 import { GpuProfiler } from './timing.js';
 import { SkinPalette } from './skin.js';
 import { MorphStore } from './morph.js';
+import { GeometryArena } from './geometry.js';
+import { MergedDraws } from './merged.js';
 import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { Upscaler, MIN_RESOLUTION } from './upscale.js';
@@ -103,10 +105,19 @@ export const FEATURE_AO = 4;
 export const FEATURE_OIT = 8;
 /** Soft shadows (PCSS): compiled in while a light that casts has a size. */
 export const FEATURE_SOFT = 16;
+/**
+ * The point and spot light loop compiled OUT, for a scene with none. The one
+ * feature that takes code away rather than adding it, so that while its set
+ * builds, the fallback (_readySet) is the set with the loop -- right, only
+ * slower -- and never one without lights a scene has. 0.27 ms of Sponza's
+ * forward pass at 720p on Iris Xe, with no light for the loop to find.
+ */
+export const FEATURE_NO_POINTS = 32;
 
 function featureConstants(features) {
   return {
     PROBES: features & FEATURE_PROBES ? 1 : 0, DECALS: features & FEATURE_DECALS ? 1 : 0, SOFT_SHADOWS: features & FEATURE_SOFT ? 1 : 0,
+    POINT_LIGHTS: features & FEATURE_NO_POINTS ? 0 : 1,
   };
 }
 
@@ -241,6 +252,10 @@ export class Renderer {
       // guarantees: the next thing that needs one has to share.
       { binding: 21, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d-array' } },
       { binding: 22, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      // The cascades' sampler, which wraps: see shadows.js.
+      { binding: 23, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
+      // The geometry arena's vertices, for the merged draws, which read them by hand.
+      { binding: 24, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
     ];
     checkStorageStages(rhi, frameEntries);
     this.materials = new MaterialRegistry(rhi, {
@@ -404,6 +419,8 @@ export class Renderer {
     this.skinPalette = new SkinPalette(rhi);
     /** Morph deltas (static, per primitive) and weights (per frame, per instance). */
     this.morph = new MorphStore(rhi);
+    /** Every primitive's vertices and indices, in two buffers: see geometry.js. */
+    this.geometry = new GeometryArena(rhi);
     this._paletteRevision = 0;
 
     /**
@@ -474,6 +491,9 @@ export class Renderer {
 
   async _init() {
     this.gpu = await GpuDriven.create(this.rhi, this.maxDraws, this.materials);
+    /** One draw per material for the one-object batches: see merged.js. */
+    this.merged = await MergedDraws.create(this.rhi, this.geometry);
+    this.gpu.merged = this.merged;
     this._makeDrawBindGroup();
     this.clusters = await ClusteredLights.create(this.rhi);
     // Two modules: the plain one declares no extension textures, so its
@@ -485,6 +505,10 @@ export class Renderer {
     this.shadows = await ShadowMaps.create(
       this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout,
     );
+    // The casters' geometry, which the shadow passes bind as the forward ones do,
+    // and the merged groups (merged.js), which they draw as well.
+    this.shadows.geometry = this.geometry;
+    this.shadows.merged = this.merged;
     this.skyboxPass = await SkyboxPass.create(this.rhi, this.pipelines, null);
     // Asked for at creation: ready for the first frame, as they always were.
     const asked = (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
@@ -608,13 +632,60 @@ export class Renderer {
     }
   }
 
-  /** The largest ready set within these features: every one, or a subset, or none. */
+  /**
+   * Every pipeline set a frame has asked for, built. A frame draws with the
+   * best set ready and starts building the one it wanted; tests and captures
+   * that need the picture a scene will settle on wait for this, then draw again.
+   */
+  async _pipelinesBuilt() {
+    for (const set of [...this._variantSets.values()]) await set.building;
+  }
+
+  /**
+   * The largest ready set within these features: every one, or a subset, or
+   * none. FEATURE_NO_POINTS goes first: it only saves time, so a set with the
+   * loop and the scene's decals or probes beats one without the loop and
+   * without them.
+   */
   _readySet(features) {
-    for (let subset = features; ; subset = (subset - 1) & features) {
-      const set = this._variantSets.get(subset);
-      if (set?.ready) return set;
+    const adds = features & ~FEATURE_NO_POINTS;
+    for (let subset = adds; ; subset = (subset - 1) & adds) {
+      const set = (this._variantSets.get(subset | (features & FEATURE_NO_POINTS))?.ready && this._variantSets.get(subset | (features & FEATURE_NO_POINTS)))
+        || (this._variantSets.get(subset)?.ready && this._variantSets.get(subset));
+      if (set) return set;
       if (subset === 0) return this._variantSets.get(0);
     }
+  }
+
+  /**
+   * A forward descriptor's merged twin (merged.js): the same pipeline with its
+   * vertices read from the arena rather than a vertex buffer. Null for the
+   * variants merged draws never use -- skinned, blended, transmissive.
+   */
+  _mergedDescriptor(descriptor, variant) {
+    if ((variant & VARIANT_SKINNED) !== 0 || (variant & 3) === ALPHA_BLEND || (variant & VARIANT_TRANSMISSIVE) !== 0) return null;
+    this._merged ??= new WeakMap();
+    let merged = this._merged.get(descriptor);
+    if (!merged) {
+      merged = { ...descriptor, label: `${descriptor.label}:merged`, vertexEntry: 'vsMerged', buffers: [] };
+      // An opaque group's depth is drawn first, by the prepass below, so its
+      // shading draw only has to match it: each pixel shades once.
+      if ((variant & 3) === ALPHA_OPAQUE) {
+        merged.prepass = {
+          ...merged, label: `${descriptor.label}:merged-depth`, fragmentEntry: 'fsDepth',
+          targets: descriptor.targets.map((t) => ({ format: t.format, writeMask: 0 })),
+        };
+        merged.depth = { ...descriptor.depth, depthCompare: 'greater-equal', depthWriteEnabled: false };
+      }
+      this._merged.set(descriptor, merged);
+    }
+    return merged;
+  }
+
+  /** A merged group's shading descriptor, from its material and winding. */
+  _mergedFor(material, mirrored) {
+    const variant = this.materials.variants[material];
+    return this._mergedDescriptor(this._pipelineByVariant.get(variant | (mirrored ? VARIANT_MIRRORED : 0)), variant);
   }
 
   /** The module and layout a variant's pipelines use; see extendedPipelineLayout. */
@@ -654,6 +725,9 @@ export class Renderer {
       };
       set.forward.set(variant, descriptor);
       pending.push(descriptor);
+      const merged = this._mergedDescriptor(descriptor, variant);
+      if (merged !== null) pending.push(merged);
+      if (merged?.prepass) pending.push(merged.prepass);
     }
     await this.pipelines.warm(pending);
     if (features & FEATURE_OIT) await this._ensureOitVariants(wanted, features);
@@ -827,6 +901,8 @@ export class Renderer {
           { binding: 20, resource: { buffer: this._frameProbes?.buffer ?? this._noProbes.buffer } },
           { binding: 21, resource: this.decals.view },
           { binding: 22, resource: { buffer: this.decals.buffer } },
+          { binding: 23, resource: this.shadows.cascadeSampler },
+          { binding: 24, resource: { buffer: this.geometry.vertexBuffer } },
         ],
       });
       this._frameBindGroups.set(environment, bindGroup);
@@ -921,7 +997,8 @@ export class Renderer {
     // without what it adds.
     const decalCount = this.decals.prepare(scene);
     const features = (probes !== null && probes.count > 0 ? FEATURE_PROBES : 0) | (decalCount > 0 ? FEATURE_DECALS : 0)
-      | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0) | (this.softShadows ? softShadows(scene) : 0);
+      | (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0) | (this.softShadows ? softShadows(scene) : 0)
+      | (scene.lightCount === 0 ? FEATURE_NO_POINTS : 0);
     if (!this._variantSets.has(features)) this._enableFeatures(features).catch((error) => console.error(error));
     const variantSet = this._readySet(features);
     // AO and OIT this frame are what the set drawn from has built in: asked for
@@ -1049,6 +1126,11 @@ export class Renderer {
       this._frameBindGroups = new WeakMap();
       this._morphRevision = this.morph.revision;
     }
+    // The frame group names the arena's vertex buffer, which a load can replace.
+    if (this._geometryRevision !== this.geometry.revision) {
+      this._frameBindGroups = new WeakMap();
+      this._geometryRevision = this.geometry.revision;
+    }
     if (this._paletteRevision !== this.skinPalette.revision) {
       this._frameBindGroups = new WeakMap();
       this._paletteRevision = this.skinPalette.revision;
@@ -1078,7 +1160,8 @@ export class Renderer {
       this.batchList.sort();
       this._batchRevision = this.gpu.sceneRevision;
     }
-    this.stats.draws = this.gpu.batchCount;
+    // Draw calls: the batches drawn alone, and a call per merged group (merged.js).
+    this.stats.draws = this.gpu.batchCount - this.merged.mergedCount + this.merged.groupCount;
     p?.mark('batch sort');
 
     this._orderTransparent(scene, camera);
@@ -1143,13 +1226,16 @@ export class Renderer {
     // from other eyes into the same layers, and then once more after it.
     changes.all = target !== null || materialsChanged || this.gpu.hasLod
       || this._shadowCacheScene !== scene || this._shadowCacheRevision !== scene.revision;
-    this.shadows.update(camera, scene, changes);
+    this.shadows.boundBatches(scene, this.gpu, items, anyMoved);
+    this.shadows.update(camera, scene, changes,
+      this._hasSceneBounds ? this._sceneMin : null, this._hasSceneBounds ? this._sceneMax : null);
     this.shadows.updateLocal(scene, camera, changes);
     this._shadowCacheScene = scene;
     this._shadowCacheRevision = target !== null ? -1 : scene.revision;
     this.stats.shadowViews = this.shadows.localCount;
     this.stats.shadowViewsDrawn = this.shadows.localDrawn;
     this.stats.cascadesDrawn = this.shadows.cascadesDrawn;
+    this.stats.cascadesScrolled = this.shadows.cascadesScrolled;
     if (this._shadowRevision !== this.shadows.revision) {
       this._frameBindGroups = new WeakMap();
       this._shadowRevision = this.shadows.revision;
@@ -1269,6 +1355,8 @@ export class Renderer {
       indirectResource: indirectEarly,
       visibleResource: visibleEarly,
     });
+    // The merged groups' lists brought up to this frame's view.
+    const mergedLists = this.merged.addPass(graph, this.gpu, this.geometry, drawDataBuffer);
 
     // Shadows draw the level of detail the camera chose. Only when there is
     // any: otherwise they walk the static order, and this pass is not run.
@@ -1318,7 +1406,8 @@ export class Renderer {
     // picture so far and the set of occluders the pyramid is built from.
     graph.addPass({
       name: 'forward:early',
-      reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts, indirectEarly, visibleEarly],
+      reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts, indirectEarly, visibleEarly,
+        ...(mergedLists === null ? [] : [mergedLists])],
       color: ambient === null
         ? [{ resource: sceneColor, clear: black }]
         : [{ resource: sceneColor, clear: black }, { resource: ambient, clear: { r: 0, g: 0, b: 0, a: 0 } }],
@@ -1708,6 +1797,8 @@ export class Renderer {
     this.directionalBuffer.destroy();
     this.skinPalette.destroy();
     this.morph.destroy();
+    this.geometry.destroy();
+    this.merged.destroy();
     this.skyboxPass.destroy();
     this.skyboxPassAO?.destroy();
     this.opaqueCopy.destroy();
@@ -1824,13 +1915,28 @@ export class Renderer {
     const gpu = this.gpu;
     let boundPipeline = null;
     let boundMaterial = -1;
+    // The merged groups' depth, before anything shades: see _mergedDescriptor.
+    // First, as it binds the merged index list, which the arena's binding replaces.
+    if (phase === 0) {
+      this.merged.encode(pass, this.drawLayout, GROUP_DRAW,
+        (material, mirrored) => {
+          const prepass = this._mergedFor(material, mirrored).prepass;
+          return prepass ? this.pipelines.get(prepass) : null;
+        },
+        (material) => pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(material)));
+    }
+
+    // Every primitive's geometry, bound once for the whole pass.
+    this.geometry.bind(pass);
 
     // One call per batch, not per object, and the instance count inside each
     // one was written by the compute shader. A fully culled batch still costs a
     // call, but it draws nothing and the GPU discards it immediately. The late
     // phase is mostly such batches, which is what makes a second pass affordable.
+    const merged = this.merged.batchMerged;
     for (let d = 0; d < this.batchList.count; d++) {
       const b = this.batchList.payloads[d];
+      if (merged[b] === 1) continue;
       const materialId = gpu.batchMaterial[b];
       const primitive = gpu.batchPrimitive[b];
 
@@ -1849,16 +1955,21 @@ export class Renderer {
       }
 
       pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.batchOffset(b, phase)]);
-      pass.setVertexBuffer(0, primitive.vertexBuffer);
       // Slot 1 only for skinned pipelines. A pipeline declares how many vertex
       // buffers it reads, so binding this on an unskinned one is a validation
       // error rather than something harmlessly ignored.
-      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
+      if (skinned) pass.setVertexBuffer(1, this.geometry.skinBuffer);
       pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, phase));
     }
 
-    if (phase === 0) return;
+    // Every one-object batch of a material, in one draw, with the early phase:
+    // they are drawn whenever in view, and the late phase has none of them.
+    if (phase === 0) {
+      this.merged.encode(pass, this.drawLayout, GROUP_DRAW,
+        (material, mirrored) => this.pipelines.get(this._mergedFor(material, mirrored)),
+        (material) => pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(material)));
+      return;
+    }
 
     // Blended geometry, strictly after every opaque draw. With OIT on it is
     // drawn into its own targets by a later pass instead, and needs no order
@@ -1897,9 +2008,10 @@ export class Renderer {
     if (transparentCount === 0) return;
 
     pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.transparentBatchOffset()]);
+    // Its own pass, for OIT and transmission: the geometry bound here too.
+    this.geometry.bind(pass);
 
-    let boundPrimitive = null;
-    let boundSkinned = false;
+    let boundSkin = null;
     let k = 0;
     while (k < transparentCount) {
       const i = payloads[k];
@@ -1934,16 +2046,13 @@ export class Renderer {
         pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(materialId));
         boundMaterial = materialId;
       }
-      // Buffers too only when they change: two runs of one mesh split by
-      // something else in between still share them.
-      if (primitive !== boundPrimitive || skinned !== boundSkinned) {
-        pass.setVertexBuffer(0, primitive.vertexBuffer);
-        if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-        pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
-        boundPrimitive = primitive;
-        boundSkinned = skinned;
+      // A skinned mesh's influences only when they change: two runs of one
+      // mesh split by something else in between still share them.
+      if (skinned && primitive !== boundSkin) {
+        pass.setVertexBuffer(1, this.geometry.skinBuffer);
+        boundSkin = primitive;
       }
-      pass.drawIndexed(primitive.indexCount, run, 0, 0, gpu.opaqueCount + k);
+      pass.drawIndexed(primitive.indexCount, run, primitive.firstIndex, primitive.baseVertex, gpu.opaqueCount + k);
       this.stats.transparentDraws++;
       k += run;
     }

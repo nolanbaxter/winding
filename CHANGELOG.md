@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-07
+
+**Fewer draws, less overdraw, shadows that scroll.** Every mesh's geometry now lives in one
+arena, and every mesh drawn once is pooled with the others of its material into one draw; the
+sun's shadow maps scroll with the camera instead of being redrawn; shadow passes read positions
+alone; and the merged meshes draw their depth before they shade. Each change A/B'd before it was
+kept, with the same pixels. On Iris Xe at 720p: Sponza 4.64 -> 4.15 ms a frame, 256 point lights
+9.17 -> 6.64 ms, a town of 900 separate buildings 14.8 -> 4.0 ms of GPU.
+
+### Changed
+
+- **Merged meshes draw their depth first.** With no depth prepass, a pixel's cost depended on draw
+  order: a surface drawn before the wall in front of it was shaded and then covered. The opaque
+  merged groups now draw depth alone first, and then shade only where they match it, so every
+  pixel they cover shades once, whatever the order; other opaque meshes test against that depth
+  too. Sponza walking the nave: main pass -19%, GPU -16%; with 256 point lights, the main pass
+  -29% to -34%. A town of 900 buildings, one group: no measurable cost. The same pixels, but for
+  one in 900,000 where two surfaces meet at exactly equal depth. GPUs that hide overdraw in
+  hardware (Apple's) gain nothing from it and pay its depth draw; unmeasured.
+- **Shadow passes read positions alone.** The geometry arena keeps every vertex's position a
+  second time, by itself, and a depth-only shadow draw reads those 12 bytes instead of the whole
+  60-byte vertex. Sponza under a turning sun, every cascade redrawn each frame: shadow passes -10%.
+  The same pixels; vertex memory +20%.
+- **Big meshes are drawn a chunk at a time.** Each mesh's triangles are boxed in runs of 128 at
+  load. A strip of a scrolled shadow cascade draws only a mesh's chunks that reach it -- a strip
+  is thin, and its cost was every vertex of every mesh it touched -- and a merged mesh's chunks
+  out of view are dropped from the camera's draw as its whole was. Sponza walking the nave, against
+  the last change: GPU -8%, the nearest cascade's strips 0.49 -> 0.18 ms; the same pixels.
+- **Their shadows too, when a shadow map is drawn whole.** Each material's merged meshes also
+  keep a list of every one's triangles, copied once, and a shadow view drawn whole -- a cascade
+  under a turning sun, a point or spot light's -- is a draw per material rather than per mesh.
+  A strip of a scrolled cascade stays mesh by mesh, where culling each mesh to the strip skips
+  more. A town of 900 buildings under a turning sun: frame 17.9 -> 10.1 ms, CPU 2.4 -> 0.9 ms.
+- **Meshes drawn once each share one draw call per material.** A scene of distinct meshes -- a
+  level, Sponza, a town of separate buildings -- was a draw call per mesh, and each costs the GPU
+  about 7 us whether it draws anything or not. Now every mesh part drawn once is pooled with the
+  others of its material into one indexed draw, its vertices read straight from the geometry arena;
+  a part out of view keeps its place as triangles of one repeated vertex, which the GPU discards,
+  and only a part that comes into view or leaves it is rewritten. A town of 900 buildings: 900
+  draws -> 1, GPU 14.8 -> 4.0 ms, frame 23.3 -> 9.6 ms; Sponza: 103 draws -> 25, GPU -14%. The same
+  pixels. These parts are culled to the view, not by occlusion; meshes drawn many times are drawn
+  instanced, as before. `stats.draws` counts the calls.
+- **Every mesh's geometry lives in one arena.** One vertex buffer and one index buffer for every
+  primitive loaded, where each had its own; a pass binds them once instead of per batch, and a
+  freed range is reused by the next load. Groundwork for drawing many meshes in one call.
+- **Identical materials are one material.** A material identical to one already loaded -- every
+  factor but its name, and the same textures -- shares its id, so the same asset loaded many
+  times is one material, not one each. A material an animation drives is never shared.
+- **Off means off: bloom at strength 0 draws none of its passes.** A strength of 0 mixed no bloom
+  in, but its nine passes were drawn all the same: 0.36 ms a frame at 720p on Iris Xe.
+- **A scene with no point or spot lights skips their loop.** The shader that loops over them is
+  compiled out, in pipelines built in the background the first time such a scene draws; until then
+  it draws with the loop, as before. Sponza with only the sun: forward pass 5% faster.
+- **A moving camera scrolls the sun's shadow maps instead of redrawing them.** When a cascade's box
+  steps along its grid and nothing else changed, its map keeps every texel where it is -- the map
+  wraps, and only its origin moves -- and only the strip the box moved onto is drawn. The same
+  shadows: a scrolled map matches one drawn whole to within a level on a few dozen channels.
+  Sponza at 720p on Iris Xe, walking the nave: shadow passes 3.9 -> 0.55 ms a frame, the whole
+  frame 11.9 -> 7.6 ms. The new `stats.cascadesScrolled` counts them.
+- **Every caster in the scene casts into every cascade.** A cascade's depth now spans the scene
+  along the light, rather than reaching four cascade radii toward it -- so a tall building far up
+  the light no longer loses its shadow -- and stays put while the camera moves, which is what
+  lets a cascade scroll. [`casterExtent`](docs/API.md#renderer-shadows) is deprecated and no
+  longer used.
+- **Each sun cascade draws only the casters that reach it.** Every caster went into every cascade,
+  to be transformed and clipped away by the GPU; now a batch whose box lies outside a cascade is
+  not drawn into it. The same shadows. A town of 900 separate buildings: shadow passes 0.40 ->
+  0.22 ms a frame. Sponza, whose cost is a few large meshes every cascade reaches, is unchanged.
+
 ## [1.5.0] - 2026-10-06
 
 **Faster where it was slow, measured.** A speed audit of the engine against other engines'
@@ -2298,7 +2367,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/nolanbaxter/winding/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/nolanbaxter/winding/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/nolanbaxter/winding/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/nolanbaxter/winding/compare/v1.2.0...v1.3.0

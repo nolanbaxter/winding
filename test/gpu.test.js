@@ -383,7 +383,7 @@ export async function run(canvas, onDone) {
     if (skinnedBatches === 0) throw new Error('nothing batched as skinned');
 
     const primitive = rigged.meshes[0].primitives[0];
-    if (!primitive.skinBuffer) throw new Error('the rigged primitive has no skin vertex buffer');
+    if (!engine.renderer.geometry.skinBuffer) throw new Error('the geometry arena holds no joints and weights');
 
     // Pose a joint and confirm the bounds follow it. The mesh node never
     // moves, so a box transformed from the bind pose would be unchanged -- and
@@ -413,6 +413,48 @@ export async function run(canvas, onDone) {
     riggedNode.destroy();
     return `${skinnedBatches} skinned batch, ${palette.jointCount} joints, `
       + `bind pose identity, bounds ${beforeTop.toFixed(1)} -> ${afterTop.toFixed(1)}`;
+  });
+
+  await step('a skinned mesh past the start of the geometry arena poses as one at its start', async () => {
+    // The rigged quad, its top edge's joint lifted, in two engines: one with
+    // another mesh loaded first, so the quad's vertices sit past the arena's
+    // start. A skin buffer counted from the primitive's own first vertex was
+    // read from its place in the arena -- another mesh's joints and weights --
+    // and only a pose shows it: in the bind pose every joint is the identity.
+    const pose = async (somethingFirst) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '160px';
+      canvas.style.height = '120px';
+      document.body.appendChild(canvas);
+      const probe = await Winding.create(canvas, { antialias: false });
+      try {
+        probe.gpu.resize(160, 120);
+        const scene = probe.createScene();
+        if (somethingFirst) scene.add(await probe.load(buildFeatureGLB())).setPosition(50, 0, 0);
+        const rigged = await probe.load(buildRiggedGLB());
+        scene.add(rigged);
+        const index = scene.renderableCount - 1;
+        scene.transforms.setPosition(scene.skins[scene.renderableSkin[index]].joints[1], 0.8, 1.5, 0);
+        scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity: 3 });
+        const cam = new Camera({ fovY: 1.2, near: 0.1 });
+        cam.position.set([0, 2, 6]);
+        cam.target.set([0, 2, 0]);
+        probe.renderFrame(scene, cam);
+        await probe.renderer._pipelinesBuilt();
+        probe.renderFrame(scene, cam);
+        return { px: await probe.gpu.readPixels(), base: rigged.meshes[0].primitives[0].baseVertex };
+      } finally {
+        probe.destroy();
+        canvas.remove();
+      }
+    };
+    const first = await pose(false);
+    const later = await pose(true);
+    let differ = 0;
+    for (let i = 0; i < first.px.length; i++) if (i % 4 !== 3 && Math.abs(first.px[i] - later.px[i]) > 2) differ++;
+    const report = `the quad at vertex ${first.base} and at vertex ${later.base}: ${differ} channels differ`;
+    if (later.base === 0 || differ > 0) throw new Error(report);
+    return report;
   });
 
   await step('a morph target moves the vertex the shader reads', async () => {
@@ -476,7 +518,8 @@ ${morphFn}
 @compute @workgroup_size(4)
 fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   let draw = drawData[which.x];
-  let m = applyMorph(draw, id.x, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  // From the arena's start, as vertex_index counts in a draw with a base vertex.
+  let m = applyMorph(draw, which.y + id.x, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
   out[id.x * 3u] = m.position.x;
   out[id.x * 3u + 1u] = m.position.y;
   out[id.x * 3u + 2u] = m.position.z;
@@ -495,7 +538,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const which = device.createBuffer({
       size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(which, 0, Uint32Array.from([morphIndex, 0, 0, 0]));
+    if (primitive.baseVertex === 0) throw new Error('the morphed mesh sits at the arena start, which would hide an offset bug');
+    device.queue.writeBuffer(which, 0, Uint32Array.from([morphIndex, primitive.baseVertex, 0, 0]));
 
     const pipeline = device.createComputePipeline({
       layout: 'auto', compute: { module, entryPoint: 'main' },
@@ -1072,6 +1116,73 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   });
 
 
+  await step('meshes of one material draw in one call, and come and go with the view', async () => {
+    // One quad loaded three times: three meshes, one shared material, so one
+    // merged draw. The camera turns to each in turn and then to none: each
+    // must show exactly while it is in view, its place in the merged list
+    // rewritten as it comes and goes.
+    const bytes = buildFeatureGLB({ baseColorFactor: [0.9, 0.15, 0.1, 1], roughnessFactor: 0.9 });
+    const scene = engine.createScene();
+    for (let i = 0; i < 3; i++) scene.add(await engine.load(bytes)).setPosition(i * 12 - 12, 0, 0);
+    scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity: 4 });
+    const cam = new Camera({ fovY: 0.6, near: 0.1 });
+    const centre = async (x) => {
+      cam.position.set([x, 0, 6]);
+      cam.target.set([x, 0, 0]);
+      engine.renderFrame(scene, cam);
+      const px = await engine.gpu.readPixels();
+      const i = ((engine.gpu.height >> 1) * engine.gpu.width + (engine.gpu.width >> 1)) * 4;
+      // Clearly red, against the grey sky.
+      return px[i] > 150 && px[i] - px[i + 2] > 80 ? 'quad' : 'none';
+    };
+    engine.renderFrame(scene, cam);
+    await engine.renderer._pipelinesBuilt();
+    const { groupCount, mergedCount } = engine.renderer.merged;
+    const seen = [];
+    for (const x of [-12, 12, 6, 0, -12, 6]) seen.push(await centre(x));
+    const report = `${mergedCount} meshes in ${groupCount} draw(s); centre at x = -12, 12, 6, 0, -12, 6: ${seen.join(', ')}`;
+    if (groupCount !== 1 || mergedCount !== 3 || seen.join() !== 'quad,quad,none,quad,quad,none') throw new Error(report);
+    return report;
+  });
+
+  await step('a walking camera scrolls the cascades, and they match the ones drawn whole', async () => {
+    // A row of blocks on a long ground under a slanting sun, the camera walking
+    // along it: the cascades should scroll rather than redraw, and throwing
+    // them all away to draw them whole must give the same picture.
+    const ground = await engine.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], roughnessFactor: 0.9 }));
+    const block = await engine.load(buildFeatureGLB({ baseColorFactor: [0.3, 0.3, 0.3, 1] }));
+    const scene = engine.createScene();
+    scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(40, 6, 1);
+    for (let i = 0; i < 12; i++) {
+      scene.add(block).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.4, 0.4, 1).setPosition(-33 + i * 6, 1, (i % 3) - 1);
+    }
+    scene.addLight({ type: 'directional', direction: [-0.5, -0.8, -0.3], intensity: 5 });
+    const cam = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    let scrolled = 0, whole = 0;
+    for (let i = 0; i < 90; i++) {
+      cam.position.set([-30 + i * 0.4, 2, 6]);
+      cam.target.set([-26 + i * 0.4, 0.5, 0]);
+      engine.renderFrame(scene, cam);
+      scrolled += engine.stats.cascadesScrolled;
+      whole += engine.stats.cascadesDrawn;
+    }
+    const kept = await engine.gpu.readPixels();
+    engine.renderer.shadows._cascadeCache = [];
+    engine.renderFrame(scene, cam);
+    const redrawn = await engine.gpu.readPixels();
+    let differ = 0, most = 0;
+    for (let i = 0; i < kept.length; i++) {
+      if (i % 4 === 3) continue;
+      const d = Math.abs(kept[i] - redrawn[i]);
+      if (d > 0) differ++;
+      most = Math.max(most, d);
+    }
+    const report = `${scrolled} cascades scrolled and ${whole} drawn whole over 90 frames; against all redrawn, ${differ} channels differ, most by ${most}`;
+    // Rounding where the strips meet may move a texel's edge: a level or two, rarely.
+    if (!(scrolled > whole && differ <= kept.length * 0.001 && most <= 2)) throw new Error(report);
+    return report;
+  });
+
   await step('point and spot lights cast shadows when asked, and only where the caster is', async () => {
     // A blocker over the ground, one light above it and no sun, from straight
     // above. The ground under the blocker must darken when the light casts,
@@ -1175,7 +1286,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         // The soft pipelines start building on the first frame that asks for them,
         // and frames draw the plain edge until they are ready.
         probe.renderFrame(scenes[1], cam);
-        for (let i = 0; i < 200 && !probe.renderer._variantSets.get(16)?.ready; i++) await new Promise((r) => setTimeout(r, 20));
+        await probe.renderer._pipelinesBuilt();
         results[name].soft = await penumbras();
         // Switched off for the whole renderer: plain again, each light keeping its size.
         probe.renderer.softShadows = false;
@@ -2274,7 +2385,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
       // The first frame with decals starts their pipelines; draw once they are ready.
-      await probe.renderer._variantSets.get(2)?.building;
+      await probe.renderer._pipelinesBuilt();
       probe.renderFrame(scene, cam);
       const pixels = await probe.gpu.readPixels();
       const { width, height } = probe.gpu;
@@ -3701,7 +3812,19 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   await step('a load that fails part way gives back what it had built', async () => {
     const realEnsure = engine.renderer.ensureVariants;
     engine.renderer.ensureVariants = () => Promise.reject(new Error('forced'));
-    const freeBefore = engine.renderer.materials._free.length;
+    // Which ids are live, and how many hold each: materials are shared with an
+    // identical one already loaded, so the demo's may be held by its earlier copy.
+    const registry = engine.renderer.materials;
+    const live = () => {
+      const free = new Set(registry._free);
+      const ids = [];
+      for (let id = 0; id < registry.count; id++) if (!free.has(id)) ids.push(`${id}x${registry._holders[id] ?? 1}`);
+      return ids.join(' ');
+    };
+    const before = live();
+    const countBefore = registry.count;
+    const arena = () => `${engine.renderer.geometry._vertices.end} vertices, ${engine.renderer.geometry._indices.end} indices`;
+    const arenaBefore = arena();
     try {
       await engine.load(await buildDemoGLB({ arms: 2 }));
       throw new Error('the forced failure did not surface');
@@ -3710,9 +3833,10 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     } finally {
       engine.renderer.ensureVariants = realEnsure;
     }
-    const returned = engine.renderer.materials._free.length - freeBefore;
-    if (returned !== 3) throw new Error(`${returned} material ids came back, expected the demo's 3`);
-    return 'buffers, textures and 3 material ids freed';
+    const after = live();
+    if (after !== before) throw new Error(`material ids held before: ${before}; after the failed load: ${after}`);
+    if (arena() !== arenaBefore) throw new Error(`the geometry arena held ${arenaBefore} before and ${arena()} after`);
+    return `buffers, textures and material ids given back: ${registry.count - countBefore} minted and freed, the rest let go`;
   });
 
   await step('the device is asked for what the adapter has, not the defaults', async () => {

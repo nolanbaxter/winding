@@ -101,6 +101,7 @@ export interface ShadowOptions {
   size?: number;
   cascades?: 1 | 2 | 3 | 4;
   lambda?: number;
+  /** @deprecated No effect on a scene with anything in it: every caster in the scene now casts into every cascade. */
   casterExtent?: number;
   normalBias?: number;
   depthBiasSlope?: number;
@@ -207,6 +208,7 @@ export interface Stats {
   readonly shadowViews?: number;
   readonly shadowViewsDrawn?: number;
   readonly cascadesDrawn?: number;
+  readonly cascadesScrolled?: number;
   readonly sprites2D?: number;
   readonly sprites2DWritten?: number;
   readonly tiles2DWritten?: number;
@@ -229,6 +231,7 @@ export interface Device {
 
 export interface ShadowMaps {
   lambda: number;
+  /** @deprecated No effect on a scene with anything in it: every caster in the scene now casts into every cascade. */
   casterExtent: number;
   normalBias: number;
   readonly size: number;
