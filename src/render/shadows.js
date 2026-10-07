@@ -46,7 +46,7 @@ import { CULL_SHADOW, NOT_BATCHED } from './gpudriven.js';
 import { boxInOrtho, CHUNK_TRIANGLES } from '../scene/bounds.js';
 import { aabbTransform } from '../core/math/aabb.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
-import { VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
+import { VERTEX_BUFFER_LAYOUT, POSITION_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { createTexture } from '../rhi/texture.js';
 
@@ -134,6 +134,8 @@ struct Batch {
 // slices), and every primitive's vertices.
 @group(0) @binding(6) var<storage, read> table : array<u32>;
 @group(0) @binding(7) var<storage, read> arena : array<f32>;
+// The arena's positions alone, three floats a vertex: what a depth-only caster reads.
+@group(0) @binding(8) var<storage, read> positions : array<f32>;
 
 // The material, for the casters whose shape comes from alpha. Only the fields
 // alpha needs are read, but the struct is the forward pass's, byte for byte.
@@ -196,9 +198,9 @@ fn pull(code : u32) -> Pulled {
 @vertex
 fn vsMerged(@builtin(vertex_index) code : u32) -> @builtin(position) vec4<f32> {
   let p = pull(code);
-  let o = p.vertex * 15u;
+  let o = p.vertex * 3u;
   let draw = drawData[p.item];
-  let moved = morphPosition(draw, p.vertex, vec3<f32>(arena[o], arena[o + 1u], arena[o + 2u]));
+  let moved = morphPosition(draw, p.vertex, vec3<f32>(positions[o], positions[o + 1u], positions[o + 2u]));
   return cascade.viewProjection * draw.model * vec4<f32>(moved, 1.0);
 }
 
@@ -645,6 +647,7 @@ export class ShadowMaps {
         { binding: 5, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 6, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 7, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 8, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
 
@@ -662,6 +665,7 @@ export class ShadowMaps {
         { binding: 5, resource: { buffer: morph.weightBuffer } },
         { binding: 6, resource: { buffer: gpu.visibleBuffer } },
         { binding: 7, resource: { buffer: this.geometry.vertexBuffer } },
+        { binding: 8, resource: { buffer: this.geometry.positionBuffer } },
       ],
     });
 
@@ -677,7 +681,8 @@ export class ShadowMaps {
       vertexEntry: 'vs',
       // No fragment stage: nothing is written but depth.
       fragmentEntry: undefined,
-      buffers: [VERTEX_BUFFER_LAYOUT],
+      // Positions alone: see geometry.js.
+      buffers: [POSITION_BUFFER_LAYOUT],
       targets: [],
       primitive: {
         topology: 'triangle-list',
@@ -709,7 +714,7 @@ export class ShadowMaps {
       ...this.descriptor,
       label: 'shadow-skinned',
       vertexEntry: 'vsSkinned',
-      buffers: [VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT],
+      buffers: [POSITION_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT],
     };
     this._pipelines = pipelines;
     // And both again with the winding reversed, for mirrored instances --
@@ -1507,8 +1512,9 @@ export class ShadowMaps {
    */
   _encodeView(pass, bindGroup, offset, cull = null, at = 0, useMerged = true) {
     const gpu = this._gpu;
-    // Every caster's geometry, bound once for the view.
-    this.geometry.bind(pass);
+    // Every depth-only caster's positions, bound once for the view; the alpha
+    // casters below bind the full vertices they need for their UVs.
+    this.geometry.bindPositions(pass);
     const casts = (b) => cull === null || boxInOrtho(this._batchBoxes, b * 6, cull, at);
     pass.setBindGroup(GROUP_FRAME, bindGroup, [offset]);
     this.pipelineLayout.bindEmptyGroups(pass);
@@ -1546,7 +1552,7 @@ export class ShadowMaps {
         pass.setPipeline(this._pipelines.get(this.descriptors[variant]));
         boundVariant = variant;
       }
-      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
+      if (skinned) pass.setVertexBuffer(1, this.geometry.skinBuffer);
       // A strip of a scrolled cascade, and a mesh drawn once: only its chunks
       // that reach the strip. Not skinned or morphed, whose vertices leave the
       // boxes; not with LOD, whose draws are indirect.
@@ -1558,7 +1564,10 @@ export class ShadowMaps {
       }
     }
     if (grouped) this._encodeMergedCasters(pass, materials, cull, at, false);
-    if (alpha) this._encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch);
+    if (alpha) {
+      this.geometry.bind(pass);
+      this._encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch);
+    }
     if (alpha && grouped) this._encodeMergedCasters(pass, materials, cull, at, true);
   }
 
@@ -1591,8 +1600,8 @@ export class ShadowMaps {
       pass.setBindGroup(GROUP_DRAW, drawGroup, [g * merged.alignment]);
       pass.drawIndexed(group.indexCount, 1, group.indexBase, 0, 0);
     }
-    // What follows draws from the arena's own indices again.
-    if (bound) this.geometry.bind(pass);
+    // What follows draws from the arena's own indices again: the alpha casters, with the full vertices.
+    if (bound) (masked ? this.geometry.bind(pass) : this.geometry.bindPositions(pass));
   }
 
   /**
@@ -1653,7 +1662,7 @@ export class ShadowMaps {
         pass.setBindGroup(GROUP_MATERIAL, materials.bindGroup(material));
         boundMaterial = material;
       }
-      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
+      if (skinned) pass.setVertexBuffer(1, this.geometry.skinBuffer);
     };
 
     for (let b = 0; b < gpu.batchCount; b++) {

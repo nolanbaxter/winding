@@ -510,9 +510,7 @@ export class Winding {
             vertexCount: primitive.vertexCount,
             /** Whether this primitive carries influences. The scene reads this. */
             skinned: primitive.jointIndices != null,
-            // Null unless the mesh is rigged. A second vertex buffer, bound at
-            // slot 1 by skinned pipelines only, so static meshes carry nothing.
-            skinBuffer: null,
+
             indexCount: primitive.indexCount,
             bounds: primitive.bounds,
             /** Whether an edge has one triangle: the shadow pass draws it whole. See openSurface. */
@@ -551,19 +549,14 @@ export class Winding {
           };
           primitives.push(built);
 
-          const at = this.renderer.geometry.allocate(primitive.vertices, primitive.indices);
+          // A rigged one's joints and weights go in the arena too, at its vertices' numbering.
+          const skin = primitive.jointIndices
+            ? new Uint8Array(packSkinVertices(primitive.jointIndices, primitive.jointWeights, primitive.vertexCount))
+            : null;
+          const at = this.renderer.geometry.allocate(primitive.vertices, primitive.indices, skin);
           built.baseVertex = at.baseVertex;
           built.firstIndex = at.firstIndex;
           built.placed = true;
-          if (primitive.jointIndices) {
-            built.skinBuffer = createBuffer(this.gpu, {
-              label: `${mesh.name}[${p}].skin`,
-              data: new Uint8Array(packSkinVertices(
-                primitive.jointIndices, primitive.jointWeights, primitive.vertexCount,
-              )),
-              usage: GPUBufferUsage.VERTEX,
-            });
-          }
           if (primitive.morph) {
             built.morphBase = this.renderer.morph.allocate(primitive.morph.deltas);
             built.morphFloats = primitive.morph.deltas.length;
@@ -649,7 +642,6 @@ export class Winding {
           this.renderer.geometry.free(primitive.baseVertex, primitive.vertexCount, primitive.firstIndex, primitive.indexCount);
           primitive.placed = false;
         }
-        primitive.skinBuffer?.destroy();
         if (primitive.morphFloats > 0) {
           this.renderer.morph.free(primitive.morphBase, primitive.morphFloats);
         }

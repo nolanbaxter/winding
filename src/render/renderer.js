@@ -1931,7 +1931,7 @@ export class Renderer {
       // Slot 1 only for skinned pipelines. A pipeline declares how many vertex
       // buffers it reads, so binding this on an unskinned one is a validation
       // error rather than something harmlessly ignored.
-      if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
+      if (skinned) pass.setVertexBuffer(1, this.geometry.skinBuffer);
       pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, phase));
     }
 
@@ -2024,7 +2024,7 @@ export class Renderer {
       // A skinned mesh's influences only when they change: two runs of one
       // mesh split by something else in between still share them.
       if (skinned && primitive !== boundSkin) {
-        pass.setVertexBuffer(1, primitive.skinBuffer);
+        pass.setVertexBuffer(1, this.geometry.skinBuffer);
         boundSkin = primitive;
       }
       pass.drawIndexed(primitive.indexCount, run, primitive.firstIndex, primitive.baseVertex, gpu.opaqueCount + k);

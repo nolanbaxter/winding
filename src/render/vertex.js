@@ -30,6 +30,16 @@ export const VERTEX_COLOR_INDEX = 14;
 /** Vertex colour of an asset that has none. Multiplies to identity. */
 export const VERTEX_COLOR_WHITE = 0xffffffff;
 
+/**
+ * Positions alone, from the geometry arena's position buffer: what a pass
+ * that writes only depth reads. A shadow view of the full vertex fetched 60
+ * bytes to use 12 of them.
+ */
+export const POSITION_BUFFER_LAYOUT = {
+  arrayStride: 12,
+  attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
+};
+
 export const VERTEX_BUFFER_LAYOUT = {
   arrayStride: VERTEX_STRIDE_BYTES,
   attributes: [

@@ -1588,7 +1588,7 @@ function blendedFrame(items) {
   renderer.pipelines = { get: (v) => `pipeline:${v}` };
   renderer.drawBindGroup = 'draws';
   renderer.stats = { transparentDraws: 0 };
-  renderer.geometry = { bind: (pass) => { pass.setVertexBuffer(0, 'arena'); pass.setIndexBuffer('arena-indices', 'uint32'); } };
+  renderer.geometry = { skinBuffer: 'arena-skin', bind: (pass) => { pass.setVertexBuffer(0, 'arena'); pass.setIndexBuffer('arena-indices', 'uint32'); } };
 
   const calls = [];
   const log = (name) => (...args) => calls.push([name, ...args]);
@@ -1646,7 +1646,7 @@ test('the geometry is bound once, and a skin buffer only when a skinned mesh cha
   const vertexBinds = calls.filter((c) => c[0] === 'setVertexBuffer').map((c) => [c[1], c[2]]);
   assert.deepEqual(vertexBinds, [
     [0, 'arena'],                         // every primitive's vertices, once
-    [1, 'sb:pane'],                       // the first skinned run; the second shares it
+    [1, 'arena-skin'],                    // the first skinned run; the second shares it
   ]);
   assert.equal(draws.length, 4);
 });
@@ -1668,7 +1668,8 @@ test('primitives land one after another, a freed range is reused, and growing ca
   const a = arena.allocate(...mesh(3, 3));
   const b = arena.allocate(...mesh(4, 6));
   assert.deepEqual([a, b], [{ baseVertex: 0, firstIndex: 0 }, { baseVertex: 3, firstIndex: 3 }]);
-  assert.deepEqual(writes.at(-2), ['geometry-vertices', 3 * 60, 4 * 60], 'written at its own vertex');
+  assert.deepEqual(writes.filter((w) => w[0] === 'geometry-vertices').at(-1), ['geometry-vertices', 3 * 60, 4 * 60], 'written at its own vertex');
+  assert.equal(writes.filter((w) => w[0] === 'geometry-positions').at(-1)[1], 3 * 12, 'and its positions at the same numbering');
 
   arena.free(a.baseVertex, 3, a.firstIndex, 3);
   const c = arena.allocate(...mesh(2, 3));
@@ -1678,7 +1679,7 @@ test('primitives land one after another, a freed range is reused, and growing ca
   const d = arena.allocate(...mesh(6, 12));
   assert.equal(d.baseVertex, 7);
   assert.ok(arena.vertexCapacity >= 13 && arena.indexCapacity >= 21 && arena.revision > revision, 'grown');
-  assert.deepEqual(copies, [['geometry-vertices', 7 * 60], ['geometry-indices', 9 * 4]], 'only what had been written');
+  assert.deepEqual(copies, [['geometry-vertices', 7 * 60], ['geometry-positions', 7 * 12], ['geometry-indices', 9 * 4]], 'only what had been written');
 });
 
 console.log('\nmorph arena');

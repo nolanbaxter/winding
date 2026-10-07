@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Shadow passes read positions alone.** The geometry arena keeps every vertex's position a
+  second time, by itself, and a depth-only shadow draw reads those 12 bytes instead of the whole
+  60-byte vertex. Sponza under a turning sun, every cascade redrawn each frame: shadow passes -10%.
+  The same pixels; vertex memory +20%.
 - **Big meshes are drawn a chunk at a time.** Each mesh's triangles are boxed in runs of 128 at
   load. A strip of a scrolled shadow cascade draws only a mesh's chunks that reach it -- a strip
   is thin, and its cost was every vertex of every mesh it touched -- and a merged mesh's chunks

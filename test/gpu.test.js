@@ -383,7 +383,7 @@ export async function run(canvas, onDone) {
     if (skinnedBatches === 0) throw new Error('nothing batched as skinned');
 
     const primitive = rigged.meshes[0].primitives[0];
-    if (!primitive.skinBuffer) throw new Error('the rigged primitive has no skin vertex buffer');
+    if (!engine.renderer.geometry.skinBuffer) throw new Error('the geometry arena holds no joints and weights');
 
     // Pose a joint and confirm the bounds follow it. The mesh node never
     // moves, so a box transformed from the bind pose would be unchanged -- and
@@ -413,6 +413,48 @@ export async function run(canvas, onDone) {
     riggedNode.destroy();
     return `${skinnedBatches} skinned batch, ${palette.jointCount} joints, `
       + `bind pose identity, bounds ${beforeTop.toFixed(1)} -> ${afterTop.toFixed(1)}`;
+  });
+
+  await step('a skinned mesh past the start of the geometry arena poses as one at its start', async () => {
+    // The rigged quad, its top edge's joint lifted, in two engines: one with
+    // another mesh loaded first, so the quad's vertices sit past the arena's
+    // start. A skin buffer counted from the primitive's own first vertex was
+    // read from its place in the arena -- another mesh's joints and weights --
+    // and only a pose shows it: in the bind pose every joint is the identity.
+    const pose = async (somethingFirst) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '160px';
+      canvas.style.height = '120px';
+      document.body.appendChild(canvas);
+      const probe = await Winding.create(canvas, { antialias: false });
+      try {
+        probe.gpu.resize(160, 120);
+        const scene = probe.createScene();
+        if (somethingFirst) scene.add(await probe.load(buildFeatureGLB())).setPosition(50, 0, 0);
+        const rigged = await probe.load(buildRiggedGLB());
+        scene.add(rigged);
+        const index = scene.renderableCount - 1;
+        scene.transforms.setPosition(scene.skins[scene.renderableSkin[index]].joints[1], 0.8, 1.5, 0);
+        scene.addLight({ type: 'directional', direction: [0, 0, -1], intensity: 3 });
+        const cam = new Camera({ fovY: 1.2, near: 0.1 });
+        cam.position.set([0, 2, 6]);
+        cam.target.set([0, 2, 0]);
+        probe.renderFrame(scene, cam);
+        await probe.renderer._pipelinesBuilt();
+        probe.renderFrame(scene, cam);
+        return { px: await probe.gpu.readPixels(), base: rigged.meshes[0].primitives[0].baseVertex };
+      } finally {
+        probe.destroy();
+        canvas.remove();
+      }
+    };
+    const first = await pose(false);
+    const later = await pose(true);
+    let differ = 0;
+    for (let i = 0; i < first.px.length; i++) if (i % 4 !== 3 && Math.abs(first.px[i] - later.px[i]) > 2) differ++;
+    const report = `the quad at vertex ${first.base} and at vertex ${later.base}: ${differ} channels differ`;
+    if (later.base === 0 || differ > 0) throw new Error(report);
+    return report;
   });
 
   await step('a morph target moves the vertex the shader reads', async () => {
