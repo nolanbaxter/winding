@@ -102,6 +102,25 @@ maintain, and no far plane to tune.
 **Every call, option and setting is in the [API reference](docs/API.md)**: what it does, what it
 takes, what it returns and what it throws, with an index to look any of them up by name.
 
+## How it compares
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/compare-dark.svg">
+  <img src="docs/images/compare-light.svg" width="760" alt="Frame time in milliseconds, lower is better. Sponza with sun shadows: Winding 4.6, Three.js 2.6, Babylon.js 5.8, PlayCanvas 3.8. 10,000 moving cubes: Winding 2.7, Three.js 49, Babylon.js 10, PlayCanvas 19. 256 point lights: Winding 9.2, Three.js 6.6, Babylon.js 23, PlayCanvas 9.7.">
+</picture>
+
+The same three scenes through each engine's WebGPU renderer, in one page, taking turns. Winding is
+the fastest by far with many moving objects. With shadows it is behind Three.js and PlayCanvas, and
+with many lights behind Three.js.
+
+<sub>Intel Iris Xe, Chrome 154, 1280×720. Each number is the median of eight alternating blocks of 30
+frames, timed to the GPU finishing, averaged over two runs; Three.js r186, Babylon.js 9.29,
+PlayCanvas 2.23. Matched: four 1024×1024 shadow cascades to 40 m, ACES tone mapping, and no
+antialiasing, bloom, ambient occlusion or TAA. Not matched: Winding lights its ambient from an
+environment map where the others use a flat term, and it culls by occlusion as well as by view.
+To rerun it, serve the repository (<code>node serve.js</code>) and open
+<code>bench/compare.html?scene=sponza</code>, <code>cubes</code> or <code>lights</code>.</sub>
+
 ## Install
 
 There is no build step and there are no dependencies, so a URL is the whole install. The files you
