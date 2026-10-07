@@ -1,7 +1,16 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>engine comparison</title>
-<style>body { margin: 0; background: #111; } canvas { position: fixed; left: -10000px; top: 0; }</style>
+<style>
+body { margin: 0; background: #111; color: #e8e6e1; font: 15px/1.6 system-ui, sans-serif; }
+canvas { position: fixed; left: -10000px; top: 0; }
+#panel { max-width: 760px; margin: 40px auto; padding: 0 20px; }
+#panel h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+#panel button { font: inherit; padding: 8px 18px; border-radius: 8px; border: 1px solid #555; background: #222; color: inherit; cursor: pointer; }
+#panel table { border-collapse: collapse; margin: 12px 0; }
+#panel td, #panel th { padding: 4px 14px 4px 0; text-align: left; }
+#panel .muted { color: #9a9891; font-size: 13px; }
+</style>
 <!-- Babylon.js ships as a script, not a module. Versions pinned, so a rerun measures the same code. -->
 <script src="https://cdn.jsdelivr.net/npm/babylonjs@9.29.0/babylon.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/babylonjs-loaders@9.29.0/babylonjs.loaders.min.js"></script>
@@ -14,6 +23,7 @@
   "playcanvas": "https://cdn.jsdelivr.net/npm/playcanvas@2.23.1/build/playcanvas.min.mjs"
 } }
 </script>
+<div id="panel"></div>
 <canvas id="winding"></canvas><canvas id="three"></canvas><canvas id="babylon"></canvas><canvas id="playcanvas"></canvas>
 <script type="module">
 // Winding, Three.js, Babylon.js and PlayCanvas drawing the same scene, each
@@ -24,7 +34,12 @@
 // done, divided by 30. Whichever of CPU or GPU is slower sets it, as it sets
 // a real frame rate. No engine's own timer is used; none would agree.
 //
-//   ?scene=sponza   Sponza, a sun with 4 cascades of 2048 shadows, walking the nave
+// OPENED AS A FILE, or with no ?scene: a page that runs all three scenes twice,
+// a page load each, and shows the results, their chart, and a button that
+// copies them. Winding then comes from GitHub, through jsDelivr, at WINDING_COMMIT
+// below; served from the repository, it is the working copy's /src.
+//
+//   ?scene=sponza   Sponza, a sun with 4 cascades of 1024 shadows, walking the nave
 //   ?scene=cubes    10,000 cubes, each its own object, every one turning every frame
 //   ?scene=lights   Sponza and 256 point lights of 2.5 m reach, no shadows
 //   &rounds=8       blocks per engine; &shot=three draws one engine on screen instead;
@@ -46,7 +61,6 @@
 // ambient term, and it culls by occlusion as well as by view. Serve the repo root
 // (node serve.js) and open bench/compare.html, or run it headless:
 //   PAGE="bench/compare.html?scene=sponza" node tools/headless.mjs
-import * as WN from '/src/winding.js';
 import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
@@ -55,6 +69,160 @@ import * as pc from 'playcanvas';
 
 const W = 1280, H = 720;
 const q = new URLSearchParams(location.search);
+
+// --- the suite: every scene twice, a page load each, results kept in between ---
+/** The commit a page opened as a file measures. */
+const WINDING_COMMIT = '4a251a81f3843028e9bf9464689a68710389643a';
+const FROM_FILE = location.protocol === 'file:';
+const PLAN = ['sponza', 'cubes', 'lights', 'sponza', 'cubes', 'lights'];
+const NAMES = { sponza: 'Sponza, sun shadows', cubes: '10,000 moving cubes', lights: '256 point lights' };
+const ENGINES = ['Winding', 'Three.js', 'Babylon.js', 'PlayCanvas'];
+// What the README chart shows, from an Intel Iris Xe laptop, for comparison.
+const LAPTOP = { sponza: [4.64, 2.57, 5.83, 3.83], cubes: [2.69, 49.3, 10.06, 18.9], lights: [9.17, 6.61, 23.05, 9.74] };
+const STORE = 'winding-compare-suite';
+const load = () => { try { return JSON.parse(localStorage.getItem(STORE)) ?? { runs: [] }; } catch { return { runs: [] }; } };
+const save = (state) => { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch { /* no storage: results show at the end of each scene only */ } };
+const panel = document.getElementById('panel');
+const go = (params) => { location.search = new URLSearchParams(params).toString(); };
+
+/**
+ * What the browser will say about the machine. Not the CPU's model: no page
+ * can read that, by design. The GPU's name comes from WebGL's renderer string;
+ * WebGPU gives only a vendor and an architecture. And the adapter a page gets
+ * by default against the fast one: on a PC with graphics built into the CPU as
+ * well, the default can be the slow one, and every engine here takes the default.
+ */
+async function device() {
+  const describe = (a) => {
+    const i = a?.info ?? {};
+    return [i.vendor, i.architecture, i.device, i.description].filter(Boolean).join(' ') || (a ? 'an unnamed adapter' : 'none');
+  };
+  const standard = await navigator.gpu?.requestAdapter();
+  const fast = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+  let gpuName = 'unknown';
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    const debug = gl?.getExtension('WEBGL_debug_renderer_info');
+    gpuName = (debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl?.getParameter(gl.RENDERER)) ?? 'unknown';
+  } catch { /* no WebGL: the WebGPU names stand */ }
+  let ua = {};
+  try {
+    ua = await navigator.userAgentData?.getHighEntropyValues(['platform', 'platformVersion', 'architecture', 'bitness', 'fullVersionList']) ?? {};
+  } catch { /* not offered: the user agent string stands */ }
+  const windows = ua.platform === 'Windows' ? (Number(ua.platformVersion?.split('.')[0]) >= 13 ? 'Windows 11' : 'Windows 10') : null;
+  const browser = ua.fullVersionList?.filter((b) => !/Not.?A.?Brand|Chromium/i.test(b.brand)).map((b) => `${b.brand} ${b.version}`).join(', ');
+  // The display's refresh rate, from a second of animation frames.
+  const hz = await new Promise((resolve) => {
+    let n = 0;
+    const t0 = performance.now();
+    const tick = () => (performance.now() - t0 < 1000 ? (n++, requestAnimationFrame(tick)) : resolve(Math.round(n)));
+    requestAnimationFrame(tick);
+  });
+  // "ANGLE (NVIDIA, NVIDIA GeForce RTX 5060 Ti (0x00002D04) Direct3D11 ...)": the name in the middle.
+  const name = /^ANGLE \([^,]*, (.*?)(?: \(0x[0-9A-Fa-f]+\))?(?: Direct3D| OpenGL| Vulkan| Metal|,|\)$)/.exec(gpuName)?.[1] ?? gpuName;
+  return {
+    gpu: name,
+    gpuRenderer: gpuName,
+    webgpu: describe(standard),
+    webgpuFast: describe(fast),
+    sameAdapter: describe(standard) === describe(fast),
+    cpuThreads: navigator.hardwareConcurrency,
+    memory: navigator.deviceMemory ? `${navigator.deviceMemory} GB, as the browser rounds and caps it` : 'not reported',
+    os: windows ?? ua.platform ?? navigator.platform,
+    cpuArchitecture: ua.architecture ? `${ua.architecture} ${ua.bitness ?? ''}-bit`.trim() : 'not reported',
+    browser: browser || navigator.userAgent,
+    screen: `${screen.width}×${screen.height} at ${devicePixelRatio}× scale, about ${hz} Hz`,
+    userAgent: navigator.userAgent,
+  };
+}
+
+/** The machine, as rows for a table. */
+const statRows = (d) => [
+  ['GPU', d.gpu],
+  ['WebGPU adapter', d.sameAdapter ? d.webgpu : `${d.webgpu} by default; ${d.webgpuFast} when asked for the fast one`],
+  ['CPU', `${d.cpuThreads} threads (${d.cpuArchitecture}); a page cannot read the model`],
+  ['Memory', d.memory],
+  ['System', d.os],
+  ['Browser', d.browser],
+  ['Screen', d.screen],
+].map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('');
+
+if (!q.has('scene') && !q.has('results')) {
+  const d = await device();
+  panel.innerHTML = `<h1>Engine comparison</h1>
+    <p>Winding, Three.js, Babylon.js and PlayCanvas on the same three scenes, each through its WebGPU
+    renderer, at 1280×720, taking turns. Every scene runs twice; it takes a few minutes, and the page
+    reloads itself between scenes.</p>
+    <p>Before you start: plug the PC in, close other programs, keep this window in front, and leave the
+    mouse and keyboard alone until the results appear.</p>
+    <table>${statRows(d)}</table>
+    ${d.sameAdapter ? '' : `<p><b>Two GPUs.</b> The browser hands out the slower one by default, and every engine here takes the default, so these numbers would be that one's. In Windows, Settings &gt; System &gt; Display &gt; Graphics, set Microsoft Edge (or Chrome) to High performance, restart the browser, and open this file again.</p>`}
+    <p>${navigator.gpu ? '<button id="start">Start</button>' : '<b>This browser has no WebGPU.</b> Use a current Chrome or Edge.'}</p>
+    <p class="muted">Winding at commit ${FROM_FILE ? WINDING_COMMIT.slice(0, 7) : 'in this folder (/src)'}; Three.js r186, Babylon.js 9.29, PlayCanvas 2.23.</p>`;
+  // ?check=1: shown, and done, for a headless screenshot.
+  if (q.has('check')) { globalThis.__gpuTest = { passed: 1, failed: 0, results: [{ name: 'start', ok: true, detail: JSON.stringify(d) }] }; document.title = 'PASS 1'; }
+  document.getElementById('start')?.addEventListener('click', () => {
+    save({ device: d, started: new Date().toISOString(), runs: [] });
+    go({ scene: PLAN[0], suite: 0 });
+  });
+  await new Promise(() => {});
+}
+
+if (q.has('results')) {
+  const state = load();
+  const mean = (scene, engine) => {
+    const xs = state.runs.filter((r) => r.scene === scene && r.ms?.[engine] !== undefined).map((r) => r.ms[engine]);
+    return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN;
+  };
+  const scenes = ['sponza', 'cubes', 'lights'];
+  const failures = state.runs.filter((r) => r.error);
+  const rows = scenes.map((sc) => `<tr><th>${NAMES[sc]}</th>${ENGINES.map((e, i) => `<td>${mean(sc, e).toFixed(2)}<span class="muted"> (${LAPTOP[sc][i]})</span></td>`).join('')}</tr>`).join('');
+  const copy = { device: state.device, started: state.started, finished: new Date().toISOString(), commit: FROM_FILE ? WINDING_COMMIT : 'local', runs: state.runs };
+  panel.innerHTML = `<h1>Results</h1>
+    <table>${state.device ? statRows(state.device) : ''}</table>
+    <p>Frame time in ms, lower is better: the mean of two runs. In brackets, the laptop the README chart came from.</p>
+    <table><tr><th></th>${ENGINES.map((e) => `<th>${e}</th>`).join('')}</tr>${rows}</table>
+    ${failures.length ? `<p><b>${failures.length} run(s) failed:</b></p><pre class="muted" style="white-space:pre-wrap">${failures.map((f) => `${f.scene}: ${f.error}`).join('\n\n')}</pre>` : ''}
+    <div id="chart"></div>
+    <p><button id="copy">Copy results</button> <span id="copied" class="muted"></span></p>
+    <p class="muted">Paste them to Claude, or keep them: they hold every block's time, not only the means.
+    <button id="again">Run again</button></p>`;
+  document.getElementById('copy').addEventListener('click', async () => {
+    const text = JSON.stringify(copy, null, 1);
+    try { await navigator.clipboard.writeText(text); document.getElementById('copied').textContent = 'copied'; }
+    catch { panel.insertAdjacentHTML('beforeend', `<textarea style="width:100%;height:200px">${text}</textarea>`); }
+  });
+  document.getElementById('again').addEventListener('click', () => go({}));
+  // The chart: grouped by scene, a colour per engine, the axis cut at 25 ms as in the README.
+  const series = ['#3987e5', '#d95926', '#199e70', '#c98500'];
+  const W = 760, Hh = 360, CAP = 25, top = 60, bot = 300, left = 52, right = 740;
+  const peak = Math.max(...scenes.flatMap((sc) => ENGINES.map((e) => mean(sc, e))).filter(Number.isFinite));
+  const cap = peak > CAP ? CAP : Math.ceil(peak / 5) * 5 || 5;
+  const yOf = (v) => bot - Math.min(v, cap) / cap * (bot - top);
+  let svg = `<svg viewBox="0 0 ${W} ${Hh}" width="100%" style="max-width:${W}px" font-family="system-ui, sans-serif">`;
+  ENGINES.forEach((e, i) => { svg += `<rect x="${12 + i * 120}" y="16" width="11" height="11" rx="2" fill="${series[i]}"/><text x="${29 + i * 120}" y="26" font-size="13" fill="#c3c2b7">${e}</text>`; });
+  for (let t = 0; t <= cap; t += cap / 5) svg += `<line x1="${left}" x2="${right}" y1="${yOf(t)}" y2="${yOf(t)}" stroke="#2c2c2a"/><text x="${left - 8}" y="${yOf(t) + 4}" font-size="12" text-anchor="end" fill="#9a9891">${t}</text>`;
+  const gw = (right - left) / 3, bw = 30, gap = 3, w = 4 * bw + 3 * gap;
+  scenes.forEach((sc, si) => {
+    ENGINES.forEach((e, ei) => {
+      const v = mean(sc, e);
+      if (!Number.isFinite(v)) return;
+      const x = left + si * gw + (gw - w) / 2 + ei * (bw + gap), yt = yOf(v);
+      svg += `<path d="M${x},${bot} V${yt + 4} q0,-4 4,-4 h${bw - 8} q4,0 4,4 V${bot} Z" fill="${series[ei]}"/>`;
+      if (v > cap) svg += `<path d="M${x - 2},${yt + 20} l${bw + 4},-8 v6 l-${bw + 4},8 Z" fill="#111"/>`;
+      svg += `<text x="${x + bw / 2}" y="${yt - 6}" font-size="12" text-anchor="middle" fill="#f0efec">${v < 10 ? v.toFixed(1) : v.toFixed(0)}</text>`;
+    });
+    svg += `<text x="${left + si * gw + gw / 2}" y="${bot + 24}" font-size="13" text-anchor="middle" fill="#c3c2b7">${NAMES[sc]}</text>`;
+  });
+  svg += `<line x1="${left}" x2="${right}" y1="${bot}" y2="${bot}" stroke="#4a4a46"/></svg>`;
+  document.getElementById('chart').innerHTML = svg;
+  if (q.has('check')) { globalThis.__gpuTest = { passed: 1, failed: 0, results: [{ name: 'results', ok: true, detail: `${state.runs.length} runs` }] }; document.title = 'PASS 1'; }
+  await new Promise(() => {});
+}
+
+const SUITE = q.has('suite') ? Number(q.get('suite')) : -1;
+if (SUITE >= 0) panel.innerHTML = `<h1>Running ${SUITE + 1} of ${PLAN.length}</h1><p>${NAMES[q.get('scene')] ?? ''}: loading, then timing. Leave this window in front.</p>`;
+const WN = await import(FROM_FILE ? `https://cdn.jsdelivr.net/gh/nolanbaxter/winding@${WINDING_COMMIT}/src/winding.js` : '/src/winding.js');
 const SCENE = q.get('scene') ?? 'sponza';
 const ROUNDS = Number(q.get('rounds') ?? 8);
 const SHOT = q.get('shot');
@@ -384,6 +552,13 @@ const step = (what, promise) => { return Promise.race([promise, new Promise((_, 
 const report = (detail, ok = true) => {
   globalThis.__gpuTest = { passed: ok ? 1 : 0, failed: ok ? 0 : 1, results: [{ name: `compare ${SCENE}`, ok, detail }] };
   document.title = ok ? 'PASS 1' : 'FAIL 1';
+  // In the suite: keep this scene's result, and on to the next, or to the results.
+  if (SUITE >= 0) {
+    const state = load();
+    state.runs.push(ok ? { scene: SCENE, ...globalThis.compareResult } : { scene: SCENE, error: detail });
+    save(state);
+    setTimeout(() => go(SUITE + 1 < PLAN.length ? { scene: PLAN[SUITE + 1], suite: SUITE + 1 } : { results: 1 }), 500);
+  }
 };
 try {
   const makers = { winding, three, babylon, playcanvas };
