@@ -1430,6 +1430,8 @@ export class ShadowMaps {
    */
   _encodeView(pass, bindGroup, offset, cull = null, at = 0) {
     const gpu = this._gpu;
+    // Every caster's geometry, bound once for the view.
+    this.geometry.bind(pass);
     const casts = (b) => cull === null || boxInOrtho(this._batchBoxes, b * 6, cull, at);
     pass.setBindGroup(GROUP_FRAME, bindGroup, [offset]);
     this.pipelineLayout.bindEmptyGroups(pass);
@@ -1461,9 +1463,7 @@ export class ShadowMaps {
         pass.setPipeline(this._pipelines.get(this.descriptors[variant]));
         boundVariant = variant;
       }
-      pass.setVertexBuffer(0, primitive.vertexBuffer);
       if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
       this._drawBatch(pass, gpu, b, primitive);
     }
     if (alpha) this._encodeAlphaCasters(pass, gpu, materials, casts);
@@ -1479,7 +1479,7 @@ export class ShadowMaps {
       pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, CULL_SHADOW));
     } else {
       pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
-      pass.drawIndexed(primitive.indexCount, gpu.batchSize[b]);
+      pass.drawIndexed(primitive.indexCount, gpu.batchSize[b], primitive.firstIndex, primitive.baseVertex);
     }
   }
 
@@ -1494,9 +1494,7 @@ export class ShadowMaps {
         pass.setBindGroup(GROUP_MATERIAL, materials.bindGroup(material));
         boundMaterial = material;
       }
-      pass.setVertexBuffer(0, primitive.vertexBuffer);
       if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
     };
 
     for (let b = 0; b < gpu.batchCount; b++) {
@@ -1523,7 +1521,7 @@ export class ShadowMaps {
         && casters[k + run].material === material && casters[k + run].skinned === skinned
         && (!gpu.hasLod || selected[k + run] === 1)) run++;
       draw(true, skinned, material, primitive);
-      pass.drawIndexed(primitive.indexCount, run, 0, 0, gpu.opaqueCount + k);
+      pass.drawIndexed(primitive.indexCount, run, primitive.firstIndex, primitive.baseVertex, gpu.opaqueCount + k);
       k += run;
     }
   }

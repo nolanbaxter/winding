@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every mesh's geometry lives in one arena.** One vertex buffer and one index buffer for every
+  primitive loaded, where each had its own; a pass binds them once instead of per batch, and a
+  freed range is reused by the next load. Groundwork for drawing many meshes in one call.
+- **Identical materials are one material.** A material identical to one already loaded -- every
+  factor but its name, and the same textures -- shares its id, so the same asset loaded many
+  times is one material, not one each. A material an animation drives is never shared.
 - **Off means off: bloom at strength 0 draws none of its passes.** A strength of 0 mixed no bloom
   in, but its nine passes were drawn all the same: 0.36 ms a frame at 720p on Iris Xe.
 - **A scene with no point or spot lights skips their loop.** The shader that loops over them is

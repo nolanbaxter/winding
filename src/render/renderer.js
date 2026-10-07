@@ -49,6 +49,7 @@ import { RenderGraph, CANVAS } from './graph.js';
 import { GpuProfiler } from './timing.js';
 import { SkinPalette } from './skin.js';
 import { MorphStore } from './morph.js';
+import { GeometryArena } from './geometry.js';
 import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { Upscaler, MIN_RESOLUTION } from './upscale.js';
@@ -415,6 +416,8 @@ export class Renderer {
     this.skinPalette = new SkinPalette(rhi);
     /** Morph deltas (static, per primitive) and weights (per frame, per instance). */
     this.morph = new MorphStore(rhi);
+    /** Every primitive's vertices and indices, in two buffers: see geometry.js. */
+    this.geometry = new GeometryArena(rhi);
     this._paletteRevision = 0;
 
     /**
@@ -496,6 +499,8 @@ export class Renderer {
     this.shadows = await ShadowMaps.create(
       this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout,
     );
+    // The casters' geometry, which the shadow passes bind as the forward ones do.
+    this.shadows.geometry = this.geometry;
     this.skyboxPass = await SkyboxPass.create(this.rhi, this.pipelines, null);
     // Asked for at creation: ready for the first frame, as they always were.
     const asked = (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
@@ -1740,6 +1745,7 @@ export class Renderer {
     this.directionalBuffer.destroy();
     this.skinPalette.destroy();
     this.morph.destroy();
+    this.geometry.destroy();
     this.skyboxPass.destroy();
     this.skyboxPassAO?.destroy();
     this.opaqueCopy.destroy();
@@ -1856,6 +1862,8 @@ export class Renderer {
     const gpu = this.gpu;
     let boundPipeline = null;
     let boundMaterial = -1;
+    // Every primitive's geometry, bound once for the whole pass.
+    this.geometry.bind(pass);
 
     // One call per batch, not per object, and the instance count inside each
     // one was written by the compute shader. A fully culled batch still costs a
@@ -1881,12 +1889,10 @@ export class Renderer {
       }
 
       pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.batchOffset(b, phase)]);
-      pass.setVertexBuffer(0, primitive.vertexBuffer);
       // Slot 1 only for skinned pipelines. A pipeline declares how many vertex
       // buffers it reads, so binding this on an unskinned one is a validation
       // error rather than something harmlessly ignored.
       if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-      pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
       pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, phase));
     }
 
@@ -1929,9 +1935,10 @@ export class Renderer {
     if (transparentCount === 0) return;
 
     pass.setBindGroup(GROUP_DRAW, this.drawBindGroup, [gpu.transparentBatchOffset()]);
+    // Its own pass, for OIT and transmission: the geometry bound here too.
+    this.geometry.bind(pass);
 
-    let boundPrimitive = null;
-    let boundSkinned = false;
+    let boundSkin = null;
     let k = 0;
     while (k < transparentCount) {
       const i = payloads[k];
@@ -1966,16 +1973,13 @@ export class Renderer {
         pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(materialId));
         boundMaterial = materialId;
       }
-      // Buffers too only when they change: two runs of one mesh split by
-      // something else in between still share them.
-      if (primitive !== boundPrimitive || skinned !== boundSkinned) {
-        pass.setVertexBuffer(0, primitive.vertexBuffer);
-        if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
-        pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
-        boundPrimitive = primitive;
-        boundSkinned = skinned;
+      // A skinned mesh's influences only when they change: two runs of one
+      // mesh split by something else in between still share them.
+      if (skinned && primitive !== boundSkin) {
+        pass.setVertexBuffer(1, primitive.skinBuffer);
+        boundSkin = primitive;
       }
-      pass.drawIndexed(primitive.indexCount, run, 0, 0, gpu.opaqueCount + k);
+      pass.drawIndexed(primitive.indexCount, run, primitive.firstIndex, primitive.baseVertex, gpu.opaqueCount + k);
       this.stats.transparentDraws++;
       k += run;
     }

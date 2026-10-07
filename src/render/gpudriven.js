@@ -885,8 +885,9 @@ export class GpuDriven {
         const o = (phase * this.batchCapacity + b) * 5;
         this.indirectData[o] = primitive.indexCount;
         this.indirectData[o + 1] = 0;
-        this.indirectData[o + 2] = 0;
-        this.indirectData[o + 3] = 0;
+        // Where the primitive starts in the geometry arena.
+        this.indirectData[o + 2] = primitive.firstIndex;
+        this.indirectData[o + 3] = primitive.baseVertex;
         this.indirectData[o + 4] = 0;
       }
     }

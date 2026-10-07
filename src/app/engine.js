@@ -473,12 +473,17 @@ export class Winding {
 
     try {
       // Materials first: a primitive needs its material id before it can be
-      // turned into something the draw list can sort.
-      for (const material of model.materials) {
-        asset.materialIds.push(
-          this.renderer.materials.register(material, textures.texturesFor(material)),
-        );
+      // turned into something the draw list can sort. Shared with an identical
+      // one already loaded (see MaterialRegistry.share), unless a clip drives it.
+      const animated = new Set();
+      for (const animation of model.animations ?? []) {
+        for (const channel of animation.channels) if (channel.kind === 'material') animated.add(channel.index);
       }
+      model.materials.forEach((material, m) => {
+        const registry = this.renderer.materials;
+        const bound = textures.texturesFor(material);
+        asset.materialIds.push(animated.has(m) ? registry.register(material, bound) : registry.share(material, bound));
+      });
 
       // Every image that was going to be uploaded now has been, so the decoded
       // copies are dead weight. An ImageBitmap holds native memory the collector
@@ -498,8 +503,10 @@ export class Winding {
         });
         mesh.primitives.forEach((primitive, p) => {
           const built = {
-            vertexBuffer: null,
-            indexBuffer: null,
+            // Where its vertices and indices sit in the geometry arena.
+            baseVertex: 0,
+            firstIndex: 0,
+            vertexCount: primitive.vertexCount,
             /** Whether this primitive carries influences. The scene reads this. */
             skinned: primitive.jointIndices != null,
             // Null unless the mesh is rigged. A second vertex buffer, bound at
@@ -541,16 +548,10 @@ export class Winding {
           };
           primitives.push(built);
 
-          built.vertexBuffer = createBuffer(this.gpu, {
-            label: `${mesh.name}[${p}].vertices`,
-            data: primitive.vertices,
-            usage: GPUBufferUsage.VERTEX,
-          });
-          built.indexBuffer = createBuffer(this.gpu, {
-            label: `${mesh.name}[${p}].indices`,
-            data: primitive.indices,
-            usage: GPUBufferUsage.INDEX,
-          });
+          const at = this.renderer.geometry.allocate(primitive.vertices, primitive.indices);
+          built.baseVertex = at.baseVertex;
+          built.firstIndex = at.firstIndex;
+          built.placed = true;
           if (primitive.jointIndices) {
             built.skinBuffer = createBuffer(this.gpu, {
               label: `${mesh.name}[${p}].skin`,
@@ -641,8 +642,10 @@ export class Winding {
     asset.unloaded = true;
     for (const mesh of asset.meshes) {
       for (const primitive of mesh.primitives) {
-        primitive.vertexBuffer?.destroy();
-        primitive.indexBuffer?.destroy();
+        if (primitive.placed) {
+          this.renderer.geometry.free(primitive.baseVertex, primitive.vertexCount, primitive.firstIndex, primitive.indexCount);
+          primitive.placed = false;
+        }
         primitive.skinBuffer?.destroy();
         if (primitive.morphFloats > 0) {
           this.renderer.morph.free(primitive.morphBase, primitive.morphFloats);

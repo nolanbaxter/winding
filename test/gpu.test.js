@@ -3739,7 +3739,19 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   await step('a load that fails part way gives back what it had built', async () => {
     const realEnsure = engine.renderer.ensureVariants;
     engine.renderer.ensureVariants = () => Promise.reject(new Error('forced'));
-    const freeBefore = engine.renderer.materials._free.length;
+    // Which ids are live, and how many hold each: materials are shared with an
+    // identical one already loaded, so the demo's may be held by its earlier copy.
+    const registry = engine.renderer.materials;
+    const live = () => {
+      const free = new Set(registry._free);
+      const ids = [];
+      for (let id = 0; id < registry.count; id++) if (!free.has(id)) ids.push(`${id}x${registry._holders[id] ?? 1}`);
+      return ids.join(' ');
+    };
+    const before = live();
+    const countBefore = registry.count;
+    const arena = () => `${engine.renderer.geometry._vertices.end} vertices, ${engine.renderer.geometry._indices.end} indices`;
+    const arenaBefore = arena();
     try {
       await engine.load(await buildDemoGLB({ arms: 2 }));
       throw new Error('the forced failure did not surface');
@@ -3748,9 +3760,10 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     } finally {
       engine.renderer.ensureVariants = realEnsure;
     }
-    const returned = engine.renderer.materials._free.length - freeBefore;
-    if (returned !== 3) throw new Error(`${returned} material ids came back, expected the demo's 3`);
-    return 'buffers, textures and 3 material ids freed';
+    const after = live();
+    if (after !== before) throw new Error(`material ids held before: ${before}; after the failed load: ${after}`);
+    if (arena() !== arenaBefore) throw new Error(`the geometry arena held ${arenaBefore} before and ${arena()} after`);
+    return `buffers, textures and material ids given back: ${registry.count - countBefore} minted and freed, the rest let go`;
   });
 
   await step('the device is asked for what the adapter has, not the defaults', async () => {

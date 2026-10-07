@@ -203,7 +203,7 @@ test('two allocations from one hole do not overlap, and each is written', () => 
   const y = store.allocate(new Float32Array(10));
   assert.deepEqual([x, y], [0, 10], 'side by side, not on top of each other');
   assert.deepEqual(rhi.log.writes.map((w) => w.offset), [0, 40], 'both uploaded, in bytes');
-  assert.equal(store._holes.length, 0, 'an exact fit leaves no empty hole behind');
+  assert.equal(store._ranges._holes.length, 0, 'an exact fit leaves no empty hole behind');
 });
 
 test('growing the arena copies every byte and says it moved', () => {
@@ -230,7 +230,7 @@ test('freed holes merge whichever order they come back in', () => {
   store.allocate(new Float32Array(10));
   store.free(b, 10);
   store.free(a, 10);
-  assert.deepEqual(store._holes, [{ base: 0, length: 20 }]);
+  assert.deepEqual(store._ranges._holes, [{ base: 0, length: 20 }]);
 });
 
 test('target count and stride pack into one word, and 65536 targets do not', () => {
@@ -289,6 +289,23 @@ test('a released id is reused, and its textures are let go', () => {
   assert.equal(registry.bindGroups[id], undefined);
   assert.equal(registry._textures[id], undefined);
   assert.equal(registry.register(MATERIAL), id);
+});
+
+test('identical materials share one id, freed when the last holder lets go', () => {
+  const registry = new MaterialRegistry(fakeRhi(), { capacity: 8 });
+  const texture = { createView: () => ({}) };
+  const a = registry.share({ ...MATERIAL, name: 'first' }, { baseColor: texture });
+  const b = registry.share({ ...MATERIAL, name: 'second' }, { baseColor: texture });
+  const otherTexture = registry.share(MATERIAL, { baseColor: { createView: () => ({}) } });
+  const otherFactor = registry.share({ ...MATERIAL, roughness: 0.25 }, { baseColor: texture });
+  assert.equal(a, b, 'a name is not a difference');
+  assert.notEqual(otherTexture, a, 'another texture is');
+  assert.notEqual(otherFactor, a, 'and so is a factor');
+  registry.release(a);
+  assert.notEqual(registry.bindGroups[b], undefined, 'still held by the second');
+  registry.release(b);
+  assert.equal(registry.bindGroups[b], undefined, 'freed with the last');
+  assert.notEqual(registry.share({ ...MATERIAL, name: 'third' }, { baseColor: texture }), otherTexture, 'and no longer shared');
 });
 
 test('an animated material uploads again, unless its id went to another asset', () => {
