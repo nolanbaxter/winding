@@ -42,7 +42,8 @@ import { vec3Create, vec3Normalize } from '../core/math/vec3.js';
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW } from '../rhi/bindgroups.js';
 import { ALPHA_MASK, MATERIAL_WGSL, VARIANT_DOUBLE_SIDED } from './material.js';
-import { CULL_SHADOW } from './gpudriven.js';
+import { CULL_SHADOW, NOT_BATCHED } from './gpudriven.js';
+import { boxInOrtho } from '../scene/bounds.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
 import { VERTEX_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 import { createBuffer } from '../rhi/buffer.js';
@@ -500,6 +501,7 @@ export class ShadowMaps {
     this.rhi = rhi;
     this.size = size;
     this.cascadeCount = cascades;
+    this._batchBoxes = new Float32Array(0);
     /**
      * Cascades fitted this frame. Zero when there is no sun to fit them to,
      * which is what keeps the shadow passes off the graph entirely.
@@ -1170,9 +1172,49 @@ export class ShadowMaps {
     }
   }
 
+  /**
+   * Each batch's casters as one world box, min xyz then max xyz: what a
+   * cascade tests before drawing the batch. Rebuilt when the batches are, or
+   * when what moved was not listed; otherwise grown by the renderables that
+   * moved (`items`, Scene.movedRenderables). Too big costs a draw the GPU
+   * clips away; it never loses a shadow. Skins and morphs move boxes without
+   * moving nodes, so a scene with either rebuilds every frame.
+   */
+  boundBatches(scene, gpu, items, anyMoved) {
+    const count = gpu.batchCount;
+    const rebuild = this._boxedScene !== scene || this._boxedRevision !== gpu.sceneRevision
+      || (anyMoved && items === null) || scene.skins.length > 0 || scene.morphs.length > 0;
+    const { worldMin, worldMax } = scene;
+    const grow = (b, i) => {
+      const k = b * 6, o = i * 3, box = this._batchBoxes;
+      for (let a = 0; a < 3; a++) {
+        if (worldMin[o + a] < box[k + a]) box[k + a] = worldMin[o + a];
+        if (worldMax[o + a] > box[k + 3 + a]) box[k + 3 + a] = worldMax[o + a];
+      }
+    };
+    if (rebuild) {
+      if (this._batchBoxes.length < count * 6) this._batchBoxes = new Float32Array(count * 6);
+      for (let b = 0; b < count; b++) {
+        this._batchBoxes.fill(Infinity, b * 6, b * 6 + 3);
+        this._batchBoxes.fill(-Infinity, b * 6 + 3, b * 6 + 6);
+        const first = gpu.batchFirst[b];
+        for (let k = 0; k < gpu.batchSize[b]; k++) grow(b, gpu.batchOrder[first + k]);
+      }
+      this._boxedScene = scene;
+      this._boxedRevision = gpu.sceneRevision;
+    } else if (anyMoved) {
+      for (const i of items) if (gpu.itemBatch[i] !== NOT_BATCHED) grow(gpu.itemBatch[i], i);
+    }
+  }
+
   /** Every caster, into one view: a cascade or a point or spot light's. */
   _encodeView(pass, bindGroup, offset) {
     const gpu = this._gpu;
+    // A cascade draws only the batches whose box reaches into it: anything
+    // else the GPU would transform and clip, all of it, cascade after cascade.
+    // Point and spot views are perspective, which this test is not.
+    const at = bindGroup === this.cascadeBindGroup ? (offset / this.alignment) * 16 : -1;
+    const casts = (b) => at < 0 || boxInOrtho(this._batchBoxes, b * 6, this.matrices, at);
     pass.setBindGroup(GROUP_FRAME, bindGroup, [offset]);
     this.pipelineLayout.bindEmptyGroups(pass);
     // Batches arrive sorted by pipeline, so these come in runs and this
@@ -1183,16 +1225,16 @@ export class ShadowMaps {
     // instance count is simply the batch size and the shader walks the static
     // batch-ordered list rather than the compacted one.
     //
-    // ponytail: every caster is still drawn into every cascade. Proper CSM runs
-    // the cull compute once per cascade against its own ortho box, which needs
-    // a six-plane frustum -- the extraction in frustum.js assumes a perspective
-    // matrix and produces five.
+    // ponytail: culled a batch at a time, by the box around all its casters.
+    // A batch of many instances spread wide still draws all of them into a
+    // cascade that one reaches; per-instance needs the cull compute per cascade.
     // Depth-only casters first. The alpha ones bind a material in group 2,
     // where these pipelines expect the empty group, so they come after.
     const materials = gpu.materials;
     const alpha = this.alphaDescriptors.length > 0;
     for (let b = 0; b < gpu.batchCount; b++) {
       if (alpha && materials.alphaModes[gpu.batchMaterial[b]] === ALPHA_MASK) continue;
+      if (!casts(b)) continue;
       const primitive = gpu.batchPrimitive[b];
       const skinned = gpu.batchSkinned[b];
       // Both sides for a double-sided material, and for an open surface:
@@ -1208,7 +1250,7 @@ export class ShadowMaps {
       pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
       this._drawBatch(pass, gpu, b, primitive);
     }
-    if (alpha) this._encodeAlphaCasters(pass, gpu, materials);
+    if (alpha) this._encodeAlphaCasters(pass, gpu, materials, casts);
   }
 
   /**
@@ -1226,7 +1268,7 @@ export class ShadowMaps {
   }
 
   /** MASK batches, then blended items, each shaped by its material's alpha. */
-  _encodeAlphaCasters(pass, gpu, materials) {
+  _encodeAlphaCasters(pass, gpu, materials, casts) {
     let bound = null;
     let boundMaterial = -1;
     const draw = (hashed, skinned, material, primitive) => {
@@ -1243,7 +1285,7 @@ export class ShadowMaps {
 
     for (let b = 0; b < gpu.batchCount; b++) {
       const material = gpu.batchMaterial[b];
-      if (materials.alphaModes[material] !== ALPHA_MASK) continue;
+      if (materials.alphaModes[material] !== ALPHA_MASK || !casts(b)) continue;
       const primitive = gpu.batchPrimitive[b];
       draw(false, gpu.batchSkinned[b] === 1, material, primitive);
       this._drawBatch(pass, gpu, b, primitive);

@@ -1143,6 +1143,7 @@ export class Renderer {
     // from other eyes into the same layers, and then once more after it.
     changes.all = target !== null || materialsChanged || this.gpu.hasLod
       || this._shadowCacheScene !== scene || this._shadowCacheRevision !== scene.revision;
+    this.shadows.boundBatches(scene, this.gpu, items, anyMoved);
     this.shadows.update(camera, scene, changes);
     this.shadows.updateLocal(scene, camera, changes);
     this._shadowCacheScene = scene;

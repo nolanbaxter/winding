@@ -16,7 +16,7 @@ import {
 } from '../src/render/shadows.js';
 import { Scene, LIGHT_FLOATS, DIRECTIONAL_FLOATS } from '../src/scene/scene.js';
 import { frustumCreate } from '../src/core/math/frustum.js';
-import { farthestDistance, BoxList } from '../src/scene/bounds.js';
+import { farthestDistance, BoxList, boxInOrtho } from '../src/scene/bounds.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -43,6 +43,18 @@ function orthoNdc(m, x, y, z) {
 // --------------------------------------------------- orthographic reverse-Z
 
 console.log('\northographic reverse-Z');
+
+test('a cascade skips exactly the boxes the GPU would clip', () => {
+  // Looking down -z from the origin: x and y in [-10, 10], depth 1 to 100.
+  const m = mat4OrthographicReverseZ(mat4Create(), -10, 10, -10, 10, 1, 100);
+  const inside = (...box) => boxInOrtho(Float32Array.from(box), 0, m, 0);
+  assert.equal(inside(0, 0, -5, 1, 1, -4), true, 'well inside');
+  assert.equal(inside(9, 0, -5, 12, 1, -4), true, 'across the edge');
+  assert.equal(inside(20, 0, -5, 22, 1, -4), false, 'off to the side');
+  assert.equal(inside(0, 0, 0, 1, 1, 0.5), false, 'in front of the near plane');
+  assert.equal(inside(0, 0, -200, 1, 1, -150), false, 'past the far plane');
+  assert.equal(inside(0, 0, -150, 1, 1, 0.5), true, 'through the whole depth');
+});
 
 test('near maps to 1 and far maps to 0', () => {
   const m = mat4OrthographicReverseZ(mat4Create(), -10, 10, -10, 10, 1, 100);

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Each sun cascade draws only the casters that reach it.** Every caster went into every cascade,
+  to be transformed and clipped away by the GPU; now a batch whose box lies outside a cascade is
+  not drawn into it. The same shadows. A town of 900 separate buildings: shadow passes 0.40 ->
+  0.22 ms a frame. Sponza, whose cost is a few large meshes every cascade reaches, is unchanged.
+
 ## [1.5.0] - 2026-10-06
 
 **Faster where it was slow, measured.** A speed audit of the engine against other engines'

@@ -9,6 +9,26 @@ import { aabbTransform } from '../core/math/aabb.js';
 import { handleIndex } from '../core/handle.js';
 
 /** Boxes, six floats each (min then max), in a buffer that grows. */
+/**
+ * Whether the box at data[k..k+6] (min xyz, max xyz) reaches into the view of
+ * the orthographic matrix at m[o..o+16]: its clip-space box overlaps x and y
+ * in [-1, 1] and z in [0, 1]. Anything it rules out, the GPU would clip.
+ */
+export function boxInOrtho(data, k, m, o) {
+  const d = data;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (let corner = 0; corner < 8; corner++) {
+    const x = d[k + (corner & 1 ? 3 : 0)], y = d[k + 1 + (corner & 2 ? 3 : 0)], z = d[k + 2 + (corner & 4 ? 3 : 0)];
+    const cx = m[o] * x + m[o + 4] * y + m[o + 8] * z + m[o + 12];
+    const cy = m[o + 1] * x + m[o + 5] * y + m[o + 9] * z + m[o + 13];
+    const cz = m[o + 2] * x + m[o + 6] * y + m[o + 10] * z + m[o + 14];
+    if (cx < x0) x0 = cx; if (cx > x1) x1 = cx;
+    if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
+    if (cz < z0) z0 = cz; if (cz > z1) z1 = cz;
+  }
+  return x1 >= -1 && x0 <= 1 && y1 >= -1 && y0 <= 1 && z1 >= 0 && z0 <= 1;
+}
+
 export class BoxList {
   constructor() {
     this.data = new Float32Array(6 * 64);
@@ -35,20 +55,7 @@ export class BoxList {
    * [0, 1]? Its eight corners' extent in clip space, against that.
    */
   touchesOrtho(matrix, offset = 0) {
-    const d = this.data, m = matrix, o = offset;
-    for (let k = 0; k < this.count * 6; k += 6) {
-      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
-      for (let corner = 0; corner < 8; corner++) {
-        const x = d[k + (corner & 1 ? 3 : 0)], y = d[k + 1 + (corner & 2 ? 3 : 0)], z = d[k + 2 + (corner & 4 ? 3 : 0)];
-        const cx = m[o] * x + m[o + 4] * y + m[o + 8] * z + m[o + 12];
-        const cy = m[o + 1] * x + m[o + 5] * y + m[o + 9] * z + m[o + 13];
-        const cz = m[o + 2] * x + m[o + 6] * y + m[o + 10] * z + m[o + 14];
-        if (cx < x0) x0 = cx; if (cx > x1) x1 = cx;
-        if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
-        if (cz < z0) z0 = cz; if (cz > z1) z1 = cz;
-      }
-      if (x1 >= -1 && x0 <= 1 && y1 >= -1 && y0 <= 1 && z1 >= 0 && z0 <= 1) return true;
-    }
+    for (let k = 0; k < this.count * 6; k += 6) if (boxInOrtho(this.data, k, matrix, offset)) return true;
     return false;
   }
 
