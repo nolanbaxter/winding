@@ -226,7 +226,7 @@ ${Array.from({ length: extensionSlots }, (_, i) => `@group(2) @binding(${EXTENSI
 @group(3) @binding(0) var<uniform> batch : Batch;
 
 struct VertexOut {
-  @builtin(position) clip     : vec4<f32>,
+  @builtin(position) @invariant clip : vec4<f32>,
   @location(0)       world    : vec3<f32>,
   @location(1)       normal   : vec3<f32>,
   @location(2)       tangent  : vec3<f32>,
@@ -1586,6 +1586,10 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // infinity to spread as NaN. One min per fragment, so it stays.
   return vec4<f32>(min(direct + ambient + emissive, vec3<f32>(65504.0)), sampled.a);
 }
+
+/** The merged groups' depth prepass: depth only, the targets masked off. */
+@fragment
+fn fsDepth() {}
 
 @fragment
 fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) vec4<f32> {

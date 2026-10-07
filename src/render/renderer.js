@@ -27,7 +27,7 @@ import { handleIndex } from '../core/handle.js';
 import { DIRECTIONAL_FLOATS } from '../scene/scene.js';
 
 import {
-  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND,
+  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND, ALPHA_OPAQUE,
 } from './material.js';
 import { pbrShader, FRAME_BYTES } from './shaders/pbr.js';
 import { SHEEN_ALBEDO } from './sheen.js';
@@ -668,9 +668,24 @@ export class Renderer {
     let merged = this._merged.get(descriptor);
     if (!merged) {
       merged = { ...descriptor, label: `${descriptor.label}:merged`, vertexEntry: 'vsMerged', buffers: [] };
+      // An opaque group's depth is drawn first, by the prepass below, so its
+      // shading draw only has to match it: each pixel shades once.
+      if ((variant & 3) === ALPHA_OPAQUE) {
+        merged.prepass = {
+          ...merged, label: `${descriptor.label}:merged-depth`, fragmentEntry: 'fsDepth',
+          targets: descriptor.targets.map((t) => ({ format: t.format, writeMask: 0 })),
+        };
+        merged.depth = { ...descriptor.depth, depthCompare: 'greater-equal', depthWriteEnabled: false };
+      }
       this._merged.set(descriptor, merged);
     }
     return merged;
+  }
+
+  /** A merged group's shading descriptor, from its material and winding. */
+  _mergedFor(material, mirrored) {
+    const variant = this.materials.variants[material];
+    return this._mergedDescriptor(this._pipelineByVariant.get(variant | (mirrored ? VARIANT_MIRRORED : 0)), variant);
   }
 
   /** The module and layout a variant's pipelines use; see extendedPipelineLayout. */
@@ -712,6 +727,7 @@ export class Renderer {
       pending.push(descriptor);
       const merged = this._mergedDescriptor(descriptor, variant);
       if (merged !== null) pending.push(merged);
+      if (merged?.prepass) pending.push(merged.prepass);
     }
     await this.pipelines.warm(pending);
     if (features & FEATURE_OIT) await this._ensureOitVariants(wanted, features);
@@ -1899,6 +1915,17 @@ export class Renderer {
     const gpu = this.gpu;
     let boundPipeline = null;
     let boundMaterial = -1;
+    // The merged groups' depth, before anything shades: see _mergedDescriptor.
+    // First, as it binds the merged index list, which the arena's binding replaces.
+    if (phase === 0) {
+      this.merged.encode(pass, this.drawLayout, GROUP_DRAW,
+        (material, mirrored) => {
+          const prepass = this._mergedFor(material, mirrored).prepass;
+          return prepass ? this.pipelines.get(prepass) : null;
+        },
+        (material) => pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(material)));
+    }
+
     // Every primitive's geometry, bound once for the whole pass.
     this.geometry.bind(pass);
 
@@ -1939,9 +1966,7 @@ export class Renderer {
     // they are drawn whenever in view, and the late phase has none of them.
     if (phase === 0) {
       this.merged.encode(pass, this.drawLayout, GROUP_DRAW,
-        (material, mirrored) => this.pipelines.get(this._mergedDescriptor(
-          this._pipelineByVariant.get(this.materials.variants[material] | (mirrored ? VARIANT_MIRRORED : 0)),
-          this.materials.variants[material])),
+        (material, mirrored) => this.pipelines.get(this._mergedFor(material, mirrored)),
         (material) => pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(material)));
       return;
     }

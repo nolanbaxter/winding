@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Merged meshes draw their depth first.** With no depth prepass, a pixel's cost depended on draw
+  order: a surface drawn before the wall in front of it was shaded and then covered. The opaque
+  merged groups now draw depth alone first, and then shade only where they match it, so every
+  pixel they cover shades once, whatever the order; other opaque meshes test against that depth
+  too. Sponza walking the nave: main pass -19%, GPU -16%; with 256 point lights, the main pass
+  -29% to -34%. A town of 900 buildings, one group: no measurable cost. The same pixels, but for
+  one in 900,000 where two surfaces meet at exactly equal depth. GPUs that hide overdraw in
+  hardware (Apple's) gain nothing from it and pay its depth draw; unmeasured.
 - **Shadow passes read positions alone.** The geometry arena keeps every vertex's position a
   second time, by itself, and a depth-only shadow draw reads those 12 bytes instead of the whole
   60-byte vertex. Sponza under a turning sun, every cascade redrawn each frame: shadow passes -10%.

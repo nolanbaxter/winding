@@ -471,7 +471,9 @@ export class MergedDraws {
     pass.setIndexBuffer(this._buffers.indices, 'uint32');
     for (let g = 0; g < this.groupCount; g++) {
       const group = this.groups[g];
-      pass.setPipeline(pipelineFor(group.material, group.mirrored));
+      const pipeline = pipelineFor(group.material, group.mirrored);
+      if (pipeline === null) continue;
+      pass.setPipeline(pipeline);
       bindMaterial(group.material);
       pass.setBindGroup(groupDraw, drawGroup, [g * this.alignment]);
       pass.drawIndexedIndirect(this._buffers.args, g * ARGS_WORDS * 4);
