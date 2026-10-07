@@ -1,0 +1,416 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>engine comparison</title>
+<style>body { margin: 0; background: #111; } canvas { position: fixed; left: -10000px; top: 0; }</style>
+<!-- Babylon.js ships as a script, not a module. Versions pinned, so a rerun measures the same code. -->
+<script src="https://cdn.jsdelivr.net/npm/babylonjs@9.29.0/babylon.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/babylonjs-loaders@9.29.0/babylonjs.loaders.min.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.min.js",
+  "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.min.js",
+  "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.tsl.min.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+  "playcanvas": "https://cdn.jsdelivr.net/npm/playcanvas@2.23.1/build/playcanvas.min.mjs"
+} }
+</script>
+<canvas id="winding"></canvas><canvas id="three"></canvas><canvas id="babylon"></canvas><canvas id="playcanvas"></canvas>
+<script type="module">
+// Winding, Three.js, Babylon.js and PlayCanvas drawing the same scene, each
+// through its WebGPU renderer, at the same size, in ONE page, in alternating
+// blocks -- so whatever the machine is doing lands on all four alike.
+//
+// The number is the frame: 30 frames submitted back to back until the GPU is
+// done, divided by 30. Whichever of CPU or GPU is slower sets it, as it sets
+// a real frame rate. No engine's own timer is used; none would agree.
+//
+//   ?scene=sponza   Sponza, a sun with 4 cascades of 2048 shadows, walking the nave
+//   ?scene=cubes    10,000 cubes, each its own object, every one turning every frame
+//   ?scene=lights   Sponza and 256 point lights of 2.5 m reach, no shadows
+//   &rounds=8       blocks per engine; &shot=three draws one engine on screen instead;
+//   &only=winding,three  times only those; &gpu=1 adds GPU timestamps as a check
+//
+// Each engine is used as its documentation says to for the job: Three.js's
+// cascaded shadow node and clustered lighting, Babylon's cascaded shadow generator
+// and clustered light container, PlayCanvas's clustered lighting (its
+// default).
+//
+// MATCHED, so the work is the same, not just the scene:
+//   shadows      4 cascades of 1024 x 1024 each, out to 40 m, split at 0.5
+//                (PlayCanvas's "2048" is the atlas the four share), each
+//                engine's own default filtering
+//   tone mapping ACES in all four
+//   off          MSAA and FXAA, bloom, ambient occlusion, TAA, auto exposure
+// Not matched, and said so: Winding lights its ambient from an environment
+// map (0.16 ms of Sponza's frame, measured) where the others use a flat
+// ambient term, and it culls by occlusion as well as by view. Serve the repo root
+// (node serve.js) and open bench/compare.html, or run it headless:
+//   PAGE="bench/compare.html?scene=sponza" node tools/headless.mjs
+import * as WN from '/src/winding.js';
+import * as THREE from 'three/webgpu';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
+import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
+import * as pc from 'playcanvas';
+
+const W = 1280, H = 720;
+const q = new URLSearchParams(location.search);
+const SCENE = q.get('scene') ?? 'sponza';
+const ROUNDS = Number(q.get('rounds') ?? 8);
+const SHOT = q.get('shot');
+const SPONZA = 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Sponza/glTF/Sponza.gltf';
+const BOX = 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Box/glTF-Binary/Box.glb';
+const SUN = [-0.55, -0.82, -0.12];
+const CUBES = 10000;
+const cubeAt = (i) => [(i % 100) * 2 - 99, 0, Math.floor(i / 100) * 2 - 99];
+const spinOf = (i) => 1 + (i % 7) * 0.1;
+const LIGHTS = 256;
+const lightAt = (i) => [-12 + (i % 16) * 1.6, 0.5 + Math.floor(i / 64) * 2, -4 + (Math.floor(i / 16) % 4) * 2.5];
+const colourOf = (i) => [0.5 + 0.5 * Math.sin(i), 0.5 + 0.5 * Math.sin(i * 1.3), 0.5 + 0.5 * Math.sin(i * 1.7)];
+
+// ?gpu=1: every pass of every engine also gets GPU timestamps, the same
+// instrument for all four, as a check on the frame number. Each device is
+// asked for timestamp queries on the engine's behalf.
+const GPU = q.get('gpu') === '1';
+if (GPU) {
+  const request = GPUAdapter.prototype.requestDevice;
+  GPUAdapter.prototype.requestDevice = function (d = {}) {
+    const features = new Set([...(d.requiredFeatures ?? []), 'timestamp-query']);
+    return request.call(this, { ...d, requiredFeatures: [...features] });
+  };
+}
+const gpuTimer = (() => {
+  const MAX = 256;
+  const byDevice = new WeakMap(), byEncoder = new WeakMap(), byQueue = new WeakMap();
+  const createEncoder = GPUDevice.prototype.createCommandEncoder;
+  GPUDevice.prototype.createCommandEncoder = function (d) { const e = createEncoder.call(this, d); byEncoder.set(e, this); return e; };
+  for (const begin of ['beginRenderPass', 'beginComputePass']) {
+    const original = GPUCommandEncoder.prototype[begin];
+    GPUCommandEncoder.prototype[begin] = function (desc = {}) {
+      const t = byDevice.get(byEncoder.get(this));
+      if (t?.on && !desc.timestampWrites && t.k < MAX) {
+        desc = { ...desc, timestampWrites: { querySet: t.set, beginningOfPassWriteIndex: 2 * t.k, endOfPassWriteIndex: 2 * t.k + 1 } };
+        t.labels[t.k] = desc.label || `${begin === "beginRenderPass" ? "render" : "compute"}#${t.k}`;
+        t.k++;
+      }
+      return original.call(this, desc);
+    };
+  }
+  const submit = GPUQueue.prototype.submit;
+  GPUQueue.prototype.submit = function (buffers) {
+    const device = byQueue.get(this), t = device && byDevice.get(device);
+    if (!t?.on || t.k === 0) return submit.call(this, buffers);
+    const n = t.k, labels = t.labels.slice(0, n); t.k = 0;
+    const e = createEncoder.call(device);
+    const read = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    e.resolveQuerySet(t.set, 0, 2 * n, t.resolve, 0);
+    e.copyBufferToBuffer(t.resolve, 0, read, 0, n * 16);
+    submit.call(this, [...buffers, e.finish()]);
+    t.pending.push(read.mapAsync(GPUMapMode.READ).then(() => {
+      const ts = new BigUint64Array(read.getMappedRange());
+      for (let i = 0; i < n; i++) if (ts[2 * i + 1] > ts[2 * i]) {
+        const ms = Number(ts[2 * i + 1] - ts[2 * i]) / 1e6;
+        t.ms += ms;
+        t.byLabel.set(labels[i], (t.byLabel.get(labels[i]) ?? 0) + ms);
+        t.counts.set(labels[i], (t.counts.get(labels[i]) ?? 0) + 1);
+      }
+      read.unmap(); read.destroy();
+    }));
+  };
+  return {
+    register(device) {
+      byQueue.set(device.queue, device);
+      byDevice.set(device, {
+        on: false, k: 0, ms: 0, pending: [], labels: [], byLabel: new Map(), counts: new Map(),
+        set: device.createQuerySet({ type: 'timestamp', count: 2 * MAX }),
+        resolve: device.createBuffer({ size: 2 * MAX * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+      });
+    },
+    start(device) { const t = byDevice.get(device); t.on = true; t.ms = 0; t.pending = []; },
+    passes(device) { return byDevice.get(device).byLabel; },
+    counts(device) { return byDevice.get(device).counts; },
+    async stop(device) { const t = byDevice.get(device); t.on = false; await Promise.all(t.pending); return t.ms; },
+  };
+})();
+
+// Every engine is driven frame by frame from here; PlayCanvas would otherwise
+// schedule its own frames on top of the ones being timed.
+window.requestAnimationFrame = () => 0;
+
+for (const c of document.querySelectorAll('canvas')) {
+  c.width = W; c.height = H;
+  c.style.width = `${W}px`; c.style.height = `${H}px`;
+  if (c.id === SHOT) c.style.left = '0';
+}
+
+// Walking Sponza's nave and back, looking ahead; an orbit over the cubes.
+const path = SCENE === 'cubes'
+  ? (i) => [[Math.cos(i * 0.01) * 90, 40, Math.sin(i * 0.01) * 90], [0, 0, 0]]
+  : (i) => { const x = -9 + 7 * (1 - Math.cos(i * 0.02)); return [[x, 1.6, -0.6], [x + 13, 2.6, 0.4]]; };
+
+// ---- the four engines, behind one shape: { name, device, look(p, t), frame(i) } ----
+
+async function winding() {
+  const engine = await WN.Winding.create(document.getElementById('winding'), {
+    antialias: false, post: { strength: 0 }, shadows: { size: 1024, lambda: 0.5 }, shadowDistance: 40,
+  });
+  engine.gpu.resize(W, H);
+  const scene = engine.createScene({ capacity: CUBES + 1000 });
+  const camera = new WN.Camera({ fovY: Math.PI / 3, near: 0.1 });
+  let turn = () => {};
+  if (SCENE === 'cubes') {
+    const box = await engine.load(BOX);
+    const nodes = [];
+    for (let i = 0; i < CUBES; i++) nodes.push(scene.add(box).setPosition(...cubeAt(i)));
+    scene.addLight({ type: 'directional', direction: SUN, intensity: 3, castShadow: false });
+    turn = (t) => { for (let i = 0; i < CUBES; i++) nodes[i].setAxisAngle([0, 1, 0], t * spinOf(i)); };
+  } else {
+    scene.add(await engine.load(SPONZA));
+    if (SCENE === 'sponza') scene.addLight({ type: 'directional', direction: SUN, intensity: 4 });
+    else for (let i = 0; i < LIGHTS; i++) scene.addLight({ position: lightAt(i), color: colourOf(i), intensity: 4, radius: 2.5 });
+  }
+  return {
+    name: 'Winding', device: engine.gpu.device,
+    look(p, t) { camera.position.set(p); camera.target.set(t); },
+    frame(i) { turn(i / 60); engine.renderFrame(scene, camera); },
+  };
+}
+
+async function three() {
+  const renderer = new THREE.WebGPURenderer({ canvas: document.getElementById('three'), antialias: false });
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  await renderer.init();
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, W / H, 0.1, 300);
+  scene.add(new THREE.HemisphereLight(0xbcd0ff, 0x403830, 0.6));
+  let turn = () => {};
+  if (SCENE === 'cubes') {
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    const material = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.6 });
+    const meshes = [];
+    for (let i = 0; i < CUBES; i++) {
+      const m = new THREE.Mesh(geometry, material);
+      m.position.set(...cubeAt(i));
+      scene.add(m);
+      meshes.push(m);
+    }
+    const sun = new THREE.DirectionalLight(0xffffff, 3);
+    sun.position.set(-SUN[0] * 50, -SUN[1] * 50, -SUN[2] * 50);
+    scene.add(sun);
+    turn = (t) => { for (let i = 0; i < CUBES; i++) meshes[i].rotation.y = t * spinOf(i); };
+  } else {
+    const gltf = await new GLTFLoader().loadAsync(SPONZA);
+    scene.add(gltf.scene);
+    if (SCENE === 'sponza') {
+      renderer.shadowMap.enabled = true;
+      gltf.scene.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+      const sun = new THREE.DirectionalLight(0xffffff, 4);
+      sun.position.set(-SUN[0] * 30, -SUN[1] * 30, -SUN[2] * 30);
+      sun.castShadow = true;
+      // Each cascade a copy of this shadow, so 1024 each.
+      sun.shadow.mapSize.set(1024, 1024);
+      sun.shadow.shadowNode = new CSMShadowNode(sun, { cascades: 4, maxFar: 40, mode: 'practical' });
+      scene.add(sun, sun.target);
+    } else {
+      renderer.lighting = new ClusteredLighting();
+      for (let i = 0; i < LIGHTS; i++) {
+        const light = new THREE.PointLight(new THREE.Color(...colourOf(i)), 4, 2.5, 2);
+        light.position.set(...lightAt(i));
+        scene.add(light);
+      }
+    }
+  }
+  return {
+    name: 'Three.js', device: renderer.backend.device,
+    look(p, t) { camera.position.set(...p); camera.lookAt(...t); },
+    frame(i) { turn(i / 60); renderer.render(scene, camera); },
+  };
+}
+
+async function babylon() {
+  const B = window.BABYLON;
+  const engine = new B.WebGPUEngine(document.getElementById('babylon'), { antialias: false, adaptToDeviceRatio: false });
+  await engine.initAsync();
+  engine.setSize(W, H);
+  const scene = new B.Scene(engine);
+  // glTF's own handedness, so every engine shares one set of coordinates.
+  scene.useRightHandedSystem = true;
+  scene.imageProcessingConfiguration.toneMappingEnabled = true;
+  scene.imageProcessingConfiguration.toneMappingType = B.ImageProcessingConfiguration.TONEMAPPING_ACES;
+  const camera = new B.UniversalCamera('camera', new B.Vector3(0, 0, 0), scene);
+  camera.fov = Math.PI / 3;
+  camera.minZ = 0.1;
+  camera.maxZ = 300;
+  const ambient = new B.HemisphericLight('ambient', new B.Vector3(0, 1, 0), scene);
+  ambient.intensity = 0.6;
+  let turn = () => {};
+  if (SCENE === 'cubes') {
+    const box = B.MeshBuilder.CreateBox('box', { size: 1 }, scene);
+    const material = new B.PBRMaterial('grey', scene);
+    material.albedoColor = new B.Color3(0.8, 0.8, 0.8);
+    material.metallic = 0;
+    material.roughness = 0.6;
+    box.material = material;
+    // Hidden as Babylon documents it; disabling the source would hide its instances too.
+    box.isVisible = false;
+    // Instances: Babylon's documented way to make many objects of one mesh,
+    // each still its own node with its own transform.
+    const cubes = [];
+    for (let i = 0; i < CUBES; i++) {
+      const c = box.createInstance(`cube${i}`);
+      c.position.set(...cubeAt(i));
+      cubes.push(c);
+    }
+    const sun = new B.DirectionalLight('sun', new B.Vector3(...SUN), scene);
+    sun.intensity = 3;
+    turn = (t) => { for (let i = 0; i < CUBES; i++) cubes[i].rotation.y = t * spinOf(i); };
+  } else {
+    const result = await B.ImportMeshAsync(SPONZA, scene);
+    if (SCENE === 'sponza') {
+      const sun = new B.DirectionalLight('sun', new B.Vector3(...SUN), scene);
+      sun.intensity = 4;
+      const shadows = new B.CascadedShadowGenerator(1024, sun);
+      shadows.numCascades = 4;
+      shadows.shadowMaxZ = 40;
+      shadows.lambda = 0.5;
+      for (const m of result.meshes) { shadows.addShadowCaster(m, false); m.receiveShadows = true; }
+    } else {
+      const lights = [];
+      for (let i = 0; i < LIGHTS; i++) {
+        const light = new B.PointLight(`light${i}`, new B.Vector3(...lightAt(i)), scene);
+        light.diffuse = new B.Color3(...colourOf(i));
+        light.intensity = 4;
+        light.range = 2.5;
+        lights.push(light);
+      }
+      new B.ClusteredLightContainer('clustered', lights, scene);
+    }
+  }
+  scene.activeCamera = camera;
+  // Babylon compiles shaders in the background and skips what is not ready:
+  // timed before this, it would be timing an empty frame.
+  await scene.whenReadyAsync();
+  return {
+    name: 'Babylon.js', device: engine._device,
+    look(p, t) { camera.position.set(...p); camera.setTarget(new B.Vector3(...t)); },
+    frame(i) { turn(i / 60); engine.beginFrame(); scene.render(); engine.endFrame(); },
+  };
+}
+
+async function playcanvas() {
+  const canvas = document.getElementById('playcanvas');
+  const device = await pc.createGraphicsDevice(canvas, { deviceTypes: ['webgpu'], antialias: false });
+  device.maxPixelRatio = 1;
+  const options = new pc.AppOptions();
+  options.graphicsDevice = device;
+  options.componentSystems = [pc.RenderComponentSystem, pc.CameraComponentSystem, pc.LightComponentSystem];
+  options.resourceHandlers = [pc.TextureHandler, pc.ContainerHandler];
+  const app = new pc.AppBase(canvas);
+  app.init(options);
+  app.setCanvasFillMode(pc.FILLMODE_NONE);
+  app.setCanvasResolution(pc.RESOLUTION_FIXED, W, H);
+  app.scene.ambientLight = new pc.Color(0.35, 0.35, 0.4);
+  const camera = new pc.Entity('camera');
+  camera.addComponent('camera', { fov: 60, nearClip: 0.1, farClip: 300, clearColor: new pc.Color(0.5, 0.6, 0.75), toneMapping: pc.TONEMAP_ACES });
+  app.root.addChild(camera);
+  const sunlight = (options) => {
+    const sun = new pc.Entity('sun');
+    sun.addComponent('light', { type: 'directional', ...options });
+    // A directional light shines down its entity's -Y.
+    sun.lookAt(...SUN);
+    sun.rotateLocal(90, 0, 0);
+    app.root.addChild(sun);
+  };
+  let turn = () => {};
+  if (SCENE === 'cubes') {
+    const material = new pc.StandardMaterial();
+    material.diffuse = new pc.Color(0.8, 0.8, 0.8);
+    material.gloss = 0.4;
+    material.update();
+    const cubes = [];
+    for (let i = 0; i < CUBES; i++) {
+      const e = new pc.Entity();
+      e.addComponent('render', { type: 'box', material });
+      e.setPosition(...cubeAt(i));
+      app.root.addChild(e);
+      cubes.push(e);
+    }
+    sunlight({ intensity: 3, castShadows: false });
+    turn = (t) => { for (let i = 0; i < CUBES; i++) cubes[i].setEulerAngles(0, (t * spinOf(i) * 180) / Math.PI, 0); };
+  } else {
+    const asset = new pc.Asset('sponza', 'container', { url: SPONZA });
+    app.assets.add(asset);
+    await new Promise((resolve, reject) => { asset.ready(resolve); asset.on('error', reject); app.assets.load(asset); });
+    app.root.addChild(asset.resource.instantiateRenderEntity({ castShadows: SCENE === 'sponza', receiveShadows: SCENE === 'sponza' }));
+    if (SCENE === 'sponza') {
+      // The resolution is the atlas the four cascades share: 1024 each.
+      sunlight({ intensity: 4, castShadows: true, shadowResolution: 2048, numCascades: 4, shadowDistance: 40, cascadeDistribution: 0.5 });
+    } else {
+      // Clustered lighting is PlayCanvas's default; the cells hold up to 255 lights each.
+      for (let i = 0; i < LIGHTS; i++) {
+        const e = new pc.Entity();
+        e.addComponent('light', { type: 'omni', color: new pc.Color(...colourOf(i)), intensity: 4, range: 2.5, castShadows: false });
+        e.setPosition(...lightAt(i));
+        app.root.addChild(e);
+      }
+    }
+  }
+  app.start();
+  return {
+    name: 'PlayCanvas', device: device.wgpu,
+    look(p, t) { camera.setPosition(...p); camera.lookAt(...t); },
+    frame(i) { turn(i / 60); app.tick(performance.now()); },
+  };
+}
+
+// ---- measurement ----
+async function block(side, start, frames = 30) {
+  for (let i = 0; i < 3; i++) { side.look(...path(start + i)); side.frame(start + i); }
+  await side.device.queue.onSubmittedWorkDone();
+  if (GPU) gpuTimer.start(side.device);
+  const t0 = performance.now();
+  for (let i = 3; i < frames + 3; i++) { side.look(...path(start + i)); side.frame(start + i); }
+  await side.device.queue.onSubmittedWorkDone();
+  const frame = (performance.now() - t0) / frames;
+  if (GPU) side.gpu.push((await gpuTimer.stop(side.device)) / frames);
+  return frame;
+}
+const median = (xs) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
+// A step that never settles fails the page by name, rather than hanging it.
+const step = (what, promise) => { return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`${what}: no answer in 90 s`)), 90_000))]); };
+
+const report = (detail, ok = true) => {
+  globalThis.__gpuTest = { passed: ok ? 1 : 0, failed: ok ? 0 : 1, results: [{ name: `compare ${SCENE}`, ok, detail }] };
+  document.title = ok ? 'PASS 1' : 'FAIL 1';
+};
+try {
+  const makers = { winding, three, babylon, playcanvas };
+  const sides = [];
+  const only = q.get('only')?.split(',') ?? null;
+  for (const [id, make] of Object.entries(makers)) if ((!SHOT || SHOT === id) && (!only || only.includes(id))) sides.push(await step(`${id}: setting up`, make()));
+  for (const s of sides) { s.gpu = []; if (GPU) gpuTimer.register(s.device); }
+  for (const s of sides) { for (let i = 0; i < 60; i++) { s.look(...path(i)); s.frame(i); } await step(`${s.name}: first frames`, s.device.queue.onSubmittedWorkDone()); }
+  if (SHOT) {
+    report(`${SHOT} drawn`);
+  } else {
+    const times = Object.fromEntries(sides.map((s) => [s.name, []]));
+    for (let r = 0; r < ROUNDS; r++) {
+      const order = r % 2 ? [...sides].reverse() : sides;
+      for (const s of order) times[s.name].push(await step(`${s.name}: timing`, block(s, 20 + r * 40)));
+    }
+    const result = Object.fromEntries(Object.entries(times).map(([n, xs]) => [n, +median(xs).toFixed(2)]));
+    if (GPU) for (const side of sides) result[`${side.name} GPU`] = +median(side.gpu).toFixed(2);
+    // &passes=1: each engine's passes by label, GPU ms a frame over every timed block.
+    if (GPU && q.get('passes')) for (const side of sides) {
+      const frames = ROUNDS * 30;
+      result[`${side.name} passes`] = [...gpuTimer.passes(side.device)].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([l, ms]) => `${l} ${(ms / frames).toFixed(2)} (${(gpuTimer.counts(side.device).get(l) / frames).toFixed(1)} a frame)`).join(', ');
+    }
+    globalThis.compareResult = { scene: SCENE, width: W, height: H, rounds: ROUNDS, ms: result, all: times };
+    report(JSON.stringify(result));
+  }
+} catch (error) {
+  report(String(error?.stack ?? error), false);
+}
+</script>
