@@ -35,7 +35,14 @@
 // objects than its slots can number is split in two.
 //
 // Batches of several objects stay as they are: one draw already, and merging
-// them would copy every instance's indices into a list.
+// them would copy every instance's indices into a list. So do skinned ones, and
+// any in an LOD group, whose shadows cast only the level the camera shows.
+//
+// SHADOWS draw every caster, in view or not, so each group has a second list
+// holding every object's real indices, copied once when the batches are built:
+// a cascade, or a strip of one being scrolled, is a draw per group rather than
+// a draw per mesh. Nine hundred buildings under a turning sun were 3,600
+// shadow draws a frame, half the shadow GPU time and most of the frame's CPU.
 
 import { compileShader } from '../rhi/shader.js';
 import { sharedPipelines } from '../rhi/pipeline.js';
@@ -154,13 +161,16 @@ fn size() {
   dispatch[2] = 1u;
 }
 
-// A workgroup per listed span: its object's indices, or its tag alone.
+// Every span, its object shown: the shadow lists, once, when the batches are built.
 @compute @workgroup_size(${WORKGROUP_SIZE})
-fn copy(@builtin(workgroup_id) wg : vec3<u32>, @builtin(local_invocation_index) t : u32) {
-  let w = wg.y * 65535u + wg.x;
-  if (w >= atomicLoad(&work[params.countBase])) { return; }
-  let s = atomicLoad(&work[params.listBase + w]);
-  // The object this span belongs to: the last whose first span is at or before it.
+fn copyAll(@builtin(workgroup_id) wg : vec3<u32>, @builtin(local_invocation_index) t : u32) {
+  let s = wg.y * 65535u + wg.x;
+  if (s >= params.spans) { return; }
+  writeSpan(s, true, t);
+}
+
+/** Span s of its object: the object's indices, or its tag alone. */
+fn writeSpan(s : u32, shownIfAny : bool, t : u32) {
   var lo = 0u;
   var hi = params.count;
   while (hi - lo > 1u) {
@@ -168,18 +178,28 @@ fn copy(@builtin(workgroup_id) wg : vec3<u32>, @builtin(local_invocation_index) 
     if (merged[mid].spanFirst <= s) { lo = mid; } else { hi = mid; }
   }
   let m = merged[lo];
-  let shown = atomicLoad(&work[params.stateBase + lo]) == 1u;
+  let shown = shownIfAny || atomicLoad(&work[params.stateBase + lo]) == 1u;
   let start = (s - m.spanFirst) * ${SPAN}u;
   let end = min(start + ${SPAN}u, m.indexCount);
   for (var k = start + t; k < end; k = k + ${WORKGROUP_SIZE}u) {
     indices[m.place + k] = select(m.tag, m.tag | arena[m.firstIndex + k], shown);
   }
 }
+
+// A workgroup per listed span: its object's indices, or its tag alone.
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn copy(@builtin(workgroup_id) wg : vec3<u32>, @builtin(local_invocation_index) t : u32) {
+  let w = wg.y * 65535u + wg.x;
+  if (w >= atomicLoad(&work[params.countBase])) { return; }
+  writeSpan(atomicLoad(&work[params.listBase + w]), false, t);
+}
 `;
 
 export class MergedDraws {
-  static async create(rhi) {
+  /** `arena`: the geometry arena, whose indices the lists are copied from. */
+  static async create(rhi, arena) {
     const merged = new MergedDraws(rhi);
+    merged._arena = arena;
     await merged._init();
     return merged;
   }
@@ -222,6 +242,7 @@ export class MergedDraws {
     this.flipPipeline = make('flip', layout);
     this.sizePipeline = make('size', sizeLayout);
     this.copyPipeline = make('copy', layout);
+    this.copyAllPipeline = make('copyAll', layout);
   }
 
   /** A buffer of at least `bytes`, replaced only when it has to grow. */
@@ -241,12 +262,13 @@ export class MergedDraws {
    * Pool `gpu`'s one-object batches into groups, after its batches were
    * rebuilt -- which is also when it grows, so its capacities are final.
    */
-  rebuild(gpu) {
+  rebuild(gpu, scene) {
     const byKey = new Map();
     if (this.batchMerged.length < gpu.batchCapacity) this.batchMerged = new Uint8Array(gpu.batchCapacity);
     this.batchMerged.fill(0);
     for (let b = 0; b < gpu.batchCount; b++) {
       if (gpu.batchSize[b] !== 1 || gpu.batchSkinned[b] === 1) continue;
+      if (scene.renderableLodSlot[gpu.batchOrder[gpu.batchFirst[b]]] >= 0) continue;
       const key = gpu.batchMaterial[b] * 2 + gpu.batchMirrored[b];
       let list = byKey.get(key);
       if (!list) byKey.set(key, (list = []));
@@ -296,7 +318,8 @@ export class MergedDraws {
         spans += count;
         j++;
       });
-      args.set([place - group.indexBase, 1, group.indexBase, 0, 0], g * ARGS_WORDS);
+      group.indexCount = place - group.indexBase;
+      args.set([group.indexCount, 1, group.indexBase, 0, 0], g * ARGS_WORDS);
     });
     this.spanCount = spans;
     queue.writeBuffer(this._buffer('info', info.byteLength, STORAGE), 0, info);
@@ -311,10 +334,7 @@ export class MergedDraws {
     this._listBase = itemTotal + 1;
     const work = this._buffer('work', (this._listBase + spans) * 4, STORAGE);
     this._buffer('dispatch', 12, GPUBufferUsage.INDIRECT | STORAGE);
-    const encoder = this.rhi.device.createCommandEncoder({ label: 'merged-clear' });
-    encoder.clearBuffer(indices, 0, indexTotal * 4);
-    encoder.clearBuffer(work, 0, this._listBase * 4);
-    queue.submit([encoder.finish()]);
+    const shadowIndices = this._buffer('shadowIndices', indexTotal * 4, GPUBufferUsage.INDEX | STORAGE);
 
     // What vsMerged reads through the draw group: where its group's table starts, and the split.
     const uniforms = new ArrayBuffer(this.groupCount * this.alignment);
@@ -325,6 +345,48 @@ export class MergedDraws {
     queue.writeBuffer(this._buffer('uniforms', uniforms.byteLength, GPUBufferUsage.UNIFORM), 0, uniforms);
     const params = Uint32Array.of(itemTotal, spans, 0, this._countBase, 0, this._listBase, 0, 0);
     queue.writeBuffer(this._buffer('params', PARAMS_BYTES, GPUBufferUsage.UNIFORM), 0, params);
+
+    // Cleared, and the shadow lists filled, now: the writes above go first, in queue order.
+    const encoder = this.rhi.device.createCommandEncoder({ label: 'merged-rebuild' });
+    encoder.clearBuffer(indices, 0, indexTotal * 4);
+    encoder.clearBuffer(work, 0, this._listBase * 4);
+    const pass = encoder.beginComputePass({ label: 'merged-shadow-lists' });
+    pass.setPipeline(this.copyAllPipeline);
+    pass.setBindGroup(0, this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.boundsBuffer, this._arena.indexBuffer, shadowIndices));
+    pass.dispatchWorkgroups(Math.min(spans, 65535), Math.ceil(spans / 65535));
+    pass.end();
+    queue.submit([encoder.finish()]);
+  }
+
+  /** The bind group every step uses, writing into `indices`: the camera's lists, or the shadows'. */
+  _makeBindGroup(cullParams, cullBytes, bounds, arenaIndices, indices) {
+    const b = this._buffers;
+    return this.rhi.device.createBindGroup({
+      label: 'merged',
+      layout: this.layout,
+      entries: [
+        { binding: 0, resource: { buffer: b.params, size: PARAMS_BYTES } },
+        { binding: 1, resource: { buffer: cullParams, offset: 0, size: cullBytes } },
+        { binding: 2, resource: { buffer: bounds } },
+        { binding: 3, resource: { buffer: b.info } },
+        { binding: 4, resource: { buffer: b.work } },
+        { binding: 5, resource: { buffer: arenaIndices } },
+        { binding: 6, resource: { buffer: indices } },
+      ],
+    });
+  }
+
+  /** The draw group vsMerged reads its group's table base and split through, at g * alignment. */
+  drawGroup(drawLayout) {
+    return (this.drawBindGroup ??= this.rhi.device.createBindGroup({
+      label: 'merged-draw', layout: drawLayout,
+      entries: [{ binding: 0, resource: { buffer: this._buffers.uniforms, size: BATCH_BYTES } }],
+    }));
+  }
+
+  /** Every object's real indices, group after group: what a shadow view draws. */
+  get shadowIndices() {
+    return this._buffers.shadowIndices;
   }
 
   /** Every frame, before the pass: no work listed yet. */
@@ -343,19 +405,7 @@ export class MergedDraws {
     if (this._bindKey !== key) {
       this._bindKey = key;
       const b = this._buffers;
-      this._bindGroup = this.rhi.device.createBindGroup({
-        label: 'merged',
-        layout: this.layout,
-        entries: [
-          { binding: 0, resource: { buffer: b.params, size: PARAMS_BYTES } },
-          { binding: 1, resource: { buffer: gpu.cullParamsBuffer, offset: 0, size: gpu.cullParams.byteLength } },
-          { binding: 2, resource: { buffer: gpu.boundsBuffer } },
-          { binding: 3, resource: { buffer: b.info } },
-          { binding: 4, resource: { buffer: b.work } },
-          { binding: 5, resource: { buffer: arena.indexBuffer } },
-          { binding: 6, resource: { buffer: b.indices } },
-        ],
-      });
+      this._bindGroup = this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.boundsBuffer, arena.indexBuffer, b.indices);
       this._dispatchGroup = this.rhi.device.createBindGroup({
         label: 'merged-dispatch', layout: this.dispatchLayout, entries: [{ binding: 0, resource: { buffer: b.dispatch } }],
       });
@@ -386,16 +436,13 @@ export class MergedDraws {
    */
   encode(pass, drawLayout, groupDraw, pipelineFor, bindMaterial) {
     if (this.groupCount === 0) return;
-    this.drawBindGroup ??= this.rhi.device.createBindGroup({
-      label: 'merged-draw', layout: drawLayout,
-      entries: [{ binding: 0, resource: { buffer: this._buffers.uniforms, size: BATCH_BYTES } }],
-    });
+    const drawGroup = this.drawGroup(drawLayout);
     pass.setIndexBuffer(this._buffers.indices, 'uint32');
     for (let g = 0; g < this.groupCount; g++) {
       const group = this.groups[g];
       pass.setPipeline(pipelineFor(group.material, group.mirrored));
       bindMaterial(group.material);
-      pass.setBindGroup(groupDraw, this.drawBindGroup, [g * this.alignment]);
+      pass.setBindGroup(groupDraw, drawGroup, [g * this.alignment]);
       pass.drawIndexedIndirect(this._buffers.args, g * ARGS_WORDS * 4);
     }
   }

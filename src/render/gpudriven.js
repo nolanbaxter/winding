@@ -777,7 +777,7 @@ export class GpuDriven {
     this.stats.items = count;
     this.stats.transparent = this.transparentCount;
     // The one-object batches, pooled into a draw per material (merged.js).
-    this.merged?.rebuild(this);
+    this.merged?.rebuild(this, scene);
     this.stats.mergedGroups = this.merged?.groupCount ?? 0;
   }
 

@@ -116,6 +116,8 @@ struct DrawData {
 
 struct Batch {
   firstVisible : u32,
+  // A merged draw's split of each index (merged.js): the slot above this bit, the vertex below.
+  shift        : u32,
 };
 
 @group(0) @binding(0) var<uniform> cascade : Cascade;
@@ -127,6 +129,10 @@ struct Batch {
 @group(0) @binding(4) var<storage, read> morphDeltas : array<f32>;
 @group(0) @binding(5) var<storage, read> morphWeights : array<f32>;
 @group(3) @binding(0) var<uniform> batch : Batch;
+// For merged draws: the groups' tables (in the visible list, past the cull
+// slices), and every primitive's vertices.
+@group(0) @binding(6) var<storage, read> table : array<u32>;
+@group(0) @binding(7) var<storage, read> arena : array<f32>;
 
 // The material, for the casters whose shape comes from alpha. Only the fields
 // alpha needs are read, but the struct is the forward pass's, byte for byte.
@@ -172,6 +178,26 @@ fn vs(
 ) -> @builtin(position) vec4<f32> {
   let draw = drawData[order[batch.firstVisible + instance]];
   let moved = morphPosition(draw, vertex, position);
+  return cascade.viewProjection * draw.model * vec4<f32>(moved, 1.0);
+}
+
+/** A merged draw's vertex: its object, and where in the arena it is. See vsMerged in pbr.js. */
+struct Pulled {
+  item   : u32,
+  vertex : u32,
+};
+
+fn pull(code : u32) -> Pulled {
+  let at = batch.firstVisible + (code >> batch.shift) * 2u;
+  return Pulled(table[at], table[at + 1u] + (code & ((1u << batch.shift) - 1u)));
+}
+
+@vertex
+fn vsMerged(@builtin(vertex_index) code : u32) -> @builtin(position) vec4<f32> {
+  let p = pull(code);
+  let o = p.vertex * 15u;
+  let draw = drawData[p.item];
+  let moved = morphPosition(draw, p.vertex, vec3<f32>(arena[o], arena[o + 1u], arena[o + 2u]));
   return cascade.viewProjection * draw.model * vec4<f32>(moved, 1.0);
 }
 
@@ -222,6 +248,19 @@ fn vsSkinnedAlpha(
   out.uv = uv;
   out.uv1 = uv1;
   out.alpha = color.a;
+  return out;
+}
+
+@vertex
+fn vsMergedAlpha(@builtin(vertex_index) code : u32) -> AlphaOut {
+  let p = pull(code);
+  let o = p.vertex * 15u;
+  let draw = drawData[p.item];
+  var out : AlphaOut;
+  out.clip = cascade.viewProjection * draw.model * vec4<f32>(morphPosition(draw, p.vertex, vec3<f32>(arena[o], arena[o + 1u], arena[o + 2u])), 1.0);
+  out.uv = vec2<f32>(arena[o + 6u], arena[o + 7u]);
+  out.uv1 = vec2<f32>(arena[o + 12u], arena[o + 13u]);
+  out.alpha = unpack4x8unorm(bitcast<u32>(arena[o + 14u])).a;
   return out;
 }
 
@@ -520,6 +559,7 @@ export class ShadowMaps {
     this.size = size;
     this.cascadeCount = cascades;
     this._batchBoxes = new Float32Array(0);
+    this._groupBoxes = new Float32Array(0);
     /**
      * Cascades fitted this frame. Zero when there is no sun to fit them to,
      * which is what keeps the shadow passes off the graph entirely.
@@ -585,6 +625,8 @@ export class ShadowMaps {
 
   async _init(pipelines, drawLayout, materialLayout = null) {
     const rhi = this.rhi;
+    // The batch group's layout, for the merged groups' own (merged.js).
+    this._drawLayout = drawLayout;
     this.shader = await compileShader(rhi.device, SHADOW_SHADER, 'shadow.wgsl');
 
     this.cascadeLayout = rhi.device.createBindGroupLayout({
@@ -600,6 +642,8 @@ export class ShadowMaps {
         { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 5, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 6, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 7, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
 
@@ -615,6 +659,8 @@ export class ShadowMaps {
         { binding: 3, resource: { buffer: palette.buffer } },
         { binding: 4, resource: { buffer: morph.deltaBuffer } },
         { binding: 5, resource: { buffer: morph.weightBuffer } },
+        { binding: 6, resource: { buffer: gpu.visibleBuffer } },
+        { binding: 7, resource: { buffer: this.geometry.vertexBuffer } },
       ],
     });
 
@@ -729,7 +775,16 @@ export class ShadowMaps {
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depth: { format: DEPTH_FORMAT, depthCompare: 'always', depthWriteEnabled: true },
     };
-    await pipelines.warm([...this.descriptors, ...this.alphaDescriptors, this.clearDescriptor]);
+    // Merged casters (merged.js): their vertices pulled from the arena. Never
+    // skinned. Indexed by doubleSided * 2 + mirrored, and the alpha-tested one.
+    this.mergedDescriptors = [0, 1, 4, 5].map((v) => ({
+      ...this.descriptors[v], label: `${this.descriptors[v].label}-merged`, vertexEntry: 'vsMerged', buffers: [],
+    }));
+    this.mergedAlphaDescriptor = this.alphaDescriptors.length > 0
+      ? { ...this.alphaDescriptors[0], label: 'shadow-mask-merged', vertexEntry: 'vsMergedAlpha', buffers: [] }
+      : null;
+    await pipelines.warm([...this.descriptors, ...this.alphaDescriptors, this.clearDescriptor,
+      ...this.mergedDescriptors, ...(this.mergedAlphaDescriptor ? [this.mergedAlphaDescriptor] : [])]);
 
     // One bound executor per layer, built as the arrays grow. The graph stores
     // a function per pass, and building them per frame would allocate a
@@ -1242,7 +1297,9 @@ export class ShadowMaps {
       this.clearDescriptor.layout.bindEmptyGroups(pass);
       pass.draw(3);
       const slot = (this.cascadeCapacity + layer * MAX_PIECES + p) * this.alignment;
-      this._encodeView(pass, this.cascadeBindGroup, slot, piece.cull, p * 16);
+      // Mesh by mesh, not merged: a strip is small, and culling each mesh to
+      // it skips far more than a group's box can.
+      this._encodeView(pass, this.cascadeBindGroup, slot, piece.cull, p * 16, false);
     }
   }
 
@@ -1343,11 +1400,13 @@ export class ShadowMaps {
     // when it grows. Caching on first use alone would hold a group pointing at
     // destroyed buffers.
     if (this.cascadeBindGroup === undefined
+      || this._geometryRevision !== this.geometry.revision
       || this._gpuRevision !== gpu.buffersRevision
       || this._paletteRevision !== palette.revision
       || this._morphRevision !== morph.revision
       || this._hasLod !== gpu.hasLod) {
       this._hasLod = gpu.hasLod;
+      this._geometryRevision = this.geometry.revision;
       this.cascadeBindGroup = this._makeCascadeBindGroup(gpu, palette, morph);
       this.localBindGroup = undefined;
       this._gpuRevision = gpu.buffersRevision;
@@ -1419,6 +1478,22 @@ export class ShadowMaps {
     } else if (anyMoved) {
       for (const i of items) if (gpu.itemBatch[i] !== NOT_BATCHED) grow(gpu.itemBatch[i], i);
     }
+    // And each merged group's, from its batches': a cascade draws a group or not.
+    const merged = this.merged;
+    if (!merged || merged.groupCount === 0) return;
+    if (this._groupBoxes.length < merged.groupCount * 6) this._groupBoxes = new Float32Array(merged.groupCount * 6);
+    const boxes = this._batchBoxes, out = this._groupBoxes;
+    for (let g = 0; g < merged.groupCount; g++) {
+      const k = g * 6;
+      out.fill(Infinity, k, k + 3);
+      out.fill(-Infinity, k + 3, k + 6);
+      for (const b of merged.groups[g].batches) {
+        for (let a = 0; a < 3; a++) {
+          if (boxes[b * 6 + a] < out[k + a]) out[k + a] = boxes[b * 6 + a];
+          if (boxes[b * 6 + 3 + a] > out[k + 3 + a]) out[k + 3 + a] = boxes[b * 6 + 3 + a];
+        }
+      }
+    }
   }
 
   /**
@@ -1428,7 +1503,7 @@ export class ShadowMaps {
    * transform and clip, all of it, cascade after cascade. Point and spot
    * views are perspective, which that test is not.
    */
-  _encodeView(pass, bindGroup, offset, cull = null, at = 0) {
+  _encodeView(pass, bindGroup, offset, cull = null, at = 0, useMerged = true) {
     const gpu = this._gpu;
     // Every caster's geometry, bound once for the view.
     this.geometry.bind(pass);
@@ -1450,7 +1525,13 @@ export class ShadowMaps {
     // where these pipelines expect the empty group, so they come after.
     const materials = gpu.materials;
     const alpha = this.alphaDescriptors.length > 0;
+    const merged = this.merged;
+    // The merged groups draw a whole view in a draw each (merged.js); a scrolled
+    // strip draws mesh by mesh -- see _encodeCascade.
+    const grouped = useMerged && merged?.groupCount > 0;
+    const mergedBatch = grouped ? merged.batchMerged : null;
     for (let b = 0; b < gpu.batchCount; b++) {
+      if (mergedBatch?.[b] === 1) continue;
       if (alpha && materials.alphaModes[gpu.batchMaterial[b]] === ALPHA_MASK) continue;
       if (!casts(b)) continue;
       const primitive = gpu.batchPrimitive[b];
@@ -1466,7 +1547,42 @@ export class ShadowMaps {
       if (skinned) pass.setVertexBuffer(1, primitive.skinBuffer);
       this._drawBatch(pass, gpu, b, primitive);
     }
-    if (alpha) this._encodeAlphaCasters(pass, gpu, materials, casts);
+    if (grouped) this._encodeMergedCasters(pass, materials, cull, at, false);
+    if (alpha) this._encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch);
+    if (alpha && grouped) this._encodeMergedCasters(pass, materials, cull, at, true);
+  }
+
+  /**
+   * The merged groups (merged.js), a draw each from their shadow lists: the
+   * depth-only ones, or with `masked` the alpha-tested ones, which bind their
+   * material. Culled to the view, a group at a time, by the box round its casters.
+   */
+  _encodeMergedCasters(pass, materials, cull, at, masked) {
+    const merged = this.merged;
+    const drawGroup = merged.drawGroup(this._drawLayout);
+    let bound = false;
+    for (let g = 0; g < merged.groupCount; g++) {
+      const group = merged.groups[g];
+      const isMasked = materials.alphaModes[group.material] === ALPHA_MASK && this.mergedAlphaDescriptor !== null;
+      if (isMasked !== masked) continue;
+      if (cull !== null && !boxInOrtho(this._groupBoxes, g * 6, cull, at)) continue;
+      if (!bound) {
+        pass.setIndexBuffer(merged.shadowIndices, 'uint32');
+        bound = true;
+      }
+      if (masked) {
+        pass.setPipeline(this._pipelines.get(this.mergedAlphaDescriptor));
+        pass.setBindGroup(GROUP_MATERIAL, materials.bindGroup(group.material));
+      } else {
+        const doubleSided = (materials.variants[group.material] & VARIANT_DOUBLE_SIDED) !== 0
+          || group.batches.some((b) => this._gpu.batchPrimitive[b].open === true);
+        pass.setPipeline(this._pipelines.get(this.mergedDescriptors[(doubleSided ? 2 : 0) + group.mirrored]));
+      }
+      pass.setBindGroup(GROUP_DRAW, drawGroup, [g * merged.alignment]);
+      pass.drawIndexed(group.indexCount, 1, group.indexBase, 0, 0);
+    }
+    // What follows draws from the arena's own indices again.
+    if (bound) this.geometry.bind(pass);
   }
 
   /**
@@ -1484,7 +1600,7 @@ export class ShadowMaps {
   }
 
   /** MASK batches, then blended items, each shaped by its material's alpha. */
-  _encodeAlphaCasters(pass, gpu, materials, casts) {
+  _encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch = null) {
     let bound = null;
     let boundMaterial = -1;
     const draw = (hashed, skinned, material, primitive) => {
@@ -1499,7 +1615,7 @@ export class ShadowMaps {
 
     for (let b = 0; b < gpu.batchCount; b++) {
       const material = gpu.batchMaterial[b];
-      if (materials.alphaModes[material] !== ALPHA_MASK || !casts(b)) continue;
+      if (materials.alphaModes[material] !== ALPHA_MASK || !casts(b) || mergedBatch?.[b] === 1) continue;
       const primitive = gpu.batchPrimitive[b];
       draw(false, gpu.batchSkinned[b] === 1, material, primitive);
       this._drawBatch(pass, gpu, b, primitive);

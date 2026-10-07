@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Their shadows too, when a shadow map is drawn whole.** Each material's merged meshes also
+  keep a list of every one's triangles, copied once, and a shadow view drawn whole -- a cascade
+  under a turning sun, a point or spot light's -- is a draw per material rather than per mesh.
+  A strip of a scrolled cascade stays mesh by mesh, where culling each mesh to the strip skips
+  more. A town of 900 buildings under a turning sun: frame 17.9 -> 10.1 ms, CPU 2.4 -> 0.9 ms.
 - **Meshes drawn once each share one draw call per material.** A scene of distinct meshes -- a
   level, Sponza, a town of separate buildings -- was a draw call per mesh, and each costs the GPU
   about 7 us whether it draws anything or not. Now every mesh part drawn once is pooled with the

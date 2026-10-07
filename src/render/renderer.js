@@ -492,7 +492,7 @@ export class Renderer {
   async _init() {
     this.gpu = await GpuDriven.create(this.rhi, this.maxDraws, this.materials);
     /** One draw per material for the one-object batches: see merged.js. */
-    this.merged = await MergedDraws.create(this.rhi);
+    this.merged = await MergedDraws.create(this.rhi, this.geometry);
     this.gpu.merged = this.merged;
     this._makeDrawBindGroup();
     this.clusters = await ClusteredLights.create(this.rhi);
@@ -505,8 +505,10 @@ export class Renderer {
     this.shadows = await ShadowMaps.create(
       this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout,
     );
-    // The casters' geometry, which the shadow passes bind as the forward ones do.
+    // The casters' geometry, which the shadow passes bind as the forward ones do,
+    // and the merged groups (merged.js), which they draw as well.
     this.shadows.geometry = this.geometry;
+    this.shadows.merged = this.merged;
     this.skyboxPass = await SkyboxPass.create(this.rhi, this.pipelines, null);
     // Asked for at creation: ready for the first frame, as they always were.
     const asked = (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
