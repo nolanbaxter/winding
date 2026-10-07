@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Off means off: bloom at strength 0 draws none of its passes.** A strength of 0 mixed no bloom
+  in, but its nine passes were drawn all the same: 0.36 ms a frame at 720p on Iris Xe.
+- **A scene with no point or spot lights skips their loop.** The shader that loops over them is
+  compiled out, in pipelines built in the background the first time such a scene draws; until then
+  it draws with the loop, as before. Sponza with only the sun: forward pass 5% faster.
 - **A moving camera scrolls the sun's shadow maps instead of redrawing them.** When a cascade's box
   steps along its grid and nothing else changed, its map keeps every texel where it is -- the map
   wraps, and only its origin moves -- and only the strip the box moved onto is drawn. The same

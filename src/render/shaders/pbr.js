@@ -83,6 +83,8 @@ override PROBES : bool = true;
 override DECALS : bool = true;
 /** Soft shadows (PCSS), for lights given a size: compiled in only when one is. */
 override SOFT_SHADOWS : bool = false;
+// False for a scene with no point or spot light: the loop over them goes.
+override POINT_LIGHTS : bool = true;
 
 /**
  * The ambient term of the fragment shade() last ran, for fsAO to write out
@@ -1469,7 +1471,8 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   //
   // Lights append themselves concurrently, so a crowded cell's count can run
   // past what its slice of the index list holds. Only that many are real.
-  let lightCount = min(clusterCounts[cluster], ${MAX_LIGHTS_PER_CLUSTER}u);
+  var lightCount = 0u;
+  if (POINT_LIGHTS) { lightCount = min(clusterCounts[cluster], ${MAX_LIGHTS_PER_CLUSTER}u); }
   let clusterBase = cluster * ${MAX_LIGHTS_PER_CLUSTER}u;
 
   // Four at a time: their indices, then where they are, then each one in

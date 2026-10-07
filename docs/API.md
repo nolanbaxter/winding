@@ -813,7 +813,7 @@ Default `1`. Blur radius of each bloom upsample, in texels. Larger is a wider, s
 <a id="post-strength"></a>
 ### `engine.renderer.post.strength` → `number`
 
-Default `0.06`. How much of the image is bloom, 0 to 1 (clamped). Bloom is mixed in, not added, so raising it moves light into the halo without brightening the image.
+Default `0.06`. How much of the image is bloom, 0 to 1 (clamped). Bloom is mixed in, not added, so raising it moves light into the halo without brightening the image. `0` turns bloom off, and its passes are not drawn.
 
 ```js
 engine.renderer.post.strength = 0.15;

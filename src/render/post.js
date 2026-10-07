@@ -499,7 +499,9 @@ export class PostStack {
     this._frame++;
     this.rhi.queue.writeBuffer(this.gradingBuffer, 0, packGrading(this._gradingData, this.grading));
     this._evictBindGroups();
-    const levels = this.levelCountFor(width, height);
+    // No bloom, no chain: a strength of 0 mixes none of it in, and its nine
+    // passes were drawn all the same. The tonemap reads the scene in its place.
+    const levels = this.strength > 0 ? this.levelCountFor(width, height) : 0;
     this.levelsDrawn = levels;
     this._offsets = [];
 
@@ -546,9 +548,9 @@ export class PostStack {
     // it cannot accumulate in place.
     //
     // The smallest level needs no upsample pass: it is already its own result.
-    let smaller = chain[levels - 1].resource;
-    let smallerWidth = chain[levels - 1].width;
-    let smallerHeight = chain[levels - 1].height;
+    let smaller = levels > 0 ? chain[levels - 1].resource : sceneColor;
+    let smallerWidth = levels > 0 ? chain[levels - 1].width : width;
+    let smallerHeight = levels > 0 ? chain[levels - 1].height : height;
 
     for (let i = levels - 2; i >= 0; i--) {
       const slot = MAX_BLOOM_LEVELS + i;
@@ -595,7 +597,7 @@ export class PostStack {
       : surface;
     graph.addPass({
       name: 'tonemap',
-      reads: exposed === null ? [sceneColor, bloomResult] : [sceneColor, bloomResult, exposed],
+      reads: [sceneColor, ...(bloomResult === sceneColor ? [] : [bloomResult]), ...(exposed === null ? [] : [exposed])],
       color: [{ resource: ldr, clear: black }],
       execute: this._tonemapExecute,
     });

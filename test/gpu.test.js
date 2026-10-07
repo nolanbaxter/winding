@@ -1213,7 +1213,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         // The soft pipelines start building on the first frame that asks for them,
         // and frames draw the plain edge until they are ready.
         probe.renderFrame(scenes[1], cam);
-        for (let i = 0; i < 200 && !probe.renderer._variantSets.get(16)?.ready; i++) await new Promise((r) => setTimeout(r, 20));
+        await probe.renderer._pipelinesBuilt();
         results[name].soft = await penumbras();
         // Switched off for the whole renderer: plain again, each light keeping its size.
         probe.renderer.softShadows = false;
@@ -2312,7 +2312,7 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       cam.target.set([0, 0, 0]);
       probe.renderFrame(scene, cam);
       // The first frame with decals starts their pipelines; draw once they are ready.
-      await probe.renderer._variantSets.get(2)?.building;
+      await probe.renderer._pipelinesBuilt();
       probe.renderFrame(scene, cam);
       const pixels = await probe.gpu.readPixels();
       const { width, height } = probe.gpu;
