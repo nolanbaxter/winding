@@ -476,7 +476,8 @@ ${morphFn}
 @compute @workgroup_size(4)
 fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   let draw = drawData[which.x];
-  let m = applyMorph(draw, id.x, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  // From the arena's start, as vertex_index counts in a draw with a base vertex.
+  let m = applyMorph(draw, which.y + id.x, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
   out[id.x * 3u] = m.position.x;
   out[id.x * 3u + 1u] = m.position.y;
   out[id.x * 3u + 2u] = m.position.z;
@@ -495,7 +496,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     const which = device.createBuffer({
       size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(which, 0, Uint32Array.from([morphIndex, 0, 0, 0]));
+    if (primitive.baseVertex === 0) throw new Error('the morphed mesh sits at the arena start, which would hide an offset bug');
+    device.queue.writeBuffer(which, 0, Uint32Array.from([morphIndex, primitive.baseVertex, 0, 0]));
 
     const pipeline = device.createComputePipeline({
       layout: 'auto', compute: { module, entryPoint: 'main' },

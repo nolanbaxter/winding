@@ -832,7 +832,14 @@ export class GpuDriven {
       // rewritten whole every frame, precisely because they are not.
       const m = scene.renderableMorph[i];
       const primitive = scene.renderablePrimitive[i];
-      this.drawDataU32[drawFloat + 29] = m >= 0 ? primitive.morphBase : 0;
+      // Less the primitive's place in the geometry arena: vertex_index counts
+      // from the arena's start, its deltas from the primitive's first vertex.
+      // u32 arithmetic wraps on the GPU as >>> 0 does here, so the sum lands
+      // right even where this one is "negative".
+      const cs = primitive.morphCountStride;
+      this.drawDataU32[drawFloat + 29] = m >= 0
+        ? (primitive.morphBase - primitive.baseVertex * (cs & 0xffff) * (cs >>> 16)) >>> 0
+        : 0;
       this.drawDataU32[drawFloat + 30] = m >= 0 ? morph.offsets[m] : 0;
       this.drawDataU32[drawFloat + 31] = m >= 0 ? primitive.morphCountStride : 0;
 
