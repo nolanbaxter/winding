@@ -1072,6 +1072,44 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   });
 
 
+  await step('a walking camera scrolls the cascades, and they match the ones drawn whole', async () => {
+    // A row of blocks on a long ground under a slanting sun, the camera walking
+    // along it: the cascades should scroll rather than redraw, and throwing
+    // them all away to draw them whole must give the same picture.
+    const ground = await engine.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], roughnessFactor: 0.9 }));
+    const block = await engine.load(buildFeatureGLB({ baseColorFactor: [0.3, 0.3, 0.3, 1] }));
+    const scene = engine.createScene();
+    scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(40, 6, 1);
+    for (let i = 0; i < 12; i++) {
+      scene.add(block).setAxisAngle([1, 0, 0], Math.PI / 2).setScale(0.4, 0.4, 1).setPosition(-33 + i * 6, 1, (i % 3) - 1);
+    }
+    scene.addLight({ type: 'directional', direction: [-0.5, -0.8, -0.3], intensity: 5 });
+    const cam = new Camera({ fovY: Math.PI / 3, near: 0.1 });
+    let scrolled = 0, whole = 0;
+    for (let i = 0; i < 90; i++) {
+      cam.position.set([-30 + i * 0.4, 2, 6]);
+      cam.target.set([-26 + i * 0.4, 0.5, 0]);
+      engine.renderFrame(scene, cam);
+      scrolled += engine.stats.cascadesScrolled;
+      whole += engine.stats.cascadesDrawn;
+    }
+    const kept = await engine.gpu.readPixels();
+    engine.renderer.shadows._cascadeCache = [];
+    engine.renderFrame(scene, cam);
+    const redrawn = await engine.gpu.readPixels();
+    let differ = 0, most = 0;
+    for (let i = 0; i < kept.length; i++) {
+      if (i % 4 === 3) continue;
+      const d = Math.abs(kept[i] - redrawn[i]);
+      if (d > 0) differ++;
+      most = Math.max(most, d);
+    }
+    const report = `${scrolled} cascades scrolled and ${whole} drawn whole over 90 frames; against all redrawn, ${differ} channels differ, most by ${most}`;
+    // Rounding where the strips meet may move a texel's edge: a level or two, rarely.
+    if (!(scrolled > whole && differ <= kept.length * 0.001 && most <= 2)) throw new Error(report);
+    return report;
+  });
+
   await step('point and spot lights cast shadows when asked, and only where the caster is', async () => {
     // A blocker over the ground, one light above it and no sun, from straight
     // above. The ground under the blocker must darken when the light casts,

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A moving camera scrolls the sun's shadow maps instead of redrawing them.** When a cascade's box
+  steps along its grid and nothing else changed, its map keeps every texel where it is -- the map
+  wraps, and only its origin moves -- and only the strip the box moved onto is drawn. The same
+  shadows: a scrolled map matches one drawn whole to within a level on a few dozen channels.
+  Sponza at 720p on Iris Xe, walking the nave: shadow passes 3.9 -> 0.55 ms a frame, the whole
+  frame 11.9 -> 7.6 ms. The new `stats.cascadesScrolled` counts them.
+- **Every caster in the scene casts into every cascade.** A cascade's depth now spans the scene
+  along the light, rather than reaching four cascade radii toward it -- so a tall building far up
+  the light no longer loses its shadow -- and stays put while the camera moves, which is what
+  lets a cascade scroll. [`casterExtent`](docs/API.md#renderer-shadows) is deprecated and no
+  longer used.
 - **Each sun cascade draws only the casters that reach it.** Every caster went into every cascade,
   to be transformed and clipped away by the GPU; now a batch whose box lies outside a cascade is
   not drawn into it. The same shadows. A town of 900 separate buildings: shadow passes 0.40 ->

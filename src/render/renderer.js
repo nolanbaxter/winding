@@ -241,6 +241,8 @@ export class Renderer {
       // guarantees: the next thing that needs one has to share.
       { binding: 21, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d-array' } },
       { binding: 22, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      // The cascades' sampler, which wraps: see shadows.js.
+      { binding: 23, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
     ];
     checkStorageStages(rhi, frameEntries);
     this.materials = new MaterialRegistry(rhi, {
@@ -827,6 +829,7 @@ export class Renderer {
           { binding: 20, resource: { buffer: this._frameProbes?.buffer ?? this._noProbes.buffer } },
           { binding: 21, resource: this.decals.view },
           { binding: 22, resource: { buffer: this.decals.buffer } },
+          { binding: 23, resource: this.shadows.cascadeSampler },
         ],
       });
       this._frameBindGroups.set(environment, bindGroup);
@@ -1144,13 +1147,15 @@ export class Renderer {
     changes.all = target !== null || materialsChanged || this.gpu.hasLod
       || this._shadowCacheScene !== scene || this._shadowCacheRevision !== scene.revision;
     this.shadows.boundBatches(scene, this.gpu, items, anyMoved);
-    this.shadows.update(camera, scene, changes);
+    this.shadows.update(camera, scene, changes,
+      this._hasSceneBounds ? this._sceneMin : null, this._hasSceneBounds ? this._sceneMax : null);
     this.shadows.updateLocal(scene, camera, changes);
     this._shadowCacheScene = scene;
     this._shadowCacheRevision = target !== null ? -1 : scene.revision;
     this.stats.shadowViews = this.shadows.localCount;
     this.stats.shadowViewsDrawn = this.shadows.localDrawn;
     this.stats.cascadesDrawn = this.shadows.cascadesDrawn;
+    this.stats.cascadesScrolled = this.shadows.cascadesScrolled;
     if (this._shadowRevision !== this.shadows.revision) {
       this._frameBindGroups = new WeakMap();
       this._shadowRevision = this.shadows.revision;

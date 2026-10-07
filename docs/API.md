@@ -139,7 +139,7 @@ Creates an engine on a `<canvas>`: requests the WebGPU device, compiles the rend
 | `size` | `2048` | Texels on a side of each directional shadow cascade. |
 | `cascades` | `4` | Cascades per shadow-casting directional light, 1 to 4. |
 | `lambda` | `0.7` | How cascades split the range: `0` uniform, `1` logarithmic. |
-| `casterExtent` | `4` | How far behind each cascade casters are still caught, as a multiple of the cascade's radius. |
+| `casterExtent` | `4` | Deprecated, and no longer used for a scene with anything in it: every caster in the scene casts into every cascade, however far toward the light it stands. It was how far behind each cascade casters were still caught, as a multiple of the cascade's radius. |
 | `normalBias` | `1.5` | Offset along the surface normal at lookup, in texels. Raise it for shadow acne. |
 | `depthBiasSlope` | `-2` | Slope-scaled depth bias while drawing the map. Fixed at creation. |
 | `depthBiasConstant` | `-1` | Constant depth bias while drawing the map. Fixed at creation. |
@@ -487,7 +487,8 @@ Counts from the last frame drawn. Read only. The first five fields start at 0; t
 | `transparentDraws` | 3D | Draw calls for blended objects. |
 | `shadowViews` | 3D | Point and spot shadow views. |
 | `shadowViewsDrawn` | 3D | Of those, how many were redrawn (the rest were cached). |
-| `cascadesDrawn` | 3D | Directional shadow cascades redrawn. |
+| `cascadesDrawn` | 3D | Directional shadow cascades redrawn whole. |
+| `cascadesScrolled` | 3D | Directional shadow cascades scrolled: the camera moved, and only the strip of map it moved onto was drawn. |
 | `sprites2D` | 2D | Sprites and glyphs in the 2D view. |
 | `sprites2DWritten` | 2D | Of those, how many were re-uploaded. |
 | `tiles2DWritten` | 2D | Tile-map tiles re-uploaded. |
@@ -757,7 +758,9 @@ engine.renderer.softShadows = false;
 <a id="renderer-shadows"></a>
 ### `engine.renderer.shadows` → `ShadowMaps`
 
-The shadow maps. Three of the [`shadows` options](#winding-create) can change at any time as fields here: `lambda`, `casterExtent` and `normalBias`.
+The shadow maps. Three of the [`shadows` options](#winding-create) can change at any time as fields here: `lambda`, `casterExtent` (deprecated, no longer used) and `normalBias`.
+
+A directional light's cascades follow the camera on a grid of 16 texels. When the camera moves and nothing else changes, a cascade is scrolled rather than redrawn: its map keeps every texel where it is and only the strip it moved onto is drawn. The shadows are the same as a full redraw. Anything moving inside a cascade, the light turning, or the shadow distance changing, draws it whole.
 
 ```js
 engine.renderer.shadows.normalBias = 2.5;   // less acne

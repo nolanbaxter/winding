@@ -191,7 +191,14 @@ ${MATERIAL_WGSL}
 @group(0) @binding(14) var<storage, read> directionals  : array<Directional>;
 // Their cascade matrices: slot * cascades + cascade, the same index as the
 // layer of shadowMap they were drawn into.
-@group(0) @binding(17) var<storage, read> cascadeViews  : array<mat4x4<f32>>;
+/** A cascade: its matrix, and where its map's origin sits (xy in uv, zw in texels): see shadows.js. */
+struct CascadeView {
+  viewProjection : mat4x4<f32>,
+  origin         : vec4<f32>,
+};
+@group(0) @binding(17) var<storage, read> cascadeViews  : array<CascadeView>;
+// Wraps, where shadowSampler clamps: a cascade's map is scrolled, not redrawn.
+@group(0) @binding(23) var          cascadeSampler : sampler_comparison;
 // The opaque scene, mipped, for transmissive surfaces (render/transmission.js).
 @group(0) @binding(18) var         behindMap : texture_2d<f32>;
 // Reflection probes' prefiltered cubes, and their boxes, smallest first.
@@ -919,7 +926,8 @@ fn searchTap(i : u32) -> vec2<f32> { return softTapOf(i, SEARCH_TAPS); }
  */
 fn softDirectional(layer : i32, uv : vec2<f32>, depth : f32, texelWorld : f32, angle : f32) -> f32 {
   let size = frame.shadowParams.y;
-  let m = cascadeViews[layer];
+  let m = cascadeViews[layer].viewProjection;
+  let origin = cascadeViews[layer].origin;
   let depthPerWorld = length(vec3<f32>(m[0].z, m[1].z, m[2].z));
   let last = vec2<i32>(i32(size) - 1);
   // Search as far as a caster at the light's near plane could throw its penumbra.
@@ -929,8 +937,8 @@ fn softDirectional(layer : i32, uv : vec2<f32>, depth : f32, texelWorld : f32, a
   var blockers = 0.0;
   var found = 0.0;
   for (var i = 0u; i < SEARCH_TAPS; i++) {
-    let at = clamp(vec2<i32>((uv + searchTap(i) * search / size) * size), vec2<i32>(0), last);
-    let d = textureLoad(shadowMap, at, layer, 0);
+    let logical = clamp(vec2<i32>((uv + searchTap(i) * search / size) * size), vec2<i32>(0), last);
+    let d = textureLoad(shadowMap, (logical + vec2<i32>(origin.zw)) % vec2<i32>(i32(size)), layer, 0);
     // Reverse-Z: nearer the light is greater.
     if (d > depth) { blockers += d; found += 1.0; }
   }
@@ -941,7 +949,7 @@ fn softDirectional(layer : i32, uv : vec2<f32>, depth : f32, texelWorld : f32, a
   let penumbra = clamp(gap * angle / texelWorld, 1.0, SOFT_MOST);
   var total = 0.0;
   for (var i = 0u; i < SOFT_TAPS; i++) {
-    total += textureSampleCompareLevel(shadowMap, shadowSampler, uv + softTap(i) * penumbra / size, layer, depth);
+    total += textureSampleCompareLevel(shadowMap, cascadeSampler, uv + origin.xy + softTap(i) * penumbra / size, layer, depth);
   }
   return total / f32(SOFT_TAPS);
 }
@@ -1010,7 +1018,7 @@ fn directionalVisibility(slot : i32, worldPosition : vec3<f32>, normal : vec3<f3
   let offset = cascadeTexelSize(cascade) * spacing * frame.shadowParams.x * (1.0 + slope * 2.0);
   let biased = worldPosition + normal * offset;
 
-  let lightClip = cascadeViews[layer] * vec4<f32>(biased, 1.0);
+  let lightClip = cascadeViews[layer].viewProjection * vec4<f32>(biased, 1.0);
   let ndc = lightClip.xyz / lightClip.w;
 
   // NDC y is up, texture v is down.
@@ -1028,12 +1036,14 @@ fn directionalVisibility(slot : i32, worldPosition : vec3<f32>, normal : vec3<f3
   // about three texels wide -- enough to hide the staircase without the cost
   // of a real soft-shadow kernel.
   let texel = spacing / frame.shadowParams.y;
+  // Where this texel lives now that the map has scrolled; the sampler wraps.
+  let at = uv + cascadeViews[layer].origin.xy;
   var total = 0.0;
   for (var y = -1; y <= 1; y = y + 1) {
     for (var x = -1; x <= 1; x = x + 1) {
       total = total + textureSampleCompareLevel(
-        shadowMap, shadowSampler,
-        uv + vec2<f32>(f32(x), f32(y)) * texel,
+        shadowMap, cascadeSampler,
+        at + vec2<f32>(f32(x), f32(y)) * texel,
         layer, ndc.z,
       );
     }
