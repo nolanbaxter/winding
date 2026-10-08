@@ -1261,10 +1261,6 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // free and uniform across the quad, where a branch would not be.
   let uvSets = u32(material.uvSets);
   let uvBaseColor = transformUV(0u, select(v.uv, v.uv1, (uvSets & 1u) != 0u));
-  let uvMetallicRoughness = transformUV(1u, select(v.uv, v.uv1, (uvSets & 2u) != 0u));
-  let uvNormal = transformUV(2u, select(v.uv, v.uv1, (uvSets & 4u) != 0u));
-  let uvOcclusion = transformUV(3u, select(v.uv, v.uv1, (uvSets & 8u) != 0u));
-  let uvEmissive = transformUV(4u, select(v.uv, v.uv1, (uvSets & 16u) != 0u));
 
   // COLOR_0 multiplies base colour, per the spec. An asset without it carries
   // opaque white, so this costs those nothing and needs no variant.
@@ -1282,19 +1278,6 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
     return vec4<f32>(min(sampled.rgb, vec3<f32>(65504.0)), sampled.a);
   }
 
-  // glTF puts roughness in G and metallic in B. Occlusion is its own texture,
-  // even though exporters usually pack it into R of this one.
-  let mr = textureSampleBias(mrMap, surfSampler, uvMetallicRoughness, frame.probeInfo.z);
-  let roughness = clamp(mr.g * material.roughness, 0.045, 1.0);
-  let metallic  = clamp(mr.b * material.emissive.w, 0.0, 1.0);
-
-  // The spec's blend: strength 0 disables the map entirely rather than
-  // multiplying ambient by zero.
-  let occlusionSample = textureSampleBias(occlusionMap, surfSampler, uvOcclusion, frame.probeInfo.z).r;
-  let occlusion = 1.0 + material.occlusionStrength * (occlusionSample - 1.0);
-
-  // Tangent-space normal into world space.
-  //
   // The geometric normal is flipped for a back face. A double-sided material
   // draws both windings from one set of vertices, so a back face arrives with
   // the normal of the front it was authored as -- pointing away from the eye.
@@ -1302,15 +1285,35 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // which is the whole leaf on a tree, the inside of a curtain, or the reverse
   // of any thin panel. Single-sided geometry never reaches here with a back
   // face, since the pipeline culls it, so this costs those nothing.
-  //
-  // The bitangent flips with the normal to keep the basis right-handed. The
-  // tangent does not: it follows the UV's u axis, which does not reverse.
   let facing = select(-1.0, 1.0, frontFacing);
-  var tangentNormal = (textureSampleBias(normalMap, surfSampler, uvNormal, frame.probeInfo.z).xyz * 2.0 - 1.0)
-                    * vec3<f32>(material.normalScale, material.normalScale, 1.0);
-  tangentNormal = vec3<f32>(untransformNormal(4u, tangentNormal.xy), tangentNormal.z);
   let geometric = normalize(v.normal) * facing;
-  let n = mapNormal(v, geometric, facing, tangentNormal);
+
+  // A material with none of the metallic-roughness, normal and occlusion maps
+  // skips all three lookups and the normal's basis: what they would give is
+  // known (HAS_* in material.js). One with any of them does all three, an
+  // absent one sampling its 1x1 default, together -- a branch per map was
+  // measured slower on textured Sponza than the plain lookups.
+  var mr = vec4<f32>(1.0);
+  var occlusionSample = 1.0;
+  var n = geometric;
+  if ((uvSets & 224u) != 0u) {
+    // glTF puts roughness in G and metallic in B. Occlusion is its own texture,
+    // even though exporters usually pack it into R of this one.
+    mr = textureSampleBias(mrMap, surfSampler, transformUV(1u, select(v.uv, v.uv1, (uvSets & 2u) != 0u)), frame.probeInfo.z);
+    occlusionSample = textureSampleBias(occlusionMap, surfSampler, transformUV(3u, select(v.uv, v.uv1, (uvSets & 8u) != 0u)), frame.probeInfo.z).r;
+    // Tangent-space normal into world space. The bitangent flips with the
+    // normal to keep the basis right-handed. The tangent does not: it follows
+    // the UV's u axis, which does not reverse.
+    var tangentNormal = (textureSampleBias(normalMap, surfSampler, transformUV(2u, select(v.uv, v.uv1, (uvSets & 4u) != 0u)), frame.probeInfo.z).xyz * 2.0 - 1.0)
+                      * vec3<f32>(material.normalScale, material.normalScale, 1.0);
+    tangentNormal = vec3<f32>(untransformNormal(4u, tangentNormal.xy), tangentNormal.z);
+    n = mapNormal(v, geometric, facing, tangentNormal);
+  }
+  let roughness = clamp(mr.g * material.roughness, 0.045, 1.0);
+  let metallic  = clamp(mr.b * material.emissive.w, 0.0, 1.0);
+  // The spec's blend: strength 0 disables the map entirely rather than
+  // multiplying ambient by zero.
+  let occlusion = 1.0 + material.occlusionStrength * (occlusionSample - 1.0);
 
   let view = normalize(frame.cameraPosition.xyz - v.world);
   let NoV = max(dot(n, view), 1e-4);
@@ -1571,7 +1574,8 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   ambientOut = min(ambient, vec3<f32>(65504.0));
 
   // A coat dims what shines through it as it dims everything else beneath.
-  var emissive = textureSampleBias(emissiveMap, surfSampler, uvEmissive, frame.probeInfo.z).rgb * material.emissive.rgb;
+  var emissive = material.emissive.rgb;
+  if ((uvSets & 256u) != 0u) { emissive = emissive * textureSampleBias(emissiveMap, surfSampler, transformUV(4u, select(v.uv, v.uv1, (uvSets & 16u) != 0u)), frame.probeInfo.z).rgb; }
   if (EXTENSIONS) { emissive = emissive * (1.0 - s.coat * s.coatFresnel); }
 
   // Linear HDR, deliberately not clamped to 1. Bloom needs to know a highlight

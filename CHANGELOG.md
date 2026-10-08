@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - [Depth of field](docs/API.md#renderer-dof) whose largest blur is a pixel or less skips its three
     passes: the composite took the sharp colour everywhere. Sponza at f/22 focused at 10 m: GPU -21%.
   - The tonemap skips colour grading's white balance, contrast and saturation when they are neutral.
+  - A material with none of the metallic-roughness, normal and occlusion maps skips their lookups
+    and the normal map's basis, and one with no emissive map skips that lookup; what they would give
+    is known. A town of untextured buildings: main pass -17%, GPU -12%. Textured Sponza: unchanged.
+    An untextured surface's normal is now exactly its own: the 1x1 default decoded a hair off flat
+    (4 channels in the town's frame moved by up to 2 levels).
 
 ## [1.6.0] - 2026-10-07
 

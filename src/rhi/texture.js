@@ -374,8 +374,9 @@ export function clampSampler(rhi) {
  *
  * This is why there are no shader variants for texture presence: every
  * material binds four textures, absent ones point at these, and the factors in
- * the material uniform do the rest. Sampling a 1x1 texture is free, and the
- * alternative is a pipeline variant per combination of present maps.
+ * the material uniform do the rest. Sampling a 1x1 texture is cheap, not free
+ * (see HAS_* in material.js), and the alternative is a pipeline variant per
+ * combination of present maps.
  */
 export function defaultTextures(rhi) {
   return cached(rhi, 'defaults', () => ({
