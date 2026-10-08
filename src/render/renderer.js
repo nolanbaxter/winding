@@ -1082,7 +1082,10 @@ export class Renderer {
         posed ||= skin.posed;
       }
     }
-    if (record !== null && (skinned > 0 || morphed > 0)) this._recordDeformed(scene, record);
+    // Whether a skin or morph changed any box this frame: none for a scene of
+    // characters standing still, which then costs what a static scene does.
+    const deformed = skinned > 0 || morphed > 0;
+    if (record !== null && deformed) this._recordDeformed(scene, record);
 
     // The scene's own extent, which is what the shadow and cluster ranges are
     // derived from. Recomputed only when something moved or the contents
@@ -1112,7 +1115,7 @@ export class Renderer {
     // and the gather below is what decides those offsets.
     this.morph.update(scene);
     this.gpu.update(scene, this.frustum, hzb, camera.viewProjection, writeDrawData,
-      this.skinPalette.offsets, this.morph, camera.projection[5], items);
+      this.skinPalette.offsets, this.morph, camera.projection[5], items, deformed);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
     p?.mark('draw data');
 
@@ -1226,7 +1229,7 @@ export class Renderer {
     // from other eyes into the same layers, and then once more after it.
     changes.all = target !== null || materialsChanged || this.gpu.hasLod
       || this._shadowCacheScene !== scene || this._shadowCacheRevision !== scene.revision;
-    this.shadows.boundBatches(scene, this.gpu, items, anyMoved);
+    this.shadows.boundBatches(scene, this.gpu, items, anyMoved, deformed);
     this.shadows.update(camera, scene, changes,
       this._hasSceneBounds ? this._sceneMin : null, this._hasSceneBounds ? this._sceneMax : null);
     this.shadows.updateLocal(scene, camera, changes);

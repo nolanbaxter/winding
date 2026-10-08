@@ -1458,12 +1458,12 @@ export class ShadowMaps {
    * when what moved was not listed; otherwise grown by the renderables that
    * moved (`items`, Scene.movedRenderables). Too big costs a draw the GPU
    * clips away; it never loses a shadow. Skins and morphs move boxes without
-   * moving nodes, so a scene with either rebuilds every frame.
+   * moving nodes, so a frame where one changed a box (`deformed`) rebuilds.
    */
-  boundBatches(scene, gpu, items, anyMoved) {
+  boundBatches(scene, gpu, items, anyMoved, deformed = true) {
     const count = gpu.batchCount;
     const rebuild = this._boxedScene !== scene || this._boxedRevision !== gpu.sceneRevision
-      || (anyMoved && items === null) || scene.skins.length > 0 || scene.morphs.length > 0;
+      || (anyMoved && items === null) || deformed;
     const { worldMin, worldMax } = scene;
     const grow = (b, i) => {
       const k = b * 6, o = i * 3, box = this._batchBoxes;

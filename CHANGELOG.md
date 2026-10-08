@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is known. A town of untextured buildings: main pass -17%, GPU -12%. Textured Sponza: unchanged.
     An untextured surface's normal is now exactly its own: the 1x1 default decoded a hair off flat
     (4 channels in the town's frame moved by up to 2 levels).
+  - A skinned or morphed mesh standing still costs what a static one does. A skin's bounds counted
+    as changed every frame, posed or not, so one idle character had every frame re-union every
+    box in the scene, rewrite every deforming object's draw data and rebuild the shadow casters'
+    boxes. Now only a box that changed counts. 10,000 boxes and one idle Fox: CPU -40% a frame;
+    the same pixels. Walking, as before.
 
 ## [1.6.0] - 2026-10-07
 
