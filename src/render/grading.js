@@ -119,7 +119,9 @@ export function packGrading(out, grading) {
   if (!(contrast > 0 && Number.isFinite(contrast))) throw new Error(`grading: contrast must be positive, got ${contrast}`);
   if (!(saturation >= 0 && Number.isFinite(saturation))) throw new Error(`grading: saturation must be 0 or more, got ${saturation}`);
   out.set([...rows[0], contrast, ...rows[1], saturation, ...rows[2], grading?.lut?.size ?? 0], 0);
-  out.set([...(grading?.lut?.domainMin ?? [0, 0, 0]), 0, ...(grading?.lut?.domainMax ?? [1, 1, 1]), 0], 12);
+  // domainMin.w: 1 when there is linear grading to do, so none costs the tonemap nothing.
+  const graded = grading?.whiteBalance !== undefined || contrast !== 1 || saturation !== 1 ? 1 : 0;
+  out.set([...(grading?.lut?.domainMin ?? [0, 0, 0]), graded, ...(grading?.lut?.domainMax ?? [1, 1, 1]), 0], 12);
   return out;
 }
 
@@ -129,12 +131,13 @@ struct Grading {
   balance0  : vec4<f32>,   // white balance, row by row; w = contrast
   balance1  : vec4<f32>,   // w = saturation
   balance2  : vec4<f32>,   // w = the LUT's size, 0 for none
-  domainMin : vec4<f32>,   // the LUT's input range
+  domainMin : vec4<f32>,   // the LUT's input range; w = 1 for linear grading, 0 for none
   domainMax : vec4<f32>,
 };
 
 /** Linear grading, before the tonemap: white balance, contrast, saturation. */
 fn gradeLinear(g : Grading, c : vec3<f32>) -> vec3<f32> {
+  if (g.domainMin.w == 0.0) { return c; }
   var colour = vec3<f32>(dot(g.balance0.xyz, c), dot(g.balance1.xyz, c), dot(g.balance2.xyz, c));
   // Contrast in stops about middle grey: grey stays, a stop over grows by it.
   colour = 0.18 * pow(max(colour, vec3<f32>(0.0)) / 0.18, vec3<f32>(g.balance0.w));

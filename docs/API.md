@@ -679,6 +679,8 @@ Throws (on the next frame): `'dof: focusDistance must be positive…'`; `'dof: f
 engine.renderer.dof = { focusDistance: 3, fStop: 1.8 };
 ```
 
+Notes: a lens whose largest blur is a pixel or less -- a small aperture focused far away -- leaves every pixel sharp, so its passes are skipped and it costs nothing.
+
 Notes: skipped for an orthographic camera.
 
 <a id="renderer-ao"></a>
@@ -744,7 +746,7 @@ Default `false` (the `oit` option). Weighted-blended order-independent transpare
 engine.renderer.oit = true;
 ```
 
-Notes: builds in the background the first time, like [`ao`](#renderer-ao).
+Notes: builds in the background the first time, like [`ao`](#renderer-ao). A frame with nothing blended in view skips its passes and targets entirely.
 
 <a id="renderer-softshadows"></a>
 ### `engine.renderer.softShadows` → `boolean`

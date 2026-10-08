@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Off means off, for more than Sponza.** A sweep of every feature for work done when it has
+  nothing to do; each fix A/B'd on Sponza (with OIT, ambient occlusion or depth of field on) and a
+  town of 900 buildings, the same pixels throughout (one channel moved by one level, from grading).
+  - Occlusion culling's depth pyramid, second cull and second pass are skipped when every opaque
+    mesh is merged, as they are culled by view alone. Sponza: GPU -8%; the town: -13% to -24%.
+  - The sky is drawn after the opaque geometry, where nothing covers it, instead of under all of
+    it first.
+  - With [`oit`](docs/API.md#renderer-oit) on, a frame with nothing blended in view skips its two
+    full-screen targets, its pass and its resolve; with it off, the separate blend pass is skipped too.
+  - [Depth of field](docs/API.md#renderer-dof) whose largest blur is a pixel or less skips its three
+    passes: the composite took the sharp colour everywhere. Sponza at f/22 focused at 10 m: GPU -21%.
+  - The tonemap skips colour grading's white balance, contrast and saturation when they are neutral.
+
 ## [1.6.0] - 2026-10-07
 
 **Fewer draws, less overdraw, shadows that scroll.** Every mesh's geometry now lives in one

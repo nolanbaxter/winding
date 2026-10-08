@@ -216,6 +216,9 @@ export class DepthOfField {
   addPasses(graph, { sceneColor, depth, camera, width, height, dof }) {
     if (camera.orthographic) return sceneColor;
     const { scale, largest } = lensCoefficients(dof, camera.fovY, height);
+    // No disc can pass a pixel, so the composite takes the sharp colour
+    // everywhere (its blend weight is the disc less one): skip all three passes.
+    if (largest <= 1) return sceneColor;
     this._data.set([scale, dof.focusDistance, camera.near, largest, 1 / width, 1 / height, 0, 0]);
     this.rhi.queue.writeBuffer(this._buffer, 0, this._data);
     this._frame++;

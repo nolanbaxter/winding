@@ -255,7 +255,8 @@ somewhere else.
 pyramid is built from that, min-reduced (which is *max* under reverse-Z); then a second cull tests
 everything else against it and a second pass draws whatever it newly admits. The pyramid is from
 this frame, so an object that becomes visible appears on the frame it does, with no pop. The only
-thing carried between frames is one bit per object.
+thing carried between frames is one bit per object. Meshes drawn merged are culled by view alone, so
+in a scene where every opaque mesh is merged, the pyramid and the second pass are skipped.
 
 **A render graph.** Passes declare what they read and write. Execution order, load/store ops, texture
 lifetimes and dead-pass elimination are all derived from that — nothing says "clear here" or "run this

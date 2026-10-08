@@ -1417,19 +1417,26 @@ export class Renderer {
 
     // Built from the early depth and consumed later in the SAME frame, which
     // is the whole difference: the occlusion test is no longer a frame behind.
-    const hzbLevels = [];
-    for (let level = 0; level < hzb.levelCount; level++) {
-      hzbLevels.push(graph.importTexture(`hzb${level}`, hzb.levelViews[level]));
-    }
-    hzb.addPasses(graph, depth, hzbLevels);
+    // Only batches are culled by it: when every opaque one is merged -- culled
+    // by view, drawn in the early pass -- the pyramid and the late cull have
+    // nothing to test, and are skipped.
+    let occludable = false;
+    for (let d = 0; d < this.batchList.count && !occludable; d++) occludable = this.merged.batchMerged[this.batchList.payloads[d]] === 0;
+    if (occludable) {
+      const hzbLevels = [];
+      for (let level = 0; level < hzb.levelCount; level++) {
+        hzbLevels.push(graph.importTexture(`hzb${level}`, hzb.levelViews[level]));
+      }
+      hzb.addPasses(graph, depth, hzbLevels);
 
-    this.gpu.addCullPass(graph, {
-      phase: 1,
-      boundsResource: drawDataBuffer,
-      indirectResource: indirectLate,
-      visibleResource: visibleLate,
-      hzbResources: hzbLevels,
-    });
+      this.gpu.addCullPass(graph, {
+        phase: 1,
+        boundsResource: drawDataBuffer,
+        indirectResource: indirectLate,
+        visibleResource: visibleLate,
+        hzbResources: hzbLevels,
+      });
+    }
 
     // Transmissive surfaces need the opaque scene finished and copied before
     // they draw, so blended ones -- which must come after them -- leave the
@@ -1452,7 +1459,7 @@ export class Renderer {
     // then the blended geometry, which has to follow every opaque draw. No
     // clear on either attachment: the graph derives `load` from the early pass
     // having written them.
-    graph.addPass({
+    if (occludable || (this._blendInLate && this.transparentList.count > 0)) graph.addPass({
       name: 'forward:late',
       reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts, indirectLate, visibleLate],
       color: ambient === null ? [{ resource: sceneColor }] : [{ resource: sceneColor }, { resource: ambient }],
@@ -1488,7 +1495,10 @@ export class Renderer {
       });
     }
 
-    if (!this._frameOIT && !this._blendInLate) {
+    // Blended surfaces in view, transmissive ones aside: none, and neither of
+    // the blend paths below has anything to draw.
+    const blended = this.transparentList.count - this._transmissiveCount;
+    if (!this._frameOIT && !this._blendInLate && blended > 0) {
       graph.addPass({
         name: 'forward:blend',
         reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts],
@@ -1501,7 +1511,7 @@ export class Renderer {
     // OIT, when it is on. Blended geometry skipped the pass above, so it is
     // drawn here into its own two targets in whatever order it comes -- that
     // is the point -- and composited over the scene by the resolve.
-    if (this._frameOIT) {
+    if (this._frameOIT && blended > 0) {
       const accum = graph.createTexture('oit-accum', {
         width,
         height,
@@ -1903,12 +1913,6 @@ export class Renderer {
     const scene = this._frameScene;
     const environment = this._frameEnvironment;
 
-    if (phase === 0 && this.skybox) {
-      // The skybox binds its own layout at group 0, so the frame group has to
-      // be set AFTER it -- a bind group set at an index is overwritten
-      // regardless of which pipeline layout put it there.
-      this._sky().draw(pass, environment);
-    }
     pass.setBindGroup(GROUP_FRAME, this._frameBindGroup(environment));
     this.pipelineLayout.bindEmptyGroups(pass);
 
@@ -1968,6 +1972,9 @@ export class Renderer {
       this.merged.encode(pass, this.drawLayout, GROUP_DRAW,
         (material, mirrored) => this.pipelines.get(this._mergedFor(material, mirrored)),
         (material) => pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(material)));
+      // The sky last, where nothing opaque was drawn: see skybox.js. It binds
+      // its own layout at group 0, which nothing after it in this pass needs.
+      if (this.skybox) this._sky().draw(pass, environment);
       return;
     }
 
