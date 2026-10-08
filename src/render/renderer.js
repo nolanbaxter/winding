@@ -672,7 +672,7 @@ export class Renderer {
       // shading draw only has to match it: each pixel shades once.
       if ((variant & 3) === ALPHA_OPAQUE) {
         merged.prepass = {
-          ...merged, label: `${descriptor.label}:merged-depth`, fragmentEntry: 'fsDepth',
+          ...merged, label: `${descriptor.label}:merged-depth`, vertexEntry: 'vsMergedDepth', fragmentEntry: 'fsDepth',
           targets: descriptor.targets.map((t) => ({ format: t.format, writeMask: 0 })),
         };
         merged.depth = { ...descriptor.depth, depthCompare: 'greater-equal', depthWriteEnabled: false };
@@ -1048,6 +1048,11 @@ export class Renderer {
     const changes = this._shadowChanges;
     changes.boxes.clear();
     const record = scene.shadowCasters.size > 0 ? changes.boxes : null;
+    // What was removed, where it was: the maps that showed it are redrawn,
+    // and the rest kept. The added are recorded below, as movers.
+    const removed = scene.removedBoxes;
+    if (record !== null) for (let k = 0; k < removed.count * 6; k += 6) record.push(removed.data, removed.data.subarray(3), k);
+    removed.clear();
     // The renderables that moved, when few enough did to list -- or null, and
     // every one is looked at -- and their boxes as they were, for the union.
     const items = anyMoved ? scene.movedRenderables() : null;
@@ -1226,12 +1231,13 @@ export class Renderer {
     // then point and spot views. Each writes its slot into the light's record,
     // so both run before the records are uploaded. Growing either array
     // replaces what the frame group names.
-    // Every shadow map is drawn again for a new scene, a structural change, a
-    // changed material, or LOD -- whose casters are the levels the CAMERA
-    // shows, so they change as it moves. And for a probe capture, which draws
-    // from other eyes into the same layers, and then once more after it.
+    // Every shadow map is drawn again for a new scene, a changed material, or
+    // LOD -- whose casters are the levels the CAMERA shows, so they change as
+    // it moves. And for a probe capture, which draws from other eyes into the
+    // same layers, and then once more after it. Something added or removed
+    // redraws only the maps its box reaches (scene.removedBoxes, and movers).
     changes.all = target !== null || materialsChanged || this.gpu.hasLod
-      || this._shadowCacheScene !== scene || this._shadowCacheRevision !== scene.revision;
+      || this._shadowCacheScene !== scene || this._shadowCacheRevision === -1;
     this.shadows.boundBatches(scene, this.gpu, items, anyMoved, deformed);
     this.shadows.update(camera, scene, changes,
       this._hasSceneBounds ? this._sceneMin : null, this._hasSceneBounds ? this._sceneMax : null);

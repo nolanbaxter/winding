@@ -46,6 +46,13 @@ pixels. Sponza GPU -8%, -21% with depth of field set; a town of untextured build
     shadow map.
   - [TAA](docs/API.md#renderer-taa) turned off frees its two full-size history images (15 MB at
     720p, 33 MB at 1080p); turned on again, it makes them anew.
+- **Merged meshes are drawn with direct draws.** A merged group's triangle count and place never
+  change between rebuilds -- a hidden part keeps its place as degenerate triangles -- so its draws
+  need not be indirect, and an indirect draw pays the browser's validation. Sponza: GPU -12% to
+  -17%. Their depth prepass also reads the position alone, not the whole vertex: another 3-5%.
+  The same pixels.
+- **Adding or removing an object no longer redraws every shadow map.** Only the maps its box
+  reaches are redrawn, as for anything that moves. The same shadows as a full redraw.
 
 ## [1.6.0] - 2026-10-07
 

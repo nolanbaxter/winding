@@ -15,7 +15,7 @@ import { TransformStore } from './transform.js';
 import { Node } from './node.js';
 import { Camera } from './camera.js';
 import {
-  updateWorldBounds, unionWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds,
+  updateWorldBounds, unionWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds, BoxList,
 } from './bounds.js';
 import { aabbRayDistance, aabbTransform, aabbUnion, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
@@ -590,6 +590,12 @@ export class Scene {
      * and must not run on a scene that is merely moving.
      */
     this.revision = nextRevision++;
+    /**
+     * The world boxes of renderables removed since the renderer last looked:
+     * where a cached shadow map may still show them. An added one needs no
+     * entry -- it is new, so it moved, and its box is recorded as any mover's.
+     */
+    this.removedBoxes = new BoxList();
     this.renderableEntity = new Uint32Array(renderableCapacity);
     /** Which transform slot each renderable reads its world matrix from. */
     this.renderableMatrixSlot = new Uint32Array(renderableCapacity);
@@ -1112,6 +1118,7 @@ export class Scene {
     for (let i = this.renderableCount - 1; i >= 0; i--) {
       if (!dying.has(this.renderableEntity[i])) continue;
       this.renderablePrimitive[i].instances--;
+      this.removedBoxes.push(this.worldMin, this.worldMax, i * 3);
 
       const last = --this.renderableCount;
       if (i !== last) {

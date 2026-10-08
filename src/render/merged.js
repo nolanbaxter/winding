@@ -56,7 +56,6 @@ import { FRUSTUM_PLANE_COUNT } from '../core/math/frustum.js';
 import { CULL_PHASES, BATCH_BYTES, TABLE_WORDS } from './gpudriven.js';
 import { CHUNK_TRIANGLES } from '../scene/bounds.js';
 
-const ARGS_WORDS = 5;
 /** A chunk's record: eight u32s, then its box in its mesh's space, min and max as vec4s. */
 const INFO_WORDS = 16;
 const WORKGROUP_SIZE = 64;
@@ -319,7 +318,6 @@ export class MergedDraws {
     const info = new Uint32Array(infoBytes);
     const infoF32 = new Float32Array(infoBytes);
     const table = new Uint32Array(itemTotal * TABLE_WORDS);
-    const args = new Uint32Array(this.groupCount * ARGS_WORDS);
     let j = 0, spans = 0, slotTotal = 0;
     this.groups.forEach((group, g) => {
       let place = group.indexBase;
@@ -349,12 +347,10 @@ export class MergedDraws {
         place += p.indexCount;
       });
       group.indexCount = place - group.indexBase;
-      args.set([group.indexCount, 1, group.indexBase, 0, 0], g * ARGS_WORDS);
     });
     this.spanCount = spans;
     this.recordCount = records;
     queue.writeBuffer(this._buffer('info', info.byteLength, STORAGE), 0, info);
-    queue.writeBuffer(this._buffer('args', args.byteLength, GPUBufferUsage.INDIRECT), 0, args);
     // Past every cull phase's slice of the visible list: the groups' tables.
     queue.writeBuffer(gpu.visibleBuffer, gpu.capacity * CULL_PHASES * 4, table);
 
@@ -476,7 +472,10 @@ export class MergedDraws {
       pass.setPipeline(pipeline);
       bindMaterial(group.material);
       pass.setBindGroup(groupDraw, drawGroup, [g * this.alignment]);
-      pass.drawIndexedIndirect(this._buffers.args, g * ARGS_WORDS * 4);
+      // Direct: a group's count and place never change between rebuilds -- a
+      // hidden chunk keeps its place as degenerate triangles -- and a direct
+      // draw skips the validation an indirect one gets.
+      pass.drawIndexed(group.indexCount, 1, group.indexBase, 0, 0);
     }
   }
 

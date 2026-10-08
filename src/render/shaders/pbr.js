@@ -351,6 +351,25 @@ fn vsMerged(@builtin(vertex_index) code : u32) -> VertexOut {
   );
 }
 
+/**
+ * vsMerged for the depth prepass: the position alone, by the same arithmetic
+ * shadeVertex does (a merged mesh is never morphed), so with @invariant the
+ * depth is the one the shading draw then matches exactly. The rest of the
+ * vertex -- fetches, normal matrix, tangent, fifteen outputs -- it skips.
+ */
+struct DepthOut {
+  @builtin(position) @invariant clip : vec4<f32>,
+};
+
+@vertex
+fn vsMergedDepth(@builtin(vertex_index) code : u32) -> DepthOut {
+  let at = batch.firstVisible + (code >> batch.shift) * 2u;
+  let vertex = visibleItems[at + 1u] + (code & ((1u << batch.shift) - 1u));
+  let o = vertex * 15u;
+  let world = drawData[visibleItems[at]].model * vec4<f32>(geometry[o], geometry[o + 1u], geometry[o + 2u], 1.0);
+  return DepthOut(frame.viewProjection * world);
+}
+
 /** What vs and vsMerged share: one vertex of the drawn object, morphed, into the world and onto the screen. */
 fn shadeVertex(
   draw : DrawData, vertex : u32,
