@@ -290,6 +290,14 @@ export class TemporalAA {
     return next;
   }
 
+  /** Free the histories, while TAA is off; the next addPass makes them again. */
+  release() {
+    for (const t of this.textures) t.destroy();
+    this.textures = [];
+    this._width = 0;
+    this._height = 0;
+  }
+
   destroy() {
     for (const t of this.textures) t.destroy();
     this.buffer.destroy();

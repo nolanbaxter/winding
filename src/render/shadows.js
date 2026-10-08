@@ -1397,6 +1397,13 @@ export class ShadowMaps {
    * the matrix does not depend on which cascade is drawing, and writing it per
    * cascade would quadruple the ring for nothing.
    */
+  /** Whether this frame draws any shadow map, as update() and updateLocal() decided. */
+  drawsAny() {
+    for (let layer = 0; layer < this.shadowedCount * this.cascadeCount; layer++) if (this.cascadeRedraw[layer] !== KEEP) return true;
+    for (let v = 0; v < this.localCount; v++) if (this.localRedraw[v] !== 0) return true;
+    return false;
+  }
+
   addPasses(graph, resource, gpu, batchBindGroup, palette, morph, localResource = null, reads = []) {
     this._gpu = gpu;
     this._batchBindGroup = batchBindGroup;

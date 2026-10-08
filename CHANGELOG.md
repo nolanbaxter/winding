@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     box in the scene, rewrite every deforming object's draw data and rebuild the shadow casters'
     boxes. Now only a box that changed counts. 10,000 boxes and one idle Fox: CPU -40% a frame;
     the same pixels. Walking, as before.
+  - Light clustering runs neither of its passes in a scene with no point or spot lights and no
+    decals, once a frame has cleared the counts it leaves.
+  - The pass that picks the shadow casters' levels of detail is skipped on frames that draw no
+    shadow map.
+  - [TAA](docs/API.md#renderer-taa) turned off frees its two full-size history images (15 MB at
+    720p, 33 MB at 1080p); turned on again, it makes them anew.
 
 ## [1.6.0] - 2026-10-07
 

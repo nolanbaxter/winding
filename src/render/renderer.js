@@ -1030,6 +1030,9 @@ export class Renderer {
     // everything this frame draws, and put back at the end of it.
     if (this.taa && this.taaPass === null) this._taaReady().catch((error) => console.error(error));
     const jittered = this.taa && this.taaPass !== null && target === null && output === null;
+    // Off, its two full-size histories go too. Only off: a probe capture or a
+    // frame drawn elsewhere skips TAA and keeps them for the next frame.
+    if (!this.taa && this.taaPass !== null && this.taaPass.textures.length > 0) this.taaPass.release();
     if (jittered) this._jitterCamera(camera, width, height);
     frustumFromViewProjection(this.frustum, camera.viewProjection);
     p?.mark('camera');
@@ -1362,9 +1365,9 @@ export class Renderer {
     const mergedLists = this.merged.addPass(graph, this.gpu, this.geometry, drawDataBuffer);
 
     // Shadows draw the level of detail the camera chose. Only when there is
-    // any: otherwise they walk the static order, and this pass is not run.
+    // any, and a shadow map to draw: otherwise this pass is not run.
     const shadowReads = [];
-    if (this.gpu.hasLod) {
+    if (this.gpu.hasLod && this.shadows.drawsAny()) {
       const indirectShadow = graph.importBuffer('indirect:shadow', this.gpu.indirectBuffer);
       const visibleShadow = graph.importBuffer('visible:shadow', this.gpu.visibleBuffer);
       this.gpu.addCullPass(graph, {

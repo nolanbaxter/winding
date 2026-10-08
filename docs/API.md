@@ -729,7 +729,7 @@ What it does better than FXAA:
 What it costs:
 - About 1.2 ms a frame more than FXAA at 1280x720 on integrated graphics (Intel Iris Xe): 0.6 for its own pass, the rest for material textures read half a mip sharper, which keeps surfaces from going soft.
 - Surfaces inside an object are still a little softer than with FXAA (2.7 against 2.2 in that measure).
-- Two images of history, 8 bytes a pixel each: about 15 MB at 1280x720.
+- Two images of history, 8 bytes a pixel each: about 15 MB at 1280x720. Turned off, they are freed, and made again when it is turned back on.
 
 Notes:
 - Where a surface was last frame is worked out from the depth buffer and the camera, so it is exact for everything that the camera's own movement moves. Something that moves by itself is kept from smearing by holding the history to the colours around each pixel in this frame; on Sponza a box crossing the view at 7 pixels a frame left no trail. Particles, splats and sprites are treated the same way.

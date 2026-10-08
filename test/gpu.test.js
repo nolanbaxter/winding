@@ -1567,6 +1567,16 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       const row = (get) => Array.from({ length: 8 }, (_, k) => Math.round(get(60 * W + x0 - 3 + k))).join(' ');
       const rows = `; across one: truth [${row((k) => truth[k])}], unfiltered [${row((k) => rawPixels[k * 4 + 1])}], TAA [${row((k) => taaPixels[k * 4 + 1])}]`;
 
+      // Off frees its two full-size histories; on again makes them anew, and works as before.
+      probe.renderer.taa = false;
+      await frames(2);
+      const freed = probe.renderer.taaPass.textures.length === 0;
+      probe.renderer.taa = true;
+      const again = edgeError(await frames(40));
+      if (!freed || !(again.error < raw.error * 0.5)) {
+        throw new Error(`TAA off then on: histories freed ${freed}, edge error after ${again.error.toFixed(1)} against unfiltered ${raw.error.toFixed(1)}`);
+      }
+
       // run() with on-demand: a still view keeps drawing while TAA settles, then rests.
       probe.renderer.post.antialias = true;
       const skippedBefore = probe.skippedFrames;
