@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-08
+
+**Off means off, for every scene.** A sweep of every feature for work done with nothing to do,
+beyond the scenes the last release was measured on: occlusion culling with nothing to cull, the sky
+under everything, OIT and depth of field with nothing to show, texture lookups a material does not
+have, and an idle character that cost a scene its static fast paths. Each fix A/B'd, the same
+pixels. Sponza GPU -8%, -21% with depth of field set; a town of untextured buildings -12% to -24%;
+10,000 objects and an idle character, CPU -40%.
+
 ### Changed
 
 - **Off means off, for more than Sponza.** A sweep of every feature for work done when it has
@@ -2398,7 +2407,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/nolanbaxter/winding/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/nolanbaxter/winding/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/nolanbaxter/winding/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/nolanbaxter/winding/compare/v1.3.0...v1.4.0
