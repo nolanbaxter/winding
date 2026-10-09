@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.6.1] - 2026-10-08
 
 **Off means off, for every scene.** A sweep of every feature for work done with nothing to do,
-beyond the scenes the last release was measured on: occlusion culling with nothing to cull, the sky
-under everything, OIT and depth of field with nothing to show, texture lookups a material does not
-have, and an idle character that cost a scene its static fast paths. Each fix A/B'd, the same
-pixels. Sponza GPU -8%, -21% with depth of field set; a town of untextured buildings -12% to -24%;
-10,000 objects and an idle character, CPU -40%.
+beyond the scenes the last release was measured on -- occlusion culling with nothing to cull, the
+sky under everything, OIT and depth of field with nothing to show, texture lookups a material does
+not have, an idle character that cost a scene its static fast paths -- then of hitches and of scene
+types not yet measured: merged meshes drawn direct, cut-out foliage, adds and removes, animated
+materials, splats under TAA. Each fix A/B'd, the same pixels but for a few at exact depth ties.
+Sponza GPU about -25% in all; a town of untextured buildings -12% to -24%; 10,000 objects and an
+idle character, CPU -40%.
 
 ### Changed
 
