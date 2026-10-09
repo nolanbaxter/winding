@@ -119,9 +119,11 @@ Chrome 154. Both at 1280×720. Each number is the median of eight alternating bl
 timed to the GPU finishing, averaged over two runs; Three.js r186, Babylon.js 9.29, PlayCanvas 2.23.
 Matched: four 1024×1024 shadow cascades to 40 m, ACES tone mapping, and no antialiasing, bloom,
 ambient occlusion or TAA. Not matched: Winding lights its ambient from an environment map where the
-others use a flat term, and it culls by occlusion as well as by view. To rerun it, open
-<code>bench/compare.html</code> as a file in Chrome or Edge: it runs every scene twice and shows the
-results.</sub>
+others use a flat term, and it culls by occlusion as well as by view. Winding draws with WebGPU
+only; the other three can also draw with WebGL. The chart shows a comparison at a time, turning every
+seven seconds, and holds still for anyone who asked for less motion; every number is in its
+description. To rerun it, open <code>bench/compare.html</code> as a file in Chrome or Edge: it runs
+every scene twice and shows the results.</sub>
 
 ## Install
 
