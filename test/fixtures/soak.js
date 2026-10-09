@@ -14,6 +14,28 @@
 
 import { buildFeatureGLB, buildRiggedGLB } from './demoModel.js';
 
+/**
+ * Its scenarios, by name: each a check of its own in gpu.test.js, so CI can
+ * run just those a change reaches, and spread them across runners.
+ */
+export const SCENARIOS = {
+  models: 'a viewer swapping models',
+  skinnedModels: 'skinned models loaded and unloaded',
+  scenes: 'a level made and dropped',
+  spawning: 'spawning and despawning',
+  features: 'every feature on, then off',
+  resizing: 'a window resized',
+  lightBurst: 'a burst of shadowed lights',
+  lights: 'lights coming and going',
+  effects: 'sprites, text, particles and decals',
+  changingText: 'a score rewritten every frame',
+  environments: 'environments loaded and unloaded',
+  targets: 'a minimap target made and dropped',
+  probes: 'reflection probes placed and removed',
+  levels2D: 'a 2D game changing levels',
+  engines: 'whole engines, on a canvas kept for the next',
+};
+
 export async function soak({ Winding, Camera, Camera2D, rounds = 4, only = null, settleFrames = 130 }) {
   const collect = typeof globalThis.gc === 'function' ? globalThis.gc : null;
 

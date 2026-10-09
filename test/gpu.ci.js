@@ -11,8 +11,8 @@
 // WebSocket (Node 22+), so nothing is installed and nothing is downloaded.
 // Chrome comes from $CHROME, or the usual install paths.
 
-import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -101,8 +101,15 @@ ${chromeLog}`);
 ${chromeLog}`);
   console.log(`adapter: ${adapter}`);
 
+  // GPU_STEPS and GPU_SHARD: the checks this runner makes (see gpu.test.js).
+  // GPU_MAP=1: record which of src/ each check runs, into test/gpu-map.json.
+  const query = new URLSearchParams();
+  if (process.env.GPU_STEPS) query.set('steps', process.env.GPU_STEPS);
+  if (process.env.GPU_SHARD) query.set('shard', process.env.GPU_SHARD);
+  const map = process.env.GPU_MAP === '1' || process.argv.includes('--map') ? await recordCoverage(cdp) : null;
+
   const started = Date.now();
-  await cdp.send('Page.navigate', { url: `http://localhost:${PORT}/test/gpu.html` });
+  await cdp.send('Page.navigate', { url: `http://localhost:${PORT}/test/gpu.html${query.size ? `?${query}` : ''}` });
 
   const summary = await until(async () => {
     const title = await cdp.eval('document.title');
@@ -111,12 +118,85 @@ ${chromeLog}`);
   }, TIMEOUT, `the suite did not finish in ${TIMEOUT / 60_000} minutes`);
 
   for (const r of summary.results) {
-    console.log(`${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}`);
+    // The time goes back into test/gpu-map.json (.github/ci-times.js), so the
+    // runners are balanced by what each check takes here, not on a real GPU.
+    console.log(`${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}${r.ms !== undefined ? `  [${r.id} ${r.ms} ms]` : ''}`);
     if (r.detail) console.log(`      ${r.detail.replaceAll('\n', '\n      ')}`);
   }
   const seconds = ((Date.now() - started) / 1000).toFixed(0);
   console.log(`\n${summary.passed} passed, ${summary.failed} failed, in ${seconds} s`);
+  if (map !== null) {
+    if (summary.failed > 0) throw new Error('not writing the map from a run that failed');
+    for (const r of summary.results) if (r.id && map.steps[r.id]) map.steps[r.id].ms = r.ms;
+    writeFileSync(new URL('./gpu-map.json', import.meta.url), `${JSON.stringify(map)}\n`);
+    const fns = Object.values(map.files).flatMap((f) => Object.values(f));
+    console.log(`wrote test/gpu-map.json: ${Object.keys(map.steps).length} checks, ${fns.length} functions run, `
+      + `${fns.filter((ids) => ids.includes('*')).length} of them by the setup every check needs`);
+  }
   return summary.failed === 0 && summary.passed > 0 ? 0 : 1;
+}
+
+/**
+ * Coverage, check by check, function by function: for every function in src/
+ * that ran, its lines and the checks that ran it. What runs before the first
+ * BASE checks end, and between checks, is the setup every check draws on, and
+ * is recorded as '*'. The commit it was taken at goes with it, so the planner
+ * can carry its line numbers to later code. Returns the map, filled in as the
+ * suite runs.
+ */
+async function recordCoverage(cdp) {
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const dirty = execFileSync('git', ['status', '--porcelain', '--', 'src'], { encoding: 'utf8' }).trim();
+  if (dirty) throw new Error(`commit src/ first: the map's line numbers are the commit's\n${dirty}`);
+  const map = { note: 'Made by GPU_MAP=1 node test/gpu.ci.js; read by .github/affected.js.', commit, steps: {}, files: {} };
+  const lines = new Map();   // path -> offsets where each line starts
+  const lineOf = (path, offset) => {
+    let starts = lines.get(path);
+    if (!starts) {
+      starts = [0];
+      const text = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+      for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
+      lines.set(path, starts);
+    }
+    let lo = 0, hi = starts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= offset) lo = mid; else hi = mid - 1; }
+    return lo + 1;
+  };
+  const record = async (who) => {
+    const { result } = await cdp.send('Profiler.takePreciseCoverage');
+    for (const script of result) {
+      const path = new URL(script.url || 'about:blank').pathname.replace(/^\//, '');
+      if (!path.startsWith('src/')) continue;
+      for (const f of script.functions) {
+        const range = f.ranges[0];
+        if (!(range?.count > 0)) continue;
+        const key = `${lineOf(path, range.startOffset)}-${lineOf(path, range.endOffset)}`;
+        const byFunction = (map.files[path] ??= {});
+        const ids = (byFunction[key] ??= []);
+        if (!ids.includes(who)) ids.push(who);
+      }
+    }
+  };
+  const BASE_STEPS = 5;
+  let started = 0;
+  await cdp.send('Profiler.enable');
+  await cdp.send('Profiler.startPreciseCoverage', { callCount: true, detailed: false });
+  await cdp.send('Runtime.addBinding', { name: '__coverageMark' });
+  cdp.on('Runtime.bindingCalled', async ({ name, payload }) => {
+    if (name !== '__coverageMark') return;
+    const { phase, id, name: check } = JSON.parse(payload);
+    if (phase === 'start') {
+      started++;
+      await record('*');   // between checks: setup
+    } else if (started <= BASE_STEPS) {
+      await record('*');
+    } else {
+      map.steps[id] = { name: check };
+      await record(id);
+    }
+    await cdp.eval('globalThis.__markDone()');
+  });
+  return map;
 }
 
 /** Polls fn until it returns something truthy. */

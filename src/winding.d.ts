@@ -292,6 +292,8 @@ export interface CreateSceneOptions extends SceneOptions {
 
 export class Winding {
   static create(canvas: HTMLCanvasElement, options?: WindingOptions): Promise<Winding>;
+  /** Whether `create` can work here: WebGPU, and a GPU it will hand out. Never throws. */
+  static supported(): Promise<boolean>;
   private constructor();
 
   readonly gpu: Device;

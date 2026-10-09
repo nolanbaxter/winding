@@ -1,24 +1,61 @@
-# The Node suites on every push and pull request, and the GPU suite beside them.
+# What a change is checked by, and nothing else.
 #
-# There is no install step for the Node suites because there are no
-# dependencies: nothing to cache, nothing to audit, nothing to go stale between
-# a green run and a red one.
+# The plan job reads the commits a push brought (or a pull request from a fork)
+# and .github/affected.js decides what reaches them:
+#
+#   Node suites   the ones whose imports reach a changed file, on Node 20, 22
+#                 and 24. Seconds; none at all for a change no suite reads.
+#   types         the declarations against the docs' examples, when either
+#                 changed.
+#   GPU suite     only its checks that run a changed function, by the map in
+#                 test/gpu-map.json, split across up to four runners by the
+#                 time each takes; all of it when the change reaches what every
+#                 check sets up, or when the suite itself changed. None for
+#                 docs, the changelog, benchmarks or tools.
+#
+# Nothing runs twice: a branch here is checked when it is pushed, so its pull
+# request is not checked again, and main -- which takes pull requests only --
+# not at all. A release, which changes the version and the docs, checks the docs.
+#
+# No install step: there are no dependencies -- nothing to cache, nothing to
+# audit, nothing to go stale between a green run and a red one.
 #
 # The GPU suite runs test/gpu.html in headless Chrome. The runner has no GPU,
 # so Chrome's own SwiftShader stands in: a software device, slow, but it
-# compiles and runs every shader and reads back every frame, which is the point -- nearly
-# everything this engine has got wrong was invisible to the Node
-# suites. A pass there is not a pass on every real GPU; the page at
-# test/gpu.html still is the test of one.
+# compiles and runs every shader and reads back every frame, which is the
+# point -- nearly everything this engine has got wrong was invisible to the
+# Node suites. A pass there is not a pass on every real GPU; the page at
+# test/gpu.html, opened by hand, runs every check.
 name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches-ignore: [main]
   pull_request:
 
 jobs:
+  plan:
+    # A pull request from a branch here was checked when it was pushed.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      node: ${{ steps.plan.outputs.node }}
+      types: ${{ steps.plan.outputs.types }}
+      gpu: ${{ steps.plan.outputs.gpu }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0        # the base to compare with, and the map's commit
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - id: plan
+        run: node .github/affected.js "$BASE" "$GITHUB_SHA"
+        env:
+          BASE: ${{ github.event_name == 'push' && github.event.before || github.event.pull_request.base.sha }}
+
   test:
+    needs: plan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -29,13 +66,25 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
-      - run: npm test
-      # The types, against the docs' examples. TypeScript is fetched for this
-      # step alone; the package still depends on nothing.
-      - run: npx -y -p typescript@7 tsc --noEmit --strict --target es2022 --module nodenext --lib es2022,dom test/types.ts
+      - name: The Node suites the change reaches
+        run: |
+          if [ -z "$SUITES" ]; then echo "No Node suite reaches this change."; exit 0; fi
+          for suite in $SUITES; do node "$suite" || exit 1; done
+        env:
+          SUITES: ${{ needs.plan.outputs.node }}
+      # TypeScript is fetched for this step alone; the package still depends on nothing.
+      - if: needs.plan.outputs.types == 'true'
+        run: npx -y -p typescript@7 tsc --noEmit --strict --target es2022 --module nodenext --lib es2022,dom test/types.ts
 
   gpu:
+    needs: plan
+    if: needs.plan.outputs.gpu != '[]'
+    name: gpu ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.gpu) }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -45,3 +94,6 @@ jobs:
       # even though WebGPU itself then runs on SwiftShader.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
       - run: node test/gpu.ci.js
+        env:
+          GPU_SHARD: ${{ matrix.shard }}
+          GPU_STEPS: ${{ matrix.steps }}

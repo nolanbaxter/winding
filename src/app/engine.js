@@ -98,6 +98,21 @@ export function createModuleWorker(
 
 export class Winding {
   /**
+   * Whether Winding.create can work here: WebGPU, and a GPU it will hand out.
+   * Never throws; costs one adapter request, which create makes again. A core
+   * adapter -- the kind asked for by default -- has every limit the renderer
+   * needs, so this is the whole of what create could refuse a page for.
+   */
+  static async supported() {
+    if (!globalThis.navigator?.gpu) return false;
+    try {
+      return (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * @param canvas a <canvas>; it is sized, configured and observed for you
    * @param options.environment  Environment settings (share one between scenes
    *                             with createScene({ environment }))

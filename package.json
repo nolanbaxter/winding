@@ -1,6 +1,6 @@
 {
   "name": "winding-engine",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "A WebGPU rendering engine for the browser. No dependencies, no build step.",
   "license": "MIT",
   "author": "Nolan Baxter",
@@ -47,8 +47,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/core.test.js && node test/scene.test.js && node test/gltf.test.js && node test/splats.test.js && node test/animation.test.js && node test/render.test.js && node test/app.test.js && node test/shadow.test.js && node test/graph.test.js && node test/clustered.test.js && node test/hzb.test.js && node test/jobs.test.js && node test/bench.test.js && node test/guards.test.js && node test/docs.test.js",
+    "test": "node test/core.test.js && node test/scene.test.js && node test/gltf.test.js && node test/splats.test.js && node test/animation.test.js && node test/render.test.js && node test/app.test.js && node test/shadow.test.js && node test/graph.test.js && node test/clustered.test.js && node test/hzb.test.js && node test/jobs.test.js && node test/bench.test.js && node test/guards.test.js && node test/docs.test.js && node test/affected.test.js",
     "test:gpu": "node serve.js",
-    "test:gpu:headless": "node test/gpu.ci.js"
+    "test:gpu:headless": "node test/gpu.ci.js",
+    "test:gpu:map": "node test/gpu.ci.js --map"
   }
 }

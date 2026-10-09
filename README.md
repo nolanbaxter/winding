@@ -1,3 +1,5 @@
+<img src="docs/images/mascot.png" align="right" width="190" alt="Winding's mascot: a geometric robot, waving">
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/wordmark-dark.svg">
   <img src="docs/wordmark-light.svg" alt="Winding" width="380">
@@ -119,9 +121,11 @@ Chrome 154. Both at 1280×720. Each number is the median of eight alternating bl
 timed to the GPU finishing, averaged over two runs; Three.js r186, Babylon.js 9.29, PlayCanvas 2.23.
 Matched: four 1024×1024 shadow cascades to 40 m, ACES tone mapping, and no antialiasing, bloom,
 ambient occlusion or TAA. Not matched: Winding lights its ambient from an environment map where the
-others use a flat term, and it culls by occlusion as well as by view. To rerun it, open
-<code>bench/compare.html</code> as a file in Chrome or Edge: it runs every scene twice and shows the
-results.</sub>
+others use a flat term, and it culls by occlusion as well as by view. Winding draws with WebGPU
+only; the other three can also draw with WebGL. The chart shows a comparison at a time, turning every
+seven seconds, and holds still for anyone who asked for less motion; every number is in its
+description. To rerun it, open <code>bench/compare.html</code> as a file in Chrome or Edge: it runs
+every scene twice and shows the results.</sub>
 
 ## Install
 
@@ -132,7 +136,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.6.1/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.7.0/src/winding.js';
 </script>
 ```
 
@@ -157,11 +161,24 @@ completion and hover help.
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.6.1/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.6.1/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.7.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.7.0/src/"
   }
 }
 </script>
+```
+
+**Check first, where WebGPU may be missing.** Winding draws with WebGPU alone -- no WebGL fallback,
+since the culling, clustering and merged draws that make it fast need compute shaders WebGL does not
+have. Chrome, Edge and Safari have it, and Firefox on Windows; for the rest, ask before you start and
+show something else:
+
+```js
+if (await Winding.supported()) {
+  const engine = await Winding.create(canvas);
+} else {
+  canvas.replaceWith(Object.assign(new Image(), { src: 'still.jpg', alt: 'The scene' }));
+}
 ```
 
 **Pin the version.** `@latest` re-resolves on every page load, so a release you have never seen can

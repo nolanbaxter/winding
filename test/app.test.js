@@ -2245,4 +2245,22 @@ test('1.0.1: a removed parent, a morph back at rest, levels of detail, renamed n
   assert.equal(listeners.style.touchAction, 'auto', 'put back');
 });
 
+await atest('Winding.supported says whether create can work, and never throws', async () => {
+  const real = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const as = async (navigator) => {
+    Object.defineProperty(globalThis, 'navigator', { value: navigator, configurable: true, writable: true });
+    return Winding.supported();
+  };
+  try {
+    assert.equal(await as(undefined), false, 'no navigator');
+    assert.equal(await as({}), false, 'no WebGPU');
+    assert.equal(await as({ gpu: { requestAdapter: async () => null } }), false, 'no adapter: blocklisted, say');
+    assert.equal(await as({ gpu: { requestAdapter: async () => { throw new Error('denied'); } } }), false, 'a refusal');
+    assert.equal(await as({ gpu: { requestAdapter: async () => ({}) } }), true, 'an adapter');
+  } finally {
+    if (real) Object.defineProperty(globalThis, 'navigator', real);
+    else delete globalThis.navigator;
+  }
+});
+
 console.log(`\n${passed} checks passed\n`);

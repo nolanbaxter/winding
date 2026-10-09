@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-09
+
+**Ask first.** `Winding.supported()` says whether an engine can be made here, so a page can show
+something else where WebGPU is missing. The README has a face now -- a walker robot, rendered in
+Winding, waving beside the name -- and its engine comparison is a slideshow, a chart at a time. And
+CI checks only what a change reaches: a docs change in seconds, a full run split across four runners.
+
+### Added
+
+- **[`Winding.supported()`](docs/API.md#winding-supported)**: whether `Winding.create` can work in
+  this browser -- WebGPU, and a GPU it will hand out -- as `true` or `false`, never a throw. Ask
+  before creating an engine and show a still, a video or a message where the answer is no; the
+  README's install section shows how.
+
 ## [1.6.1] - 2026-10-09
 
 **Off means off, for every scene.** A sweep of every feature for work done with nothing to do,
@@ -2468,7 +2482,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/nolanbaxter/winding/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/nolanbaxter/winding/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/nolanbaxter/winding/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/nolanbaxter/winding/compare/v1.4.0...v1.5.0
