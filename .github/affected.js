@@ -27,12 +27,13 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const RUNNERS = 4;
 /**
- * A runner's worth of checks, in the time they took where the map was made (a
- * real GPU; the software one CI has is about seven times slower). Each runner
- * also starts Chrome and builds the setup every check needs, a minute or so,
- * so a handful of quick checks share one rather than taking four.
+ * A runner's worth of checks, in CI's time (test/gpu-map.json's ciMs, from
+ * .github/ci-times.js; where a check has none, its time on the real GPU the map
+ * was made on, about seven times quicker). Each runner also starts Chrome and
+ * builds the setup every check needs, a minute or so, so a handful of quick
+ * checks share one rather than taking four.
  */
-const PER_RUNNER_MS = 8000;
+const PER_RUNNER_MS = 60000;
 
 /** Changes that are checked by everything there is. */
 const EVERYTHING = [/^package\.json$/, /^\.github\/workflows\//, /^\.github\/affected\.js$/, /^serve\.js$/];
@@ -115,13 +116,13 @@ export function checksFor(functions, [first, last]) {
 
 /** Split checks across up to RUNNERS runners, the longest first onto the least loaded. */
 export function shard(ids, ms, runners = RUNNERS) {
-  const total = ids.reduce((t, id) => t + (ms[id] ?? 1000), 0);
+  const total = ids.reduce((t, id) => t + (ms[id] ?? 7000), 0);
   const n = Math.max(1, Math.min(runners, ids.length, Math.ceil(total / PER_RUNNER_MS)));
   const bins = Array.from({ length: n }, () => ({ total: 0, ids: [] }));
   for (const id of [...ids].sort((a, b) => (ms[b] ?? 1000) - (ms[a] ?? 1000))) {
     const bin = bins.reduce((x, y) => (y.total < x.total ? y : x));
     bin.ids.push(id);
-    bin.total += ms[id] ?? 1000;
+    bin.total += ms[id] ?? 7000;
   }
   return bins.map((bin, i) => ({ shard: `${i}/${n}`, steps: bin.ids.join(',') }));
 }
@@ -151,7 +152,7 @@ export function plan(base, head) {
     map = JSON.parse(readFileSync(join(ROOT, 'test/gpu-map.json'), 'utf8'));
     git('cat-file', '-e', `${map.commit}^{commit}`);
   } catch { map = null; }
-  const ms = map === null ? {} : Object.fromEntries(Object.entries(map.steps).map(([id, s]) => [id, s.ms]));
+  const ms = map === null ? {} : Object.fromEntries(Object.entries(map.steps).map(([id, s]) => [id, s.ciMs ?? (s.ms ?? 1000) * 7]));
   // Every check, balanced by the map's times -- one it does not know yet runs
   // in shard 0 -- or dealt out in turn without one.
   const whole = map === null ? all.gpu : shard(Object.keys(ms), ms);

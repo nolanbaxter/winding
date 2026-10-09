@@ -42,11 +42,12 @@ test('a line reaches the checks of its innermost function, or of the whole file 
 });
 
 test('checks are split across runners, the longest first onto the least loaded', () => {
-  const ms = { a: 9000, b: 5000, c: 4000, d: 1000, e: 500 };
+  const ms = { a: 90000, b: 50000, c: 40000, d: 10000, e: 5000 };
   const shards = shard(['e', 'd', 'c', 'b', 'a'], ms, 2);
   assert.deepEqual(shards.map((s) => s.shard), ['0/2', '1/2']);
-  assert.deepEqual(shards.map((s) => s.steps), ['a,d', 'b,c,e'], '10 s and 9.5 s');
+  assert.deepEqual(shards.map((s) => s.steps), ['a,d', 'b,c,e'], '100 s and 95 s');
   assert.equal(shard(['a'], ms).length, 1, 'never more runners than checks');
+  assert.equal(shard(['d', 'e'], ms).length, 1, 'a few quick checks share one runner');
 });
 
 test('a file reaches what it imports and loads by URL, all the way down', () => {

@@ -118,7 +118,9 @@ ${chromeLog}`);
   }, TIMEOUT, `the suite did not finish in ${TIMEOUT / 60_000} minutes`);
 
   for (const r of summary.results) {
-    console.log(`${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}`);
+    // The time goes back into test/gpu-map.json (.github/ci-times.js), so the
+    // runners are balanced by what each check takes here, not on a real GPU.
+    console.log(`${r.ok ? 'ok  ' : 'FAIL'}  ${r.name}${r.ms !== undefined ? `  [${r.id} ${r.ms} ms]` : ''}`);
     if (r.detail) console.log(`      ${r.detail.replaceAll('\n', '\n      ')}`);
   }
   const seconds = ((Date.now() - started) / 1000).toFixed(0);
