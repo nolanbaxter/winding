@@ -395,6 +395,9 @@ export class SpritePass {
     if (scene.sprites.size === 0 && scene.texts.size === 0) {
       this.count = 0;
       this._packed = null;
+      // The last frame's runs name its textures and fonts: kept, the last
+      // ones drawn stayed alive, unloaded or not, for as long as none followed.
+      this._runs = [];
       return 0;
     }
     const last = this._packed;

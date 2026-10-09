@@ -97,6 +97,9 @@ export class ProbeSet {
     this.count = 0;
     /** Which probe sits in which array slot: slots outlive reordering. */
     this.layers = new Map();
+    /** Slots a removed probe gave back, taken before a new one is. */
+    this._free = [];
+    this._next = 0;
     this.buffer = createBuffer(rhi, {
       label: 'reflection-probes', size: PROBE_FLOATS * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -108,7 +111,7 @@ export class ProbeSet {
   slotFor(probe) {
     let slot = this.layers.get(probe);
     if (slot === undefined) {
-      slot = this.layers.size;
+      slot = this._free.length > 0 ? this._free.pop() : this._next++;
       if (slot >= this.capacity) this._grow(slot + 1);
       this.layers.set(probe, slot);
     }
@@ -141,6 +144,14 @@ export class ProbeSet {
 
   /** Upload the boxes of every captured probe. */
   upload(probes) {
+    // A probe gone from the scene gives its slot back. Kept, every removal
+    // and recapture took a new one, and the cube array doubled to fit.
+    if (this.layers.size > 0) {
+      const present = new Set(probes);
+      for (const [probe, slot] of this.layers) {
+        if (!present.has(probe)) { this.layers.delete(probe); this._free.push(slot); }
+      }
+    }
     const { data, count } = packProbes(probes, this.layers);
     if (data.byteLength > this.buffer.size) {
       this.buffer.destroy();

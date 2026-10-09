@@ -125,6 +125,42 @@ export function previousPowerOfTwo(n) {
   return 2 ** Math.floor(Math.log2(n));
 }
 
+const HZB_OBJECTS = new WeakMap();
+/** The shader and layouts every pyramid on a device shares. */
+function hzbObjects(device) {
+  let objects = HZB_OBJECTS.get(device);
+  if (!objects) {
+    objects = (async () => {
+      const shader = await compileShader(device, HZB_SHADER, 'hzb.wgsl');
+      const bindLayout = device.createBindGroupLayout({
+        label: 'hzb',
+        entries: [
+          {
+            binding: 0,
+            visibility: GPUShaderStage.FRAGMENT,
+            buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
+          },
+          {
+            binding: 1,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: 'depth' },
+          },
+          {
+            binding: 2,
+            visibility: GPUShaderStage.FRAGMENT,
+            // Unfiltered: r32float is not filterable without an optional feature,
+            // and averaging depths would not be conservative anyway.
+            texture: { sampleType: 'unfilterable-float' },
+          },
+        ],
+      });
+      return { shader, bindLayout, layout: createPipelineLayout(device, { 0: bindLayout }, 'hzb') };
+    })();
+    HZB_OBJECTS.set(device, objects);
+  }
+  return objects;
+}
+
 /**
  * Which pyramid level answers a screen-space rectangle in one 2x2 fetch.
  *
@@ -185,32 +221,11 @@ export class HierarchicalDepth {
   }
 
   async _init(pipelines) {
-    const device = this.rhi.device;
-    const shader = await compileShader(device, HZB_SHADER, 'hzb.wgsl');
-
-    this.layout = device.createBindGroupLayout({
-      label: 'hzb',
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
-        },
-        {
-          binding: 1,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: 'depth' },
-        },
-        {
-          binding: 2,
-          visibility: GPUShaderStage.FRAGMENT,
-          // Unfiltered: r32float is not filterable without an optional feature,
-          // and averaging depths would not be conservative anyway.
-          texture: { sampleType: 'unfilterable-float' },
-        },
-      ],
-    });
-    const layout = createPipelineLayout(device, { 0: this.layout }, 'hzb');
+    // Once per device: one pyramid a render target, and each one compiling
+    // its own shader and layout gave its pipelines new keys in the cache,
+    // which keeps every one -- two more for good each target made.
+    const { shader, bindLayout, layout } = await hzbObjects(this.rhi.device);
+    this.layout = bindLayout;
     const common = {
       layout, shader, depth: null,
       primitive: { topology: 'triangle-list', cullMode: 'none' },

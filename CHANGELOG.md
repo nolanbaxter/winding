@@ -16,7 +16,8 @@ not have, an idle character that cost a scene its static fast paths -- then of h
 types not yet measured: merged meshes drawn direct, cut-out foliage, adds and removes, animated
 materials, splats under TAA. Each fix A/B'd, the same pixels but for a few at exact depth ties.
 Sponza GPU -24% against 1.6.0, measured in one page; a town of untextured buildings -12% to
--24%; 10,000 objects and an idle character, CPU -40%.
+-24%; 10,000 objects and an idle character, CPU -40%. And nothing builds up: a soak of everything an
+app repeats, now part of the GPU suite, found and closed six leaks.
 
 ### Changed
 
@@ -68,6 +69,32 @@ Sponza GPU -24% against 1.6.0, measured in one page; a town of untextured buildi
   TAA's jitter in it, which moves every frame, so a still camera re-sorted every cloud each frame.
 - **The pipelines that build texture mips are built at start,** in the background, not on the
   first texture streamed in during play.
+
+### Fixed
+
+- **Nothing builds up, checked for good.** A soak of everything an app does over and over --
+  models loaded and unloaded, scenes made and dropped, spawning, every feature on and off, lights,
+  sprites, text, particles, decals, environments, render targets, probes, 2D levels, whole engines
+  made and destroyed -- counting every GPU buffer and texture to its destroy(), every pipeline and
+  shader made, and that everything let go of is collected. It is now a step of the GPU suite. What
+  it found:
+  - **Every environment loaded and every probe captured compiled its shaders anew,** and the
+    pipelines they keyed stayed in the cache for good: three for each; every render target, two.
+    They are compiled once a device now, and the same sky once.
+  - **A removed reflection probe kept its slot,** so removing and recapturing probes doubled the
+    cube array again and again (+12 MB in six rounds of the soak). Slots are reused, and a scene's
+    last probe removed frees the array.
+  - **A dropped 2D scene's GPU buffers waited for garbage collection** -- which GPU memory does not
+    prompt -- with the scene's ~650 KB of heap, and the first 2D scene was held for good. A 2D
+    scene's buffers are now freed 120 frames after it was last drawn.
+  - **A destroyed engine stayed alive through a canvas the page kept,** as a component that remounts
+    or an editor that reuses it does: the context still named the device, and a listener on the
+    device everything else. The canvas is unconfigured and the listeners removed.
+  - **A loaded model kept its whole file:** its JSON and every buffer, 9.4 MB of heap for Sponza;
+    0.4 MB now. `source` on a model is `null`.
+  - The decal texture array was kept after the last decal was removed, and the sprite pass held the
+    last texture and font it drew; a 3D scene's set of changed sprites kept every entity ever
+    changed. Each is let go of now.
 
 ## [1.6.0] - 2026-10-07
 

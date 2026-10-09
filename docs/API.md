@@ -180,6 +180,8 @@ const studio = await engine.loadEnvironment('studio.hdr');
 const scene = engine.createScene({ environment: studio });
 ```
 
+Notes: a scene needs no freeing: drop it, and what the renderer keeps for it goes with it. A 2D scene's buffers are given back once no frame has drawn it for 120 frames, and made again if it is drawn later.
+
 <a id="engine-load"></a>
 ### `engine.load(source, options)` → `Promise<Model>`
 
@@ -201,7 +203,7 @@ const helmet = await engine.load('helmet.glb', { retainGeometry: true });
 scene.add(helmet);
 ```
 
-Notes: every call allocates, the same file included. Free a model you no longer need with [`engine.unload`](#engine-unload). An image larger than the device's biggest texture is left out, with a warning in the console, and its material uses its factor alone. A relative `baseURL` is taken against the page, as a relative link in it would be.
+Notes: every call allocates, the same file included. Free a model you no longer need with [`engine.unload`](#engine-unload). The file itself is not kept once the model is built: `source` is `null`. An image larger than the device's biggest texture is left out, with a warning in the console, and its material uses its factor alone. A relative `baseURL` is taken against the page, as a relative link in it would be.
 
 <a id="engine-unload"></a>
 ### `engine.unload(asset)` → `void`
@@ -450,7 +452,7 @@ Stops the loop and frees everything the engine owns: workers, renderer, its defa
 engine.destroy();
 ```
 
-Notes: afterwards every method that uses the GPU throws `'<method>: this engine was destroyed'`. Environments from [`engine.loadEnvironment`](#engine-loadenvironment) die with the device. The engine also destroys itself when the device is lost or the canvas leaves the document.
+Notes: afterwards every method that uses the GPU throws `'<method>: this engine was destroyed'`. Environments from [`engine.loadEnvironment`](#engine-loadenvironment) die with the device. The engine also destroys itself when the device is lost or the canvas leaves the document. A destroyed engine lets go of its canvas, so the canvas can be given to a new one.
 
 <a id="engine-grading"></a>
 ### `engine.grading` → `object | null`

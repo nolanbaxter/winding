@@ -466,7 +466,10 @@ export class Winding {
     // material ids included, which then counted against the 4096 for good.
     const asset = {
       nodes: model.nodes, meshes: [], roots: model.roots, materials: model.materials, materialIds: [],
-      animations: model.animations, skins: model.skins, source: model.source,
+      // Not the parsed file: its JSON and every buffer -- the whole .glb, images
+      // and all, ten-odd MB for Sponza -- stayed alive with the model, and
+      // nothing reads them once it is built.
+      animations: model.animations, skins: model.skins, source: null,
       lights: model.lights, cameras: model.cameras, textures,
       /** Which engine made it. unload() refuses an asset from another. */
       engine: this,
@@ -927,6 +930,9 @@ export class Winding {
     this.renderer.destroy();
     if (this._ownsEnvironment) this.environment.destroy();
     this.gpu.destroy();
+    // What it last drew, for the idle check: a scene, and through it everything.
+    this._drawn = null;
+    this._hudFilled = null;
   }
 }
 

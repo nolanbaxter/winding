@@ -14,6 +14,8 @@ import { DEPTH_CLEAR_VALUE, DEPTH_FORMAT, DEPTH_COMPARE } from '../rhi/device.js
 
 /** What a probe capture's frames are drawn for, to the render graph's pool: one view, however many probes. */
 const CAPTURE = Object.freeze({ view: 'capture' });
+/** Frames a 2D view may go undrawn before its buffers are given back; splats keep as long. */
+const VIEW2D_KEEP_FRAMES = 120;
 
 /** OIT targets. accum sums weighted colour; reveal is the surviving background. */
 export const OIT_ACCUM_FORMAT = 'rgba16float';
@@ -453,10 +455,12 @@ export class Renderer {
     /** Each scene's reflection probes on the GPU; see probes.js. */
     this._probeSets = new WeakMap();
     /** What the frame binds for probes when a scene has none: an empty set. */
+    const noProbes = createTexture(rhi, {
+      label: 'no-probes', size: [1, 1, 6], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
     this._noProbes = {
-      view: createTexture(rhi, {
-        label: 'no-probes', size: [1, 1, 6], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING,
-      }).createView({ dimension: 'cube-array' }),
+      texture: noProbes,
+      view: noProbes.createView({ dimension: 'cube-array' }),
       buffer: createBuffer(rhi, { label: 'no-probes', size: PROBE_FLOATS * 4, usage: GPUBufferUsage.STORAGE }),
     };
     this._frameProbes = null;
@@ -811,8 +815,13 @@ export class Renderer {
    * waiting for a capture -- if the environment changes size.
    */
   _probesFor(scene, environment) {
-    if (scene.reflectionProbes.length === 0) return null;
     let set = this._probeSets.get(scene);
+    if (scene.reflectionProbes.length === 0) {
+      // Its last probe removed: nothing captured is left to keep, but the
+      // cube array was, for as long as the scene lived.
+      if (set) { set.destroy(); this._probeSets.delete(scene); }
+      return null;
+    }
     if (set && (set.size !== environment.size || set.mips !== environment.prefilterMips)) {
       set.destroy();
       for (const probe of scene.reflectionProbes) probe.captured = false;
@@ -985,6 +994,8 @@ export class Renderer {
    * canvas (engine.renderFrame's `target`).
    */
   render(scene, camera, jobs = null, target = null, overlay = null, output = null) {
+    this._frameNumber = (this._frameNumber ?? 0) + 1;
+    if (this._views2D !== undefined) this._sweep2D();
     if (camera.is2D === true) return this._render2D(scene, camera, jobs, overlay, output);
     const rhi = this.rhi;
     const environment = scene.environment;
@@ -1736,16 +1747,29 @@ export class Renderer {
   /**
    * The 2D view that draws `scene`: one a scene, each keeping its own slots,
    * so a game and the minimap drawn into a target don't rebuild each other's
-   * lists every frame. A dropped scene's goes with it.
+   * lists every frame. this.view2d only makes them, holding no scene.
    */
   _view2D(scene) {
-    this._views2D ??= new WeakMap();
-    let view = this._views2D.get(scene);
-    if (view === undefined) {
-      view = this.view2d._scene === null || this.view2d._scene === scene ? this.view2d : this.view2d.another(this.particles);
-      this._views2D.set(scene, view);
+    this._views2D ??= new Map();
+    let entry = this._views2D.get(scene);
+    if (entry === undefined) this._views2D.set(scene, (entry = { view: this.view2d.another(this.particles), last: 0 }));
+    entry.last = this._frameNumber;
+    return entry.view;
+  }
+
+  /**
+   * Destroy the 2D views of scenes no frame has drawn for VIEW2D_KEEP_FRAMES,
+   * as splats give back a cloud's buffers. Held weakly instead, a dropped
+   * level's buffers waited for garbage collection -- which GPU memory does
+   * not prompt -- and its scene with them; one held by the first view, for good.
+   */
+  _sweep2D() {
+    for (const [scene, entry] of this._views2D) {
+      if (entry.last < this._frameNumber - VIEW2D_KEEP_FRAMES) {
+        entry.view.destroy();
+        this._views2D.delete(scene);
+      }
     }
-    return view;
   }
 
   /**
@@ -1855,10 +1879,13 @@ export class Renderer {
     this.decals.destroy();
     this.dofPass.destroy();
     this.view2d.destroy();
+    for (const entry of this._views2D?.values() ?? []) entry.view.destroy();
     this.overlay2d.destroy();
     this._captureColor?.destroy();
     this._captureDepth?.destroy();
     this.aoPass?.destroy();
+    this._noProbes.texture.destroy();
+    this._noProbes.buffer.destroy();
   }
 
   /**

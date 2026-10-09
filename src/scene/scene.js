@@ -1174,6 +1174,9 @@ export class Scene {
         if (!this.added2D.delete(entity)) this.removed2D.add(entity);
         this.layout2D++;
       }
+      // Read only by a 2D view: in a 3D scene nothing empties it, and every
+      // sprite or text ever changed stayed listed after it was gone.
+      this.spritesChanged.delete(entity);
       this.sprites.delete(entity);
       this.emitters.delete(entity);
       this.splats.delete(entity);
