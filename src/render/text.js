@@ -22,6 +22,17 @@ import { createTexture } from '../rhi/texture.js';
  * SPREAD - 1 texels of the raster: 7/64 of an em for a 64px font.
  */
 export const SPREAD = 8;
+/**
+ * The largest a font's atlas grows before it starts again, empty. Glyphs
+ * were kept for good, and a script laid out a word at a time (see SHAPED)
+ * adds one for every new word: changing text doubled the atlas until it
+ * passed the device's limit and threw. 4096 is 64 MB, ~16,000 glyphs at 64 px.
+ */
+const ATLAS_CAP = 4096;
+/** Kerning pairs remembered before the memo starts again. */
+const KERN_CAP = 65536;
+/** A glyph missing from the atlas: drawn as nothing. */
+const NO_RECT = [0, 0, 0, 0];
 
 // ------------------------------------------------------------- pure parts
 
@@ -314,6 +325,7 @@ export class Font {
           k = (context.measureText(a + b).width - context.measureText(a).width - context.measureText(b).width) / size;
           // Below what a pixel would show at any sane size: not a kern, rounding.
           if (Math.abs(k) < 1e-3) k = 0;
+          if (pairs.size >= KERN_CAP) pairs.clear();
           pairs.set(key, k);
         }
         return k;
@@ -321,7 +333,27 @@ export class Font {
     };
     this._atlasSize = 512;
     this._shelf = { x: 0, y: 0, height: 0 };
+    /** Bumped when the atlas starts again: text laid out before has its glyphs to add back (ensureBoxes). */
+    this.generation = 0;
+    /** ATLAS_CAP, or less where a test wants to see the atlas start again. */
+    this.atlasCap = ATLAS_CAP;
     this._make(this._atlasSize);
+  }
+
+  /**
+   * A text's glyphs back in the atlas, if it started again since this text
+   * last looked: what the sprite passes call before packing, so the atlas
+   * cannot change in the middle of a pack. `record` is a scene's text record.
+   */
+  ensureBoxes(record) {
+    if (record.fontGeneration === this.generation) return;
+    for (const box of record.boxes) if (box.char !== undefined && !this.metrics.glyphs.has(box.char)) this._add(box.char);
+    record.fontGeneration = this.generation;
+  }
+
+  /** Where a glyph is in the atlas, as a fraction of it; nothing, if it is not there. */
+  rectOf(ch) {
+    return this.metrics.glyphs.get(ch)?.rect ?? NO_RECT;
   }
 
   _make(atlasSize, from = null) {
@@ -382,6 +414,19 @@ export class Font {
     let shelf = this._shelf;
     if (shelf.x + w > this._atlasSize) { shelf.y += shelf.height; shelf.x = 0; shelf.height = 0; }
     while (shelf.y + h > this._atlasSize || w > this._atlasSize) {
+      // Full at the cap: start again, empty, at the same size -- a new texture,
+      // which every pass notices -- keeping only this glyph. Text laid out
+      // before gets its glyphs back as it is next drawn (ensureBoxes).
+      if (this._atlasSize * 2 > Math.min(this.atlasCap, this.rhi.limits?.maxTextureDimension2D ?? this.atlasCap)
+        && (shelf.x > 0 || shelf.y > 0)) {
+        this.texture.texture.destroy();
+        this.metrics.glyphs.clear();
+        this.metrics.glyphs.set(ch, glyph);
+        this._shelf = shelf = { x: 0, y: 0, height: 0 };
+        this.generation++;
+        this._make(this._atlasSize);
+        continue;
+      }
       this._atlasSize *= 2;
       this._make(this._atlasSize, this.texture.texture);
       shelf = this._shelf;

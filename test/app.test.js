@@ -1787,7 +1787,7 @@ test('the 2D view rewrites only the slots of what moved or changed', () => {
 
   // A font's atlas grows when any scene asks for new glyphs, moving every
   // glyph: a view drawing its text rebuilds, though its own order is the same.
-  const font = { metrics: { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', { advance: 0.5, left: 0, width: 0.5, height: 1, descent: 0, rect: [0, 0, 0.5, 0.5] }], [' ', { advance: 0.5, left: 0, width: 0, height: 0, descent: 0, rect: null }]]) }, ensure() {}, texture: {} };
+  const font = { metrics: { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', { advance: 0.5, left: 0, width: 0.5, height: 1, descent: 0, rect: [0, 0, 0.5, 0.5] }], [' ', { advance: 0.5, left: 0, width: 0, height: 0, descent: 0, rect: null }]]) }, ensure() {}, ensureBoxes() {}, rectOf(ch) { return this.metrics.glyphs.get(ch)?.rect ?? [0, 0, 0, 0]; }, texture: {} };
   const label = scene.addText({ font, text: 'aa', size: 10 });
   frame();
   assert.equal(frame(), 0, 'settled');
@@ -2073,7 +2073,7 @@ test('a 2D unit is a CSS pixel on any screen', () => {
 test('picking a 2D view finds what is drawn on top, by its real shape', () => {
   const scene = new Scene({ capacity: 32 });
   const texture = { view: {}, width: 16, height: 16 };
-  const font = { metrics: { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', { advance: 0.5, left: 0, width: 0.5, height: 1, descent: 0 }], [' ', { advance: 0.5, left: 0, width: 0, height: 0, descent: 0 }]]) }, ensure() {}, texture: {} };
+  const font = { metrics: { ascent: 0.8, descent: 0.2, glyphs: new Map([['a', { advance: 0.5, left: 0, width: 0.5, height: 1, descent: 0 }], [' ', { advance: 0.5, left: 0, width: 0, height: 0, descent: 0 }]]) }, ensure() {}, ensureBoxes() {}, rectOf(ch) { return this.metrics.glyphs.get(ch)?.rect ?? [0, 0, 0, 0]; }, texture: {} };
   const ball = scene.addShape({ shape: 'ellipse', size: [20, 20], position: [60, 20] });
   const coin = scene.addSprite({ texture, position: [60, 20], layer: 1 });   // 16 x 16, over the ball's middle
   const bar = scene.addSprite({ texture, size: [20, 2], position: [20, 60] });

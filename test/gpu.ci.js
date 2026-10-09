@@ -49,6 +49,8 @@ const chrome = spawn(chromePath, [
   // A background tab is throttled, and this one is never in front.
   '--disable-background-timer-throttling',
   '--disable-renderer-backgrounding',
+  // So the leak soak can force a collection and see what was let go of.
+  '--js-flags=--expose-gc',
   '--window-size=800,600',
   'about:blank',
 ], { stdio: ['ignore', 'ignore', 'pipe'] });

@@ -180,6 +180,8 @@ const studio = await engine.loadEnvironment('studio.hdr');
 const scene = engine.createScene({ environment: studio });
 ```
 
+Notes: a scene needs no freeing: drop it, and what the renderer keeps for it goes with it. A 2D scene's buffers are given back once no frame has drawn it for 120 frames, and made again if it is drawn later.
+
 <a id="engine-load"></a>
 ### `engine.load(source, options)` → `Promise<Model>`
 
@@ -201,7 +203,7 @@ const helmet = await engine.load('helmet.glb', { retainGeometry: true });
 scene.add(helmet);
 ```
 
-Notes: every call allocates, the same file included. Free a model you no longer need with [`engine.unload`](#engine-unload). An image larger than the device's biggest texture is left out, with a warning in the console, and its material uses its factor alone. A relative `baseURL` is taken against the page, as a relative link in it would be.
+Notes: every call allocates, the same file included. Free a model you no longer need with [`engine.unload`](#engine-unload). The file itself is not kept once the model is built: `source` is `null`. An image larger than the device's biggest texture is left out, with a warning in the console, and its material uses its factor alone. A relative `baseURL` is taken against the page, as a relative link in it would be.
 
 <a id="engine-unload"></a>
 ### `engine.unload(asset)` → `void`
@@ -254,7 +256,7 @@ const font = await engine.loadFont('64px Inter');
 scene.addText({ font, text: 'Gate 3', size: 0.4 });
 ```
 
-Notes: pick a size near the one the text is mostly seen at. It stays sharp above it and down to about an eighth of it. Free with [`engine.unload`](#engine-unload).
+Notes: pick a size near the one the text is mostly seen at. It stays sharp above it and down to about an eighth of it. Glyphs are drawn into an atlas as text first needs them; at 4096 by 4096 it starts again, empty, and text on screen draws its glyphs back. Free with [`engine.unload`](#engine-unload).
 
 <a id="engine-loadlut"></a>
 ### `engine.loadLUT(source, options)` → `Promise<LUT>`
@@ -450,7 +452,7 @@ Stops the loop and frees everything the engine owns: workers, renderer, its defa
 engine.destroy();
 ```
 
-Notes: afterwards every method that uses the GPU throws `'<method>: this engine was destroyed'`. Environments from [`engine.loadEnvironment`](#engine-loadenvironment) die with the device. The engine also destroys itself when the device is lost or the canvas leaves the document.
+Notes: afterwards every method that uses the GPU throws `'<method>: this engine was destroyed'`. Environments from [`engine.loadEnvironment`](#engine-loadenvironment) die with the device. The engine also destroys itself when the device is lost or the canvas leaves the document. A destroyed engine lets go of its canvas, so the canvas can be given to a new one.
 
 <a id="engine-grading"></a>
 ### `engine.grading` → `object | null`
@@ -679,6 +681,8 @@ Throws (on the next frame): `'dof: focusDistance must be positive…'`; `'dof: f
 engine.renderer.dof = { focusDistance: 3, fStop: 1.8 };
 ```
 
+Notes: a lens whose largest blur is a pixel or less -- a small aperture focused far away -- leaves every pixel sharp, so its passes are skipped and it costs nothing.
+
 Notes: skipped for an orthographic camera.
 
 <a id="renderer-ao"></a>
@@ -727,7 +731,7 @@ What it does better than FXAA:
 What it costs:
 - About 1.2 ms a frame more than FXAA at 1280x720 on integrated graphics (Intel Iris Xe): 0.6 for its own pass, the rest for material textures read half a mip sharper, which keeps surfaces from going soft.
 - Surfaces inside an object are still a little softer than with FXAA (2.7 against 2.2 in that measure).
-- Two images of history, 8 bytes a pixel each: about 15 MB at 1280x720.
+- Two images of history, 8 bytes a pixel each: about 15 MB at 1280x720. Turned off, they are freed, and made again when it is turned back on.
 
 Notes:
 - Where a surface was last frame is worked out from the depth buffer and the camera, so it is exact for everything that the camera's own movement moves. Something that moves by itself is kept from smearing by holding the history to the colours around each pixel in this frame; on Sponza a box crossing the view at 7 pixels a frame left no trail. Particles, splats and sprites are treated the same way.
@@ -744,7 +748,7 @@ Default `false` (the `oit` option). Weighted-blended order-independent transpare
 engine.renderer.oit = true;
 ```
 
-Notes: builds in the background the first time, like [`ao`](#renderer-ao).
+Notes: builds in the background the first time, like [`ao`](#renderer-ao). A frame with nothing blended in view skips its passes and targets entirely.
 
 <a id="renderer-softshadows"></a>
 ### `engine.renderer.softShadows` → `boolean`
@@ -1309,7 +1313,7 @@ Starts a clip, by name or by index into [`node.animations`](#node-animations). W
 | `fade` | `0` | Seconds to cross-fade from what the layer is playing. On the base layer with nothing playing, the clip starts at full weight. On another layer it fades the layer in. |
 | `layer` | `'base'` | Which layer to play on. Make other layers first with `node.animation.layer(name)`. |
 | `weight` | `1` | The clip's weight within its layer, when fully in. |
-| `join` | `false` | Join the clips already playing on the layer instead of replacing them. Move weights with `node.animation.setWeight`. |
+| `join` | `false` | Join the clips already playing on the layer instead of replacing them. Move weights with `node.animation.setWeight`. A finished run of the same clip, holding its last frame, is replaced by the new one. |
 | `sync` | `false` | Share one clock with the layer's other synced clips, measured in cycles, so clips of different lengths stay in step. A synced clip loops, and one joining a group starts at the group's place, ignoring `time`. |
 
 Returns: the node. Does nothing if there is no such clip, or the node has no player.

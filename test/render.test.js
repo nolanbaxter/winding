@@ -1255,6 +1255,9 @@ test('white balance makes exactly the named light white, and D65 is left alone',
   assert.throws(() => whiteBalanceMatrix(1000), /1667 K to 25000 K/);
   const packed = packGrading(new Float32Array(20), null);
   assert.deepEqual([...packed.subarray(0, 12)], [1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0], 'no grading: the identity, and no LUT');
+  assert.equal(packed[15], 0, 'no grading: the tonemap skips it');
+  assert.equal(packGrading(new Float32Array(20), { contrast: 1, saturation: 1 })[15], 0, 'neutral values: skipped too');
+  assert.equal(packGrading(new Float32Array(20), { saturation: 0.5 })[15], 1, 'any grading: done');
   assert.throws(() => packGrading(new Float32Array(20), { contrast: 0 }), /contrast/);
 });
 

@@ -69,6 +69,9 @@ export function packDecals(scene, out, layers, spheres) {
   return k;
 }
 
+/** prepare() calls with no decals -- about a frame each -- before their texture array is given back. */
+const IDLE_PREPARES = 120;
+
 export class DecalSet {
   constructor(rhi) {
     this.rhi = rhi;
@@ -82,7 +85,13 @@ export class DecalSet {
     });
     this._layers = new Map();
     this._textures = [];
-    this._array = createTexture(rhi, {
+    this._idle = 0;
+    this._empty();
+  }
+
+  /** The 1x1 stand-in array a frame binds with no decal textures. */
+  _empty() {
+    this._array = createTexture(this.rhi, {
       label: 'no-decals', size: [1, 1, 1], format: FORMAT,
       usage: GPUTextureUsage.TEXTURE_BINDING,
     });
@@ -92,7 +101,20 @@ export class DecalSet {
   /** Pack this frame's decals, rebuilding the texture array if the textures changed. */
   prepare(scene) {
     this.count = scene.decals.size;
-    if (this.count === 0) return 0;
+    if (this.count === 0) {
+      // No decals for a while: the array of their textures -- a resampled,
+      // mipmapped copy of each -- and the textures it names are let go.
+      // Not at once: a scene drawn between two with decals would rebuild it.
+      if (this._textures.length > 0 && ++this._idle > IDLE_PREPARES) {
+        this._array.destroy();
+        this._empty();
+        this._textures = [];
+        this._layers.clear();
+        this.revision++;
+      }
+      return 0;
+    }
+    this._idle = 0;
     const textures = [];
     for (const decal of scene.decals.values()) if (!textures.includes(decal.texture)) textures.push(decal.texture);
     if (textures.length !== this._textures.length || textures.some((t, k) => t !== this._textures[k])) {

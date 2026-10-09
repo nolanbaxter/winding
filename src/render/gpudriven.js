@@ -687,7 +687,10 @@ export class GpuDriven {
       // Skinning is part of the batch for the same reason winding is: it is a
       // different pipeline, and it binds a second vertex buffer besides.
       const skinned = scene.renderableSkin[i] >= 0;
-      const key = `${primitiveId(primitive)}:${material}:${mirrored ? 1 : 0}:${skinned ? 1 : 0}`;
+      // A number, not a string: one string a renderable was garbage for every
+      // add or remove of anything. Exact while primitive ids stay under 2^39;
+      // the material field is 12 bits (MaterialRegistry's limit).
+      const key = ((primitiveId(primitive) * 4096 + material) * 2 + (mirrored ? 1 : 0)) * 2 + (skinned ? 1 : 0);
 
       let batch = batchOf.get(key);
       if (batch === undefined) {
@@ -786,7 +789,7 @@ export class GpuDriven {
    * the renderables that moved, ascending (Scene.movedRenderables), or null to
    * look at every one.
    */
-  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets, morph, projectionScale = 1, items = null) {
+  update(scene, frustum, hzb, viewProjection, writeDrawData, paletteOffsets, morph, projectionScale = 1, items = null, deformed = true) {
     // A DIFFERENT scene needs rebuilding even when its revision happens to
     // match, and it usually does: every scene's first add() takes it to 1. The
     // check used to be on the revision alone, so rendering a second scene
@@ -815,11 +818,12 @@ export class GpuDriven {
     runs.length = 0;
     const mergeGap = Math.floor(WRITE_CALL_BYTES / UPLOAD_ITEM_BYTES);
 
-    // Nothing moved and nothing deforms: there is nothing to rewrite, and the
-    // scan to find that out was 0.8 ms a frame at 100,000 renderables.
-    const scan = full || scene.transforms.movedPending || scene.skins.length > 0 || scene.morphs.length > 0;
-    // Only what moved, when that is listed and nothing deforms.
-    const listed = !full && items !== null && scene.skins.length === 0 && scene.morphs.length === 0;
+    // Nothing moved and no skin or morph changed a box (`deformed`): there is
+    // nothing to rewrite, and the scan to find that out was 0.8 ms a frame at
+    // 100,000 renderables.
+    const scan = full || scene.transforms.movedPending || deformed;
+    // Only what moved, when that is listed and nothing deformed.
+    const listed = !full && items !== null && !deformed;
     const n = listed ? items.length : count;
     for (let k = 0; scan && k < n; k++) {
       const i = listed ? items[k] : k;
@@ -827,7 +831,7 @@ export class GpuDriven {
       // without the mesh's own node moving -- the usual rig. Gated on the node
       // alone, a character walked off its box and was culled where it stood.
       if (!listed && !full && moved[scene.renderableMatrixSlot[i]] === 0
-        && scene.renderableSkin[i] < 0 && scene.renderableMorph[i] < 0) continue;
+        && (!deformed || (scene.renderableSkin[i] < 0 && scene.renderableMorph[i] < 0))) continue;
 
       const drawFloat = i * (DRAW_DATA_BYTES / 4);
       writeDrawData(this.drawData, drawFloat, scene, i);

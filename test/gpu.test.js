@@ -23,6 +23,7 @@ import {
   buildDemoGLB, buildRiggedGLB, buildMorphedGLB, buildFeatureGLB, buildLodGLB, twoToneImageURI,
 } from './fixtures/demoModel.js';
 import { pbrShader } from '../src/render/shaders/pbr.js';
+import { soak } from './fixtures/soak.js';
 
 /** The forward shader with every extension texture bound, as a roomy device builds it. */
 const PBR_SHADER = pbrShader(EXTENSION_TEXTURES.length);
@@ -1567,6 +1568,16 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       const row = (get) => Array.from({ length: 8 }, (_, k) => Math.round(get(60 * W + x0 - 3 + k))).join(' ');
       const rows = `; across one: truth [${row((k) => truth[k])}], unfiltered [${row((k) => rawPixels[k * 4 + 1])}], TAA [${row((k) => taaPixels[k * 4 + 1])}]`;
 
+      // Off frees its two full-size histories; on again makes them anew, and works as before.
+      probe.renderer.taa = false;
+      await frames(2);
+      const freed = probe.renderer.taaPass.textures.length === 0;
+      probe.renderer.taa = true;
+      const again = edgeError(await frames(40));
+      if (!freed || !(again.error < raw.error * 0.5)) {
+        throw new Error(`TAA off then on: histories freed ${freed}, edge error after ${again.error.toFixed(1)} against unfiltered ${raw.error.toFixed(1)}`);
+      }
+
       // run() with on-demand: a still view keeps drawing while TAA settles, then rests.
       probe.renderer.post.antialias = true;
       const skippedBefore = probe.skippedFrames;
@@ -1792,6 +1803,14 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         cam.position.set([0, 0, 5]);
         if (!(b1 > 150 && r1 < 30)) throw new Error(`from behind, the centre is ${r1},_,${b1}, not blue: the order did not follow the camera`);
         if (sorted !== 0 || b2 !== b1 || r2 !== r1) throw new Error(`a frame where nothing moved sorted ${sorted} clouds, and drew ${r2},_,${b2} after ${r1},_,${b1}`);
+        // And with TAA on, whose jitter moves the projection every frame: still no sort.
+        probe.renderer.taa = true;
+        for (let i = 0; i < 200 && probe.renderer.taaPass === null; i++) { probe.renderFrame(scene, cam); await new Promise((r) => setTimeout(r, 10)); }
+        await centre(scene);
+        await centre(scene);
+        const jitteredSorts = probe.renderer.splats.sorted;
+        probe.renderer.taa = false;
+        if (jitteredSorts !== 0) throw new Error(`with TAA on, a frame where nothing moved sorted ${jitteredSorts} clouds`);
         // And behind a quad at z = 2, which hides them both.
         scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
           .setPosition(0, 0, 2).setScale(0.5, 0.5, 1);
@@ -2354,6 +2373,90 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       && atlas > 512 && after === before;
     if (!ok) throw new Error(report);
     return report;
+  });
+
+  await step('a burst of shadowed lights gives its shadow layers back once it has passed', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false });
+    try {
+      probe.gpu.resize(160, 120);
+      probe.gpu.device.pushErrorScope('validation');
+      const scene = probe.createScene();
+      scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] }))).setScale(4, 4, 1);
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, 8]);
+      cam.target.set([0, 0, 0]);
+      const lights = [];
+      for (let i = 0; i < 12; i++) lights.push(scene.addLight({ type: 'point', position: [i - 6, 0, 2], intensity: 4, range: 4, castShadow: true }));
+      probe.renderFrame(scene, cam);
+      const burst = probe.renderer.shadows.localCapacity;
+      for (const l of lights) scene.remove(l);
+      for (let i = 0; i < 130; i++) probe.renderFrame(scene, cam);
+      const quiet = probe.renderer.shadows.localCapacity;
+      // And a light back afterwards draws its shadow into the smaller array.
+      scene.addLight({ type: 'point', position: [0, 0, 2], intensity: 4, range: 4, castShadow: true });
+      probe.renderFrame(scene, cam);
+      await probe.gpu.device.queue.onSubmittedWorkDone();
+      const error = await probe.gpu.device.popErrorScope();
+      const report = `${burst} layers for twelve point lights, ${quiet} after 130 quiet frames, ${probe.renderer.shadows.localCapacity} with one light back`;
+      if (error) throw new Error(`${report}; ${error.message}`);
+      if (!(burst >= 72 && quiet <= 8)) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('a font atlas at its cap starts again, and text drawn before keeps its glyphs', async () => {
+    // A script laid out a word at a time added a glyph for every new word,
+    // and the atlas doubled until it threw. At the cap it starts again empty,
+    // and text already on screen gets its glyphs back before it is drawn.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+      antialias: false,
+    });
+    try {
+      probe.gpu.resize(160, 120);
+      probe.gpu.device.pushErrorScope('validation');
+      const font = await probe.loadFont('128px sans-serif');
+      font.atlasCap = 512;
+      const scene = probe.createScene();
+      scene.addText({ font, text: 'I', size: 1, color: [1, 0, 0, 1] });
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, 3]);
+      cam.target.set([0, 0, 0]);
+      const lit = async () => {
+        probe.renderFrame(scene, cam);
+        const pixels = await probe.gpu.readPixels();
+        let n = 0;
+        for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 200) n++;
+        return n;
+      };
+      const before = await lit();
+      // Far more than 512 x 512 holds at 128 px, as words would come.
+      for (let k = 0; k < 6; k++) font.ensure('ABCDEFGHJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.slice(k * 10, k * 10 + 10));
+      const restarted = font.generation;
+      const after = await lit();
+      const error = await probe.gpu.device.popErrorScope();
+      const report = `the I: ${before} px, then ${after} px after the atlas started again ${restarted} times, staying ${font.texture.width} wide`;
+      if (error) throw new Error(`${report}; ${error.message}`);
+      if (!(before > 100 && after === before && restarted > 0 && font.texture.width === 512)) throw new Error(report);
+      probe.unload(font);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
   });
 
   await step('a decal paints the base colour in its box, is lit as the surface is, only from the side it faces, and the last added on top', async () => {
@@ -3921,6 +4024,13 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       gone.destroy();
       goneCanvas.remove();
     }
+  });
+
+  await step('nothing builds up: models, scenes, spawning, features, lights, effects, environments, targets, probes, 2D levels and whole engines, over and over', async () => {
+    const { rows, failed, collected } = await soak({ Winding, Camera, Camera2D, rounds: 4 });
+    if (failed > 0) throw new Error(rows.filter((r) => !r.startsWith('ok')).join('; '));
+    return `${rows.length} scenarios: no GPU object, pipeline or shader left behind`
+      + (collected ? ', and everything let go of was collected' : ' (no forced collection: run with --js-flags=--expose-gc to check that too)');
   });
 
   check('no WGSL compilation errors', shaderErrors.length === 0, shaderErrors.join('\n'));

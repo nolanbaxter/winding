@@ -442,7 +442,15 @@ export class AnimationPlayer {
     }
     if (join || ramp) {
       if (!join) for (const old of target.tracks) leave(old, fade);
+      // A finished run of the same clip, holding its last frame, is what
+      // this one starts over: kept, a clip joined on every hit or footstep
+      // added a track each time, for good, and each was sampled every frame.
+      else target.tracks = target.tracks.filter((old) => !(old.clip === clip && old.finished));
       target.tracks.push(track);
+      if (target.tracks.length > 64 && !this._warnedTracks) {
+        this._warnedTracks = true;
+        console.warn(`AnimationPlayer: ${target.tracks.length} clips are playing on layer "${layer}" -- join adds one each call; stop or fade out the ones done with`);
+      }
     } else {
       target.tracks = [track];
     }

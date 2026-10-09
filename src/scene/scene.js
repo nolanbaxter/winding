@@ -15,7 +15,7 @@ import { TransformStore } from './transform.js';
 import { Node } from './node.js';
 import { Camera } from './camera.js';
 import {
-  updateWorldBounds, unionWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds,
+  updateWorldBounds, unionWorldBounds, updateSkinBounds, applySkinBounds, applyMorphBounds, BoxList,
 } from './bounds.js';
 import { aabbRayDistance, aabbTransform, aabbUnion, rayTriangleDistance } from '../core/math/aabb.js';
 import { AnimationPlayer } from './animation.js';
@@ -286,7 +286,7 @@ function checked(caller, make) {
 }
 
 /** The engine's own bookkeeping in a record, which no option names. */
-const BOOKKEEPING = new Set(['added', 'owed', 'seed', 'dirty', 'options', 'boxes', 'block', 'kind', 'sizeGiven', 'placed', 'strokeEdge']);
+const BOOKKEEPING = new Set(['added', 'owed', 'seed', 'dirty', 'options', 'boxes', 'block', 'kind', 'sizeGiven', 'placed', 'strokeEdge', 'fontGeneration']);
 
 /**
  * A kind's options for a node, or null if it has none: a copy all the way
@@ -590,6 +590,12 @@ export class Scene {
      * and must not run on a scene that is merely moving.
      */
     this.revision = nextRevision++;
+    /**
+     * The world boxes of renderables removed since the renderer last looked:
+     * where a cached shadow map may still show them. An added one needs no
+     * entry -- it is new, so it moved, and its box is recorded as any mover's.
+     */
+    this.removedBoxes = new BoxList();
     this.renderableEntity = new Uint32Array(renderableCapacity);
     /** Which transform slot each renderable reads its world matrix from. */
     this.renderableMatrixSlot = new Uint32Array(renderableCapacity);
@@ -1000,6 +1006,13 @@ export class Scene {
 
     this.localMin.set(primitive.bounds.min, i * 3);
     this.localMax.set(primitive.bounds.max, i * 3);
+    // Nowhere yet, rather than the box of whatever held this slot last: its
+    // first bounds update records the box as it was and as it is, for cached
+    // shadow maps, and a stale one there redrew maps the new object is far
+    // from. NaN reaches no view and no light; the update replaces it the
+    // same frame, as a new node has moved.
+    this.worldMin.fill(NaN, i * 3, i * 3 + 3);
+    this.worldMax.fill(NaN, i * 3, i * 3 + 3);
     return i;
   }
 
@@ -1112,6 +1125,7 @@ export class Scene {
     for (let i = this.renderableCount - 1; i >= 0; i--) {
       if (!dying.has(this.renderableEntity[i])) continue;
       this.renderablePrimitive[i].instances--;
+      this.removedBoxes.push(this.worldMin, this.worldMax, i * 3);
 
       const last = --this.renderableCount;
       if (i !== last) {
@@ -1160,6 +1174,9 @@ export class Scene {
         if (!this.added2D.delete(entity)) this.removed2D.add(entity);
         this.layout2D++;
       }
+      // Read only by a 2D view: in a 3D scene nothing empties it, and every
+      // sprite or text ever changed stayed listed after it was gone.
+      this.spritesChanged.delete(entity);
       this.sprites.delete(entity);
       this.emitters.delete(entity);
       this.splats.delete(entity);

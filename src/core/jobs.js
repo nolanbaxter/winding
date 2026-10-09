@@ -148,6 +148,11 @@ export class JobSystem {
     }
   }
 
+  /** Whatever last published its buffers here, if it is still alive. See setSharedData. */
+  get sharedOwner() {
+    return this._owner?.deref() ?? null;
+  }
+
   /**
    * Hand every worker the shared arrays they operate on. Sent once; nothing is
    * copied, because these are views onto SharedArrayBuffers.
@@ -159,8 +164,9 @@ export class JobSystem {
    */
   setSharedData(buffers, owner = null) {
     this._buffers = buffers;
-    /** Whatever last published its buffers here. See setSharedData. */
-    this.sharedOwner = owner;
+    // Held weakly: it is a scene's transform store, and held, a scene the app
+    // had dropped stayed alive until another scene composed in parallel.
+    this._owner = owner === null ? null : new WeakRef(owner);
     // A worker sits inside workerLoop and never returns to its event loop on
     // its own, so a second 'init' would queue unread while the worker went on
     // composing into the FIRST buffers it was given -- memory nobody reads

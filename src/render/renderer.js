@@ -14,6 +14,8 @@ import { DEPTH_CLEAR_VALUE, DEPTH_FORMAT, DEPTH_COMPARE } from '../rhi/device.js
 
 /** What a probe capture's frames are drawn for, to the render graph's pool: one view, however many probes. */
 const CAPTURE = Object.freeze({ view: 'capture' });
+/** Frames a 2D view may go undrawn before its buffers are given back; splats keep as long. */
+const VIEW2D_KEEP_FRAMES = 120;
 
 /** OIT targets. accum sums weighted colour; reveal is the surviving background. */
 export const OIT_ACCUM_FORMAT = 'rgba16float';
@@ -27,7 +29,7 @@ import { handleIndex } from '../core/handle.js';
 import { DIRECTIONAL_FLOATS } from '../scene/scene.js';
 
 import {
-  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND, ALPHA_OPAQUE,
+  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND, ALPHA_OPAQUE, ALPHA_MASK,
 } from './material.js';
 import { pbrShader, FRAME_BYTES } from './shaders/pbr.js';
 import { SHEEN_ALBEDO } from './sheen.js';
@@ -41,7 +43,7 @@ import { DepthOfField } from './dof.js';
 import { ProbeSet, FACE_CAMERAS, flipInto, PROBE_FLOATS } from './probes.js';
 import { Environment } from './ibl.js';
 import { Camera } from '../scene/camera.js';
-import { createTexture, cubeFaceView } from '../rhi/texture.js';
+import { createTexture, cubeFaceView, warmMipPipelines } from '../rhi/texture.js';
 import { OIT_RESOLVE_SHADER } from './shaders/oit.js';
 import { SkyboxPass } from './skybox.js';
 import { ShadowMaps, stableShadowDistance } from './shadows.js';
@@ -453,10 +455,12 @@ export class Renderer {
     /** Each scene's reflection probes on the GPU; see probes.js. */
     this._probeSets = new WeakMap();
     /** What the frame binds for probes when a scene has none: an empty set. */
+    const noProbes = createTexture(rhi, {
+      label: 'no-probes', size: [1, 1, 6], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
     this._noProbes = {
-      view: createTexture(rhi, {
-        label: 'no-probes', size: [1, 1, 6], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING,
-      }).createView({ dimension: 'cube-array' }),
+      texture: noProbes,
+      view: noProbes.createView({ dimension: 'cube-array' }),
       buffer: createBuffer(rhi, { label: 'no-probes', size: PROBE_FLOATS * 4, usage: GPUBufferUsage.STORAGE }),
     };
     this._frameProbes = null;
@@ -490,12 +494,19 @@ export class Renderer {
   }
 
   async _init() {
+    // What every texture's mips, transmission's copy and the decal array draw
+    // with, built now rather than by the first use mid-frame.
+    const mips = warmMipPipelines(this.rhi, [
+      ...['rgba8unorm', 'rgba8unorm-srgb'].flatMap((format) => ['fsBox', 'fsHalve', 'fsBleed'].map((entry) => [format, entry])),
+      [HDR_FORMAT, 'fs'], ['rgba8unorm-srgb', 'fs'],
+    ]);
     this.gpu = await GpuDriven.create(this.rhi, this.maxDraws, this.materials);
     /** One draw per material for the one-object batches: see merged.js. */
     this.merged = await MergedDraws.create(this.rhi, this.geometry);
     this.gpu.merged = this.merged;
     this._makeDrawBindGroup();
     this.clusters = await ClusteredLights.create(this.rhi);
+    await mips;
     // Two modules: the plain one declares no extension textures, so its
     // pipelines take the core material layout.
     [this.shader, this.extendedShader] = await Promise.all([
@@ -672,10 +683,21 @@ export class Renderer {
       // shading draw only has to match it: each pixel shades once.
       if ((variant & 3) === ALPHA_OPAQUE) {
         merged.prepass = {
-          ...merged, label: `${descriptor.label}:merged-depth`, fragmentEntry: 'fsDepth',
+          ...merged, label: `${descriptor.label}:merged-depth`, vertexEntry: 'vsMergedDepth', fragmentEntry: 'fsDepth',
           targets: descriptor.targets.map((t) => ({ format: t.format, writeMask: 0 })),
         };
         merged.depth = { ...descriptor.depth, depthCompare: 'greater-equal', depthWriteEnabled: false };
+      } else if ((variant & 3) === ALPHA_MASK) {
+        // A masked one's prepass discards what the mask cuts, so its shading
+        // draw matches it without discarding: early-Z works again, and a leaf
+        // behind a leaf shades nothing. 'equal', not 'greater-equal': a cut
+        // texel lies nearer than the depth behind it, and would pass that.
+        merged.prepass = {
+          ...merged, label: `${descriptor.label}:merged-mask-depth`, fragmentEntry: 'fsDepthMask',
+          targets: descriptor.targets.map((t) => ({ format: t.format, writeMask: 0 })),
+        };
+        merged.depth = { ...descriptor.depth, depthCompare: 'equal', depthWriteEnabled: false };
+        merged.constants = { ...descriptor.constants, USE_ALPHA_MASK: 0 };
       }
       this._merged.set(descriptor, merged);
     }
@@ -793,8 +815,13 @@ export class Renderer {
    * waiting for a capture -- if the environment changes size.
    */
   _probesFor(scene, environment) {
-    if (scene.reflectionProbes.length === 0) return null;
     let set = this._probeSets.get(scene);
+    if (scene.reflectionProbes.length === 0) {
+      // Its last probe removed: nothing captured is left to keep, but the
+      // cube array was, for as long as the scene lived.
+      if (set) { set.destroy(); this._probeSets.delete(scene); }
+      return null;
+    }
     if (set && (set.size !== environment.size || set.mips !== environment.prefilterMips)) {
       set.destroy();
       for (const probe of scene.reflectionProbes) probe.captured = false;
@@ -967,6 +994,8 @@ export class Renderer {
    * canvas (engine.renderFrame's `target`).
    */
   render(scene, camera, jobs = null, target = null, overlay = null, output = null) {
+    this._frameNumber = (this._frameNumber ?? 0) + 1;
+    if (this._views2D !== undefined) this._sweep2D();
     if (camera.is2D === true) return this._render2D(scene, camera, jobs, overlay, output);
     const rhi = this.rhi;
     const environment = scene.environment;
@@ -1030,6 +1059,9 @@ export class Renderer {
     // everything this frame draws, and put back at the end of it.
     if (this.taa && this.taaPass === null) this._taaReady().catch((error) => console.error(error));
     const jittered = this.taa && this.taaPass !== null && target === null && output === null;
+    // Off, its two full-size histories go too. Only off: a probe capture or a
+    // frame drawn elsewhere skips TAA and keeps them for the next frame.
+    if (!this.taa && this.taaPass !== null && this.taaPass.textures.length > 0) this.taaPass.release();
     if (jittered) this._jitterCamera(camera, width, height);
     frustumFromViewProjection(this.frustum, camera.viewProjection);
     p?.mark('camera');
@@ -1045,6 +1077,11 @@ export class Renderer {
     const changes = this._shadowChanges;
     changes.boxes.clear();
     const record = scene.shadowCasters.size > 0 ? changes.boxes : null;
+    // What was removed, where it was: the maps that showed it are redrawn,
+    // and the rest kept. The added are recorded below, as movers.
+    const removed = scene.removedBoxes;
+    if (record !== null) for (let k = 0; k < removed.count * 6; k += 6) record.push(removed.data, removed.data.subarray(3), k);
+    removed.clear();
     // The renderables that moved, when few enough did to list -- or null, and
     // every one is looked at -- and their boxes as they were, for the union.
     const items = anyMoved ? scene.movedRenderables() : null;
@@ -1082,7 +1119,10 @@ export class Renderer {
         posed ||= skin.posed;
       }
     }
-    if (record !== null && (skinned > 0 || morphed > 0)) this._recordDeformed(scene, record);
+    // Whether a skin or morph changed any box this frame: none for a scene of
+    // characters standing still, which then costs what a static scene does.
+    const deformed = skinned > 0 || morphed > 0;
+    if (record !== null && deformed) this._recordDeformed(scene, record);
 
     // The scene's own extent, which is what the shadow and cluster ranges are
     // derived from. Recomputed only when something moved or the contents
@@ -1112,7 +1152,7 @@ export class Renderer {
     // and the gather below is what decides those offsets.
     this.morph.update(scene);
     this.gpu.update(scene, this.frustum, hzb, camera.viewProjection, writeDrawData,
-      this.skinPalette.offsets, this.morph, camera.projection[5], items);
+      this.skinPalette.offsets, this.morph, camera.projection[5], items, deformed);
     if (this._drawBindGroupRevision !== this.gpu.buffersRevision) this._makeDrawBindGroup();
     p?.mark('draw data');
 
@@ -1209,10 +1249,15 @@ export class Renderer {
     this._sky().update(camera, 1.0, this.fog === null ? null : this._fogData);
     // Materials a clip changed since the last frame. Uploaded here rather than
     // by the player, because the scene does not own the GPU.
-    // A changed factor can change an alpha-shaped shadow, which no box says.
-    const materialsChanged = scene.changedMaterials.size > 0;
-    if (materialsChanged) {
-      for (const [id, record] of scene.changedMaterials) this.materials.update(id, record);
+    // A changed factor can change an alpha-shaped shadow, which no box says --
+    // but only a masked or blended material's: an opaque one casts depth
+    // alone, so its colour, glow or roughness animating redraws no shadow.
+    let shapedChanged = false;
+    if (scene.changedMaterials.size > 0) {
+      for (const [id, record] of scene.changedMaterials) {
+        this.materials.update(id, record);
+        shapedChanged ||= this.materials.alphaModes[id] !== ALPHA_OPAQUE;
+      }
       scene.changedMaterials.clear();
     }
     p?.mark('lights');
@@ -1220,13 +1265,14 @@ export class Renderer {
     // then point and spot views. Each writes its slot into the light's record,
     // so both run before the records are uploaded. Growing either array
     // replaces what the frame group names.
-    // Every shadow map is drawn again for a new scene, a structural change, a
-    // changed material, or LOD -- whose casters are the levels the CAMERA
-    // shows, so they change as it moves. And for a probe capture, which draws
-    // from other eyes into the same layers, and then once more after it.
-    changes.all = target !== null || materialsChanged || this.gpu.hasLod
-      || this._shadowCacheScene !== scene || this._shadowCacheRevision !== scene.revision;
-    this.shadows.boundBatches(scene, this.gpu, items, anyMoved);
+    // Every shadow map is drawn again for a new scene, a changed alpha-shaped material, or
+    // LOD -- whose casters are the levels the CAMERA shows, so they change as
+    // it moves. And for a probe capture, which draws from other eyes into the
+    // same layers, and then once more after it. Something added or removed
+    // redraws only the maps its box reaches (scene.removedBoxes, and movers).
+    changes.all = target !== null || shapedChanged || this.gpu.hasLod
+      || this._shadowCacheScene !== scene || this._shadowCacheRevision === -1;
+    this.shadows.boundBatches(scene, this.gpu, items, anyMoved, deformed);
     this.shadows.update(camera, scene, changes,
       this._hasSceneBounds ? this._sceneMin : null, this._hasSceneBounds ? this._sceneMax : null);
     this.shadows.updateLocal(scene, camera, changes);
@@ -1359,9 +1405,9 @@ export class Renderer {
     const mergedLists = this.merged.addPass(graph, this.gpu, this.geometry, drawDataBuffer);
 
     // Shadows draw the level of detail the camera chose. Only when there is
-    // any: otherwise they walk the static order, and this pass is not run.
+    // any, and a shadow map to draw: otherwise this pass is not run.
     const shadowReads = [];
-    if (this.gpu.hasLod) {
+    if (this.gpu.hasLod && this.shadows.drawsAny()) {
       const indirectShadow = graph.importBuffer('indirect:shadow', this.gpu.indirectBuffer);
       const visibleShadow = graph.importBuffer('visible:shadow', this.gpu.visibleBuffer);
       this.gpu.addCullPass(graph, {
@@ -1417,19 +1463,26 @@ export class Renderer {
 
     // Built from the early depth and consumed later in the SAME frame, which
     // is the whole difference: the occlusion test is no longer a frame behind.
-    const hzbLevels = [];
-    for (let level = 0; level < hzb.levelCount; level++) {
-      hzbLevels.push(graph.importTexture(`hzb${level}`, hzb.levelViews[level]));
-    }
-    hzb.addPasses(graph, depth, hzbLevels);
+    // Only batches are culled by it: when every opaque one is merged -- culled
+    // by view, drawn in the early pass -- the pyramid and the late cull have
+    // nothing to test, and are skipped.
+    let occludable = false;
+    for (let d = 0; d < this.batchList.count && !occludable; d++) occludable = this.merged.batchMerged[this.batchList.payloads[d]] === 0;
+    if (occludable) {
+      const hzbLevels = [];
+      for (let level = 0; level < hzb.levelCount; level++) {
+        hzbLevels.push(graph.importTexture(`hzb${level}`, hzb.levelViews[level]));
+      }
+      hzb.addPasses(graph, depth, hzbLevels);
 
-    this.gpu.addCullPass(graph, {
-      phase: 1,
-      boundsResource: drawDataBuffer,
-      indirectResource: indirectLate,
-      visibleResource: visibleLate,
-      hzbResources: hzbLevels,
-    });
+      this.gpu.addCullPass(graph, {
+        phase: 1,
+        boundsResource: drawDataBuffer,
+        indirectResource: indirectLate,
+        visibleResource: visibleLate,
+        hzbResources: hzbLevels,
+      });
+    }
 
     // Transmissive surfaces need the opaque scene finished and copied before
     // they draw, so blended ones -- which must come after them -- leave the
@@ -1444,6 +1497,7 @@ export class Renderer {
     const cull = this.splatCull;
     if (!(cull >= 0 && Number.isFinite(cull))) throw new Error(`splatCull must be 0 or more, got ${cull}`);
     this.splats.cull = cull;
+    this.splats.unjittered = jittered ? this._taaSaved.projection : null;
     const clouds = this.splats.prepare(scene, camera, environment, width, height);
     this.stats.splats = this.splats.count;
     this._blendInLate = !this._frameOIT && ambient === null && !transmissive && sprites === 0 && emitters === 0 && clouds === 0;
@@ -1452,7 +1506,7 @@ export class Renderer {
     // then the blended geometry, which has to follow every opaque draw. No
     // clear on either attachment: the graph derives `load` from the early pass
     // having written them.
-    graph.addPass({
+    if (occludable || (this._blendInLate && this.transparentList.count > 0)) graph.addPass({
       name: 'forward:late',
       reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts, indirectLate, visibleLate],
       color: ambient === null ? [{ resource: sceneColor }] : [{ resource: sceneColor }, { resource: ambient }],
@@ -1488,7 +1542,10 @@ export class Renderer {
       });
     }
 
-    if (!this._frameOIT && !this._blendInLate) {
+    // Blended surfaces in view, transmissive ones aside: none, and neither of
+    // the blend paths below has anything to draw.
+    const blended = this.transparentList.count - this._transmissiveCount;
+    if (!this._frameOIT && !this._blendInLate && blended > 0) {
       graph.addPass({
         name: 'forward:blend',
         reads: [shadowMap, localShadowMap, lightBuffer, clusterIndices, clusterCounts],
@@ -1501,7 +1558,7 @@ export class Renderer {
     // OIT, when it is on. Blended geometry skipped the pass above, so it is
     // drawn here into its own two targets in whatever order it comes -- that
     // is the point -- and composited over the scene by the resolve.
-    if (this._frameOIT) {
+    if (this._frameOIT && blended > 0) {
       const accum = graph.createTexture('oit-accum', {
         width,
         height,
@@ -1690,16 +1747,29 @@ export class Renderer {
   /**
    * The 2D view that draws `scene`: one a scene, each keeping its own slots,
    * so a game and the minimap drawn into a target don't rebuild each other's
-   * lists every frame. A dropped scene's goes with it.
+   * lists every frame. this.view2d only makes them, holding no scene.
    */
   _view2D(scene) {
-    this._views2D ??= new WeakMap();
-    let view = this._views2D.get(scene);
-    if (view === undefined) {
-      view = this.view2d._scene === null || this.view2d._scene === scene ? this.view2d : this.view2d.another(this.particles);
-      this._views2D.set(scene, view);
+    this._views2D ??= new Map();
+    let entry = this._views2D.get(scene);
+    if (entry === undefined) this._views2D.set(scene, (entry = { view: this.view2d.another(this.particles), last: 0 }));
+    entry.last = this._frameNumber;
+    return entry.view;
+  }
+
+  /**
+   * Destroy the 2D views of scenes no frame has drawn for VIEW2D_KEEP_FRAMES,
+   * as splats give back a cloud's buffers. Held weakly instead, a dropped
+   * level's buffers waited for garbage collection -- which GPU memory does
+   * not prompt -- and its scene with them; one held by the first view, for good.
+   */
+  _sweep2D() {
+    for (const [scene, entry] of this._views2D) {
+      if (entry.last < this._frameNumber - VIEW2D_KEEP_FRAMES) {
+        entry.view.destroy();
+        this._views2D.delete(scene);
+      }
     }
-    return view;
   }
 
   /**
@@ -1809,10 +1879,13 @@ export class Renderer {
     this.decals.destroy();
     this.dofPass.destroy();
     this.view2d.destroy();
+    for (const entry of this._views2D?.values() ?? []) entry.view.destroy();
     this.overlay2d.destroy();
     this._captureColor?.destroy();
     this._captureDepth?.destroy();
     this.aoPass?.destroy();
+    this._noProbes.texture.destroy();
+    this._noProbes.buffer.destroy();
   }
 
   /**
@@ -1903,12 +1976,6 @@ export class Renderer {
     const scene = this._frameScene;
     const environment = this._frameEnvironment;
 
-    if (phase === 0 && this.skybox) {
-      // The skybox binds its own layout at group 0, so the frame group has to
-      // be set AFTER it -- a bind group set at an index is overwritten
-      // regardless of which pipeline layout put it there.
-      this._sky().draw(pass, environment);
-    }
     pass.setBindGroup(GROUP_FRAME, this._frameBindGroup(environment));
     this.pipelineLayout.bindEmptyGroups(pass);
 
@@ -1968,6 +2035,9 @@ export class Renderer {
       this.merged.encode(pass, this.drawLayout, GROUP_DRAW,
         (material, mirrored) => this.pipelines.get(this._mergedFor(material, mirrored)),
         (material) => pass.setBindGroup(GROUP_MATERIAL, this.materials.shadingGroup(material)));
+      // The sky last, where nothing opaque was drawn: see skybox.js. It binds
+      // its own layout at group 0, which nothing after it in this pass needs.
+      if (this.skybox) this._sky().draw(pass, environment);
       return;
     }
 

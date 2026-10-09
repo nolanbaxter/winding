@@ -102,11 +102,15 @@ export class Device {
 
     // WebGPU errors do NOT throw. They surface here, and without a listener
     // they vanish into the console at best.
+    // Removed again by destroy(), with the rest of what it listens to: a
+    // canvas left in the page keeps its context, the context its device, and
+    // a listener on the device everything this object reaches -- the engine.
+    this._listening = new AbortController();
     device.addEventListener('uncapturederror', (event) => {
       const message = `WebGPU: ${event.error.message}`;
       if (this.onError) this.onError(event.error);
       else console.error(message);
-    });
+    }, { signal: this._listening.signal });
 
     // Every resource created from this device dies with it: a driver reset, a
     // GPU hang, an out-of-memory, or the browser reclaiming a backgrounded
@@ -240,7 +244,7 @@ export class Device {
             if (this.destroyed) return;
             applyFromClient();
             watchRatio();
-          }, { once: true });
+          }, { once: true, signal: this._listening.signal });
       };
       watchRatio();
     }
@@ -381,8 +385,14 @@ export class Device {
   destroy() {
     this.destroyed = true;
     this._observer?.disconnect();
+    this._listening.abort();
+    this.onUnusable = null;
+    this.onError = null;
     this.depthTexture?.destroy();
     this._depthView = null;
     this.device.destroy();
+    // A configured context names its device: a canvas kept for the next
+    // engine (a remount, an editor's reload) held this whole one alive.
+    try { this.context.unconfigure(); } catch { /* already gone with the device */ }
   }
 }

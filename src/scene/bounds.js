@@ -298,6 +298,10 @@ export function updateSkinBounds(skins, world) {
  * Runs after updateWorldBounds, overwriting what it wrote: that pass has no
  * way to know a renderable is skinned, and giving it one would put skinning
  * into a file whose whole point is that it reads only scene columns.
+ *
+ * Returns how many boxes this CHANGED, not how many are skinned: a character
+ * standing still changes none, and every consumer of the count -- the scene's
+ * extent, the draw data, the shadow casters' boxes -- then has nothing to redo.
  */
 export function applySkinBounds(count, renderableSkin, skins, worldMin, worldMax) {
   let applied = 0;
@@ -308,12 +312,15 @@ export function applySkinBounds(count, renderableSkin, skins, worldMin, worldMax
     if (!skin || !skin.hasBounds) continue;
 
     const o = i * 3;
-    worldMin[o] = skin.boundsMin[0];
-    worldMin[o + 1] = skin.boundsMin[1];
-    worldMin[o + 2] = skin.boundsMin[2];
-    worldMax[o] = skin.boundsMax[0];
-    worldMax[o + 1] = skin.boundsMax[1];
-    worldMax[o + 2] = skin.boundsMax[2];
+    const lo = skin.boundsMin, hi = skin.boundsMax;
+    if (worldMin[o] === lo[0] && worldMin[o + 1] === lo[1] && worldMin[o + 2] === lo[2]
+      && worldMax[o] === hi[0] && worldMax[o + 1] === hi[1] && worldMax[o + 2] === hi[2]) continue;
+    worldMin[o] = lo[0];
+    worldMin[o + 1] = lo[1];
+    worldMin[o + 2] = lo[2];
+    worldMax[o] = hi[0];
+    worldMax[o + 1] = hi[1];
+    worldMax[o + 2] = hi[2];
     applied++;
   }
   return applied;

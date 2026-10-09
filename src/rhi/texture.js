@@ -272,6 +272,20 @@ export function generateMipmaps(rhi, texture, { bleed = false, coverage = true }
  * 'fsHalve' makes a mip and 'fsBleed' a bled first level.
  */
 export function mipPipelineFor(rhi, format, entry = 'fs') {
+  const { descriptor, layout } = mipDescriptor(rhi, format, entry);
+  return { pipeline: sharedPipelines(rhi.device).get(descriptor), layout };
+}
+
+/**
+ * Build these (format, entry) pairs' pipelines in the background, at start:
+ * built on first use instead, the first texture streamed in during play
+ * compiled one synchronously, in the middle of a frame.
+ */
+export function warmMipPipelines(rhi, pairs) {
+  return sharedPipelines(rhi.device).warm(pairs.map(([format, entry]) => mipDescriptor(rhi, format, entry).descriptor));
+}
+
+function mipDescriptor(rhi, format, entry) {
   const device = rhi.device;
   const { shader, layout, pipelineLayout } = cached(rhi, 'mip', () => {
     const layout = device.createBindGroupLayout({
@@ -287,7 +301,7 @@ export function mipPipelineFor(rhi, format, entry = 'fs') {
       pipelineLayout: createPipelineLayout(device, { 0: layout }, 'mipmap'),
     };
   });
-  const pipeline = sharedPipelines(device).get({
+  const descriptor = {
     label: `mipmap:${format}:${entry}`,
     layout: pipelineLayout,
     shader,
@@ -297,8 +311,8 @@ export function mipPipelineFor(rhi, format, entry = 'fs') {
     // unless told otherwise.
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depth: null,
-  });
-  return { pipeline, layout };
+  };
+  return { descriptor, layout };
 }
 
 // Per-device cache for anything created once and shared: samplers, and the 1x1
@@ -374,8 +388,9 @@ export function clampSampler(rhi) {
  *
  * This is why there are no shader variants for texture presence: every
  * material binds four textures, absent ones point at these, and the factors in
- * the material uniform do the rest. Sampling a 1x1 texture is free, and the
- * alternative is a pipeline variant per combination of present maps.
+ * the material uniform do the rest. Sampling a 1x1 texture is cheap, not free
+ * (see HAS_* in material.js), and the alternative is a pipeline variant per
+ * combination of present maps.
  */
 export function defaultTextures(rhi) {
   return cached(rhi, 'defaults', () => ({

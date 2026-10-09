@@ -590,6 +590,12 @@ export class ClusteredLights {
    * without anything here saying so.
    */
   addPasses(graph, { boundsResource, lightsResource, indicesResource, countsResource }) {
+    // Nothing to assign: once a frame has zeroed the counts, nothing else
+    // will change them, so later frames run neither pass. The zeroing frame
+    // still runs -- a shader still building without its light loop reads them.
+    const empty = this.lightCount + this.decalCount === 0;
+    if (empty && this._countsZero) return;
+    this._countsZero = empty;
     graph.addPass({
       name: 'cluster-bounds',
       type: 'compute',

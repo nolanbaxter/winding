@@ -99,10 +99,10 @@ export class SkyboxPass {
         ? [{ format: HDR_FORMAT }]
         : [{ format: HDR_FORMAT }, { format: ambientFormat, writeMask: 0 }],
       primitive: { topology: 'triangle-list', cullMode: 'none' },
-      // Drawn first, writing no depth and testing nothing, so everything else
-      // draws over it normally. Simpler to reason about than fighting the
-      // reverse-Z clear value for a far-plane trick.
-      depth: { format: DEPTH_FORMAT, depthCompare: 'always', depthWriteEnabled: false },
+      // Drawn after the opaque geometry, at depth 0 -- reverse-Z's cleared
+      // far plane -- so 'equal' passes only where nothing was drawn: the sky
+      // shades what shows of it, not the whole screen. Writes no depth.
+      depth: { format: DEPTH_FORMAT, depthCompare: 'equal', depthWriteEnabled: false },
     };
     await pipelines.warm([descriptor]);
 

@@ -58,6 +58,71 @@ export const DEFAULT_SKY = Object.freeze({
 
 const vec3 = (v) => `vec3<f32>(${v[0]}, ${v[1]}, ${v[2]})`;
 
+/** Per device: what every bake shares -- its layouts, and the shaders that do not depend on the sky. */
+const IBL_OBJECTS = new WeakMap();
+function iblObjects(device) {
+  let objects = IBL_OBJECTS.get(device);
+  if (objects) return objects;
+  const paramsLayout = device.createBindGroupLayout({
+    label: 'ibl-params',
+    entries: [{
+      binding: 0,
+      visibility: GPUShaderStage.FRAGMENT,
+      buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
+    }],
+  });
+  const convolveLayout = device.createBindGroupLayout({
+    label: 'ibl-convolve',
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
+      },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+    ],
+  });
+
+  // From a map, the sky pass reads it through its own layout: the map and a
+  // sampler that wraps round the panorama and clamps at the poles.
+  const mapLayout = device.createBindGroupLayout({
+    label: 'ibl-map',
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
+      },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+    ],
+  });
+  objects = {
+    paramsLayout, convolveLayout, mapLayout,
+    convolveShader: compileShaderSync(device, CONVOLVE_SHADER, 'ibl-convolve.wgsl'),
+    equirectShader: compileShaderSync(device, EQUIRECT_SHADER, 'ibl-equirect.wgsl'),
+    skyPipelineLayout: createPipelineLayout(device, { 0: paramsLayout }, 'ibl-sky'),
+    mapPipelineLayout: createPipelineLayout(device, { 0: mapLayout }, 'ibl-sky'),
+    convolvePipelineLayout: createPipelineLayout(device, { 0: convolveLayout }, 'ibl-convolve'),
+    skies: new Map(),
+  };
+  IBL_OBJECTS.set(device, objects);
+  return objects;
+}
+
+/**
+ * A sky's shader, by its source: the same sky -- a scene's default, re-baked,
+ * or captured into probes -- compiles once. Only a sky never seen adds one.
+ */
+function skyShaderFor(device, sky) {
+  const { skies } = iblObjects(device);
+  const source = skyShader(sky);
+  let shader = skies.get(source);
+  if (!shader) skies.set(source, (shader = compileShaderSync(device, source, 'ibl-sky.wgsl')));
+  return shader;
+}
+
 /**
  * Substituted into the source rather than uploaded as a uniform, because these
  * are BAKE-TIME constants: the cubemap is generated once when an Environment
@@ -450,45 +515,13 @@ export class Environment {
 
     // ---- pipelines -------------------------------------------------------
 
-    const paramsLayout = device.createBindGroupLayout({
-      label: 'ibl-params',
-      entries: [{
-        binding: 0,
-        visibility: GPUShaderStage.FRAGMENT,
-        buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
-      }],
-    });
-    const convolveLayout = device.createBindGroupLayout({
-      label: 'ibl-convolve',
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
-        },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-      ],
-    });
-
-    // From a map, the sky pass reads it through its own layout: the map and a
-    // sampler that wraps round the panorama and clamps at the poles.
-    const mapLayout = this._map === null ? null : device.createBindGroupLayout({
-      label: 'ibl-map',
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: PARAMS_BYTES },
-        },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-      ],
-    });
-    const skyShaderObject = this._map === null
-      ? compileShaderSync(device, skyShader(this.sky), 'ibl-sky.wgsl')
-      : compileShaderSync(device, EQUIRECT_SHADER, 'ibl-equirect.wgsl');
-    const convolveShader = compileShaderSync(device, CONVOLVE_SHADER, 'ibl-convolve.wgsl');
+    // Shaders and layouts made once per device, not per bake: each new one
+    // has a new id, so every environment loaded and every probe captured
+    // keyed three new pipelines into the shared cache, which keeps them all.
+    const objects = iblObjects(device);
+    const { paramsLayout, convolveLayout, convolveShader } = objects;
+    const mapLayout = this._map === null ? null : objects.mapLayout;
+    const skyShaderObject = this._map === null ? skyShaderFor(device, this.sky) : objects.equirectShader;
 
     // Plain descriptors through the shared cache, like every pipeline. Each
     // pass is one full-screen triangle, which winds clockwise: nothing culled.
@@ -499,10 +532,9 @@ export class Environment {
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depth: null,
     });
-    const skyPipeline = bake('ibl-sky', createPipelineLayout(device, { 0: mapLayout ?? paramsLayout }, 'ibl-sky'), skyShaderObject, 'fs');
-    const convolvePipelineLayout = createPipelineLayout(device, { 0: convolveLayout }, 'ibl-convolve');
-    const irradiancePipeline = bake('ibl-irradiance', convolvePipelineLayout, convolveShader, 'fsIrradiance');
-    const prefilterPipeline = bake('ibl-prefilter', convolvePipelineLayout, convolveShader, 'fsPrefilter');
+    const skyPipeline = bake('ibl-sky', mapLayout === null ? objects.skyPipelineLayout : objects.mapPipelineLayout, skyShaderObject, 'fs');
+    const irradiancePipeline = bake('ibl-irradiance', objects.convolvePipelineLayout, convolveShader, 'fsIrradiance');
+    const prefilterPipeline = bake('ibl-prefilter', objects.convolvePipelineLayout, convolveShader, 'fsPrefilter');
 
     const paramsBindGroup = mapLayout === null
       ? device.createBindGroup({

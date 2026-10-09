@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-09
+
+**Off means off, for every scene.** A sweep of every feature for work done with nothing to do,
+beyond the scenes the last release was measured on -- occlusion culling with nothing to cull, the
+sky under everything, OIT and depth of field with nothing to show, texture lookups a material does
+not have, an idle character that cost a scene its static fast paths -- then of hitches and of scene
+types not yet measured: merged meshes drawn direct, cut-out foliage, adds and removes, animated
+materials, splats under TAA. Each fix A/B'd, the same pixels but for a few at exact depth ties.
+Sponza GPU -24% against 1.6.0, measured in one page; a town of untextured buildings -12% to
+-24%; 10,000 objects and an idle character, CPU -40%. And nothing builds up: a soak of everything an
+app repeats, now part of the GPU suite, found and closed a dozen leaks.
+
+### Changed
+
+- **Off means off, for more than Sponza.** A sweep of every feature for work done when it has
+  nothing to do; each fix A/B'd on Sponza (with OIT, ambient occlusion or depth of field on) and a
+  town of 900 buildings, the same pixels throughout (one channel moved by one level, from grading).
+  - Occlusion culling's depth pyramid, second cull and second pass are skipped when every opaque
+    mesh is merged, as they are culled by view alone. Sponza: GPU -8%; the town: -13% to -24%.
+  - The sky is drawn after the opaque geometry, where nothing covers it, instead of under all of
+    it first.
+  - With [`oit`](docs/API.md#renderer-oit) on, a frame with nothing blended in view skips its two
+    full-screen targets, its pass and its resolve; with it off, the separate blend pass is skipped too.
+  - [Depth of field](docs/API.md#renderer-dof) whose largest blur is a pixel or less skips its three
+    passes: the composite took the sharp colour everywhere. Sponza at f/22 focused at 10 m: GPU -21%.
+  - The tonemap skips colour grading's white balance, contrast and saturation when they are neutral.
+  - A material with none of the metallic-roughness, normal and occlusion maps skips their lookups
+    and the normal map's basis, and one with no emissive map skips that lookup; what they would give
+    is known. A town of untextured buildings: main pass -17%, GPU -12%. Textured Sponza: unchanged.
+    An untextured surface's normal is now exactly its own: the 1x1 default decoded a hair off flat
+    (4 channels in the town's frame moved by up to 2 levels).
+  - A skinned or morphed mesh standing still costs what a static one does. A skin's bounds counted
+    as changed every frame, posed or not, so one idle character had every frame re-union every
+    box in the scene, rewrite every deforming object's draw data and rebuild the shadow casters'
+    boxes. Now only a box that changed counts. 10,000 boxes and one idle Fox: CPU -40% a frame;
+    the same pixels. Walking, as before.
+  - Light clustering runs neither of its passes in a scene with no point or spot lights and no
+    decals, once a frame has cleared the counts it leaves.
+  - The pass that picks the shadow casters' levels of detail is skipped on frames that draw no
+    shadow map.
+  - [TAA](docs/API.md#renderer-taa) turned off frees its two full-size history images (15 MB at
+    720p, 33 MB at 1080p); turned on again, it makes them anew.
+- **Merged meshes are drawn with direct draws.** A merged group's triangle count and place never
+  change between rebuilds -- a hidden part keeps its place as degenerate triangles -- so its draws
+  need not be indirect, and an indirect draw pays the browser's validation. Sponza: GPU -12% to
+  -17%. Their depth prepass also reads the position alone, not the whole vertex: another 3-5%.
+  The same pixels.
+- **Adding or removing an object no longer redraws every shadow map.** Only the maps its box
+  reaches are redrawn, as for anything that moves -- a new object's box no longer starts as the one
+  last in its slot, which reached maps it did not. Its rebuild also allocates less. A town of 900
+  buildings, one box added: that frame 16.9 -> 14.5 ms, against 6.0 steady; the same shadows as a
+  full redraw. The rest is the batches and merged lists rebuilt whole, for a later release.
+- **Cut-out foliage shades each pixel once.** An alpha-masked merged group draws a depth prepass
+  that discards what its mask cuts, then shades with an equal depth test and no discard, so early-Z
+  drops the leaves behind a leaf. 1,200 double-sided leaf quads, each its own mesh: main pass -6%.
+  Instanced foliage is unchanged.
+- **An animated colour, glow or roughness no longer redraws every shadow map.** Only a masked or
+  blended material's change can reshape a shadow; an opaque one casts depth alone.
+- **Splats under TAA sort only when the view moves.** The sort was decided by the projection with
+  TAA's jitter in it, which moves every frame, so a still camera re-sorted every cloud each frame.
+- **The pipelines that build texture mips are built at start,** in the background, not on the
+  first texture streamed in during play.
+
+### Fixed
+
+- **Nothing builds up, checked for good.** A soak of everything an app does over and over --
+  models loaded and unloaded, scenes made and dropped, spawning, every feature on and off, lights,
+  sprites, text, particles, decals, environments, render targets, probes, 2D levels, whole engines
+  made and destroyed -- counting every GPU buffer and texture to its destroy(), every pipeline and
+  shader made, and that everything let go of is collected. It is now a step of the GPU suite. What
+  it found:
+  - **Every environment loaded and every probe captured compiled its shaders anew,** and the
+    pipelines they keyed stayed in the cache for good: three for each; every render target, two.
+    They are compiled once a device now, and the same sky once.
+  - **A removed reflection probe kept its slot,** so removing and recapturing probes doubled the
+    cube array again and again (+12 MB in six rounds of the soak). Slots are reused, and a scene's
+    last probe removed frees the array.
+  - **A dropped 2D scene's GPU buffers waited for garbage collection** -- which GPU memory does not
+    prompt -- with the scene's ~650 KB of heap, and the first 2D scene was held for good. A 2D
+    scene's buffers are now freed 120 frames after it was last drawn.
+  - **A destroyed engine stayed alive through a canvas the page kept,** as a component that remounts
+    or an editor that reuses it does: the context still named the device, and a listener on the
+    device everything else. The canvas is unconfigured and the listeners removed.
+  - **A loaded model kept its whole file:** its JSON and every buffer, 9.4 MB of heap for Sponza;
+    0.4 MB now. `source` on a model is `null`.
+  - The decal texture array was kept after the last decal was removed, and the sprite pass held the
+    last texture and font it drew; a 3D scene's set of changed sprites kept every entity ever
+    changed. Each is let go of now.
+  - **A font's atlas grew for good:** a glyph once drawn was kept, and a script laid out a word at a
+    time adds one for every new word, so changing text doubled the atlas until it passed the device's
+    limit and threw. At 4096 by 4096 it starts again, empty, and text on screen draws its glyphs back
+    before it is packed; the kerning memo is bounded too.
+  - **Point and spot shadow layers were kept at the most ever on screen:** twelve shadowed point
+    lights left 128 layers, 128 MB at the default size, after they were gone. Under a quarter used
+    for 120 frames, the array shrinks to what is drawn.
+  - **A clip joined over and over** -- a hit reaction, a footstep -- added a track each time, kept
+    and sampled for good once finished. Joining a clip replaces a finished run of it; past 64 tracks
+    on a layer the console says so.
+  - A 2D view kept the padded copy of every tileset it had drawn, unloaded or not; the particle pass
+    and the job system held the last scene drawn. Each is let go of now.
+
 ## [1.6.0] - 2026-10-07
 
 **Fewer draws, less overdraw, shadows that scroll.** Every mesh's geometry now lives in one
@@ -2367,7 +2468,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/nolanbaxter/winding/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/nolanbaxter/winding/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/nolanbaxter/winding/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/nolanbaxter/winding/compare/v1.3.0...v1.4.0

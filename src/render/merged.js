@@ -56,7 +56,6 @@ import { FRUSTUM_PLANE_COUNT } from '../core/math/frustum.js';
 import { CULL_PHASES, BATCH_BYTES, TABLE_WORDS } from './gpudriven.js';
 import { CHUNK_TRIANGLES } from '../scene/bounds.js';
 
-const ARGS_WORDS = 5;
 /** A chunk's record: eight u32s, then its box in its mesh's space, min and max as vec4s. */
 const INFO_WORDS = 16;
 const WORKGROUP_SIZE = 64;
@@ -319,7 +318,6 @@ export class MergedDraws {
     const info = new Uint32Array(infoBytes);
     const infoF32 = new Float32Array(infoBytes);
     const table = new Uint32Array(itemTotal * TABLE_WORDS);
-    const args = new Uint32Array(this.groupCount * ARGS_WORDS);
     let j = 0, spans = 0, slotTotal = 0;
     this.groups.forEach((group, g) => {
       let place = group.indexBase;
@@ -327,7 +325,8 @@ export class MergedDraws {
         const p = gpu.batchPrimitive[b];
         const item = gpu.batchOrder[gpu.batchFirst[b]];
         const tag = (slot << group.shift) >>> 0;
-        table.set([item, p.baseVertex], slotTotal++ * TABLE_WORDS);
+        table[slotTotal * TABLE_WORDS] = item;
+        table[slotTotal++ * TABLE_WORDS + 1] = p.baseVertex;
         const chunks = p.chunks;
         const count = chunks?.count ?? 1;
         for (let k = 0; k < count; k++) {
@@ -335,7 +334,8 @@ export class MergedDraws {
           const indices = chunks ? Math.min(CHUNK_TRIANGLES * 3, p.indexCount - first) : p.indexCount;
           const span = Math.ceil(indices / SPAN);
           const o = j * INFO_WORDS;
-          info.set([item, g, indices, p.firstIndex + first, place + first, tag, spans, span], o);
+          info[o] = item; info[o + 1] = g; info[o + 2] = indices; info[o + 3] = p.firstIndex + first;
+          info[o + 4] = place + first; info[o + 5] = tag; info[o + 6] = spans; info[o + 7] = span;
           if (chunks) {
             infoF32.set(chunks.min.subarray(k * 3, k * 3 + 3), o + 8);
             infoF32.set(chunks.max.subarray(k * 3, k * 3 + 3), o + 12);
@@ -349,12 +349,10 @@ export class MergedDraws {
         place += p.indexCount;
       });
       group.indexCount = place - group.indexBase;
-      args.set([group.indexCount, 1, group.indexBase, 0, 0], g * ARGS_WORDS);
     });
     this.spanCount = spans;
     this.recordCount = records;
     queue.writeBuffer(this._buffer('info', info.byteLength, STORAGE), 0, info);
-    queue.writeBuffer(this._buffer('args', args.byteLength, GPUBufferUsage.INDIRECT), 0, args);
     // Past every cull phase's slice of the visible list: the groups' tables.
     queue.writeBuffer(gpu.visibleBuffer, gpu.capacity * CULL_PHASES * 4, table);
 
@@ -476,7 +474,10 @@ export class MergedDraws {
       pass.setPipeline(pipeline);
       bindMaterial(group.material);
       pass.setBindGroup(groupDraw, drawGroup, [g * this.alignment]);
-      pass.drawIndexedIndirect(this._buffers.args, g * ARGS_WORDS * 4);
+      // Direct: a group's count and place never change between rebuilds -- a
+      // hidden chunk keeps its place as degenerate triangles -- and a direct
+      // draw skips the validation an indirect one gets.
+      pass.drawIndexed(group.indexCount, 1, group.indexBase, 0, 0);
     }
   }
 

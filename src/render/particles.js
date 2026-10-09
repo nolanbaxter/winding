@@ -576,6 +576,9 @@ export class ParticleSystem {
     this.count = scene.emitters.size;
     if (this.count === 0) {
       if (this.rings.size > 0) this.rings.clear();
+      // And what named the last scene's emitters, which held it.
+      this._list.length = 0;
+      this._byEntity.clear();
       return 0;
     }
     const world = scene.transforms.world;
