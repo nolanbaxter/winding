@@ -52,7 +52,8 @@ npm run test:gpu:map
 
 - **A test that fails without it.** A bug fix starts from a script or a frame that shows the bug;
   the fix comes with a test that fails on the old code. Node tests live in `test/*.test.js`, GPU
-  steps in `test/gpu.test.js`.
+  steps in `test/gpu.test.js`. Models to test against go in `test/assets/`, each listed in its
+  README with where it came from and its licence; nothing there is published.
 - **The API reference.** `docs/API.md` is updated in the same change as anything a user can see:
   a new call, a changed option or default, a new error message, behaviour a fix changes. A new
   entry gets an `<a id>` anchor and a line in the index. `npm test` checks that every public method
