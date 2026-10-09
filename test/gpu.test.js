@@ -23,7 +23,7 @@ import {
   buildDemoGLB, buildRiggedGLB, buildMorphedGLB, buildFeatureGLB, buildLodGLB, twoToneImageURI,
 } from './fixtures/demoModel.js';
 import { pbrShader } from '../src/render/shaders/pbr.js';
-import { soak } from './fixtures/soak.js';
+import { soak, SCENARIOS } from './fixtures/soak.js';
 
 /** The forward shader with every extension texture bound, as a roomy device builds it. */
 const PBR_SHADER = pbrShader(EXTENSION_TEXTURES.length);
@@ -4072,12 +4072,14 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
   });
 
-  await step('nothing builds up: models, scenes, spawning, features, lights, effects, environments, targets, probes, 2D levels and whole engines, over and over', async () => {
-    const { rows, failed, collected } = await soak({ Winding, Camera, Camera2D, rounds: 4 });
-    if (failed > 0) throw new Error(rows.filter((r) => !r.startsWith('ok')).join('; '));
-    return `${rows.length} scenarios: no GPU object, pipeline or shader left behind`
-      + (collected ? ', and everything let go of was collected' : ' (no forced collection: run with --js-flags=--expose-gc to check that too)');
-  });
+  // Nothing builds up, a scenario at a time (fixtures/soak.js).
+  for (const [scenario, what] of Object.entries(SCENARIOS)) {
+    await step(`nothing builds up: ${what}, over and over`, async () => {
+      const { rows, failed, collected } = await soak({ Winding, Camera, Camera2D, rounds: 4, only: [scenario] });
+      if (failed > 0) throw new Error(rows.join('; '));
+      return `${rows[0]}${collected ? '; everything let go of was collected' : ' (no forced collection: run with --js-flags=--expose-gc to check that too)'}`;
+    });
+  }
 
   check('no WGSL compilation errors', shaderErrors.length === 0, shaderErrors.join('\n'));
   check('no uncaptured device errors', deviceErrors.length === 0, deviceErrors.join('\n'));
