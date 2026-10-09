@@ -1006,6 +1006,13 @@ export class Scene {
 
     this.localMin.set(primitive.bounds.min, i * 3);
     this.localMax.set(primitive.bounds.max, i * 3);
+    // Nowhere yet, rather than the box of whatever held this slot last: its
+    // first bounds update records the box as it was and as it is, for cached
+    // shadow maps, and a stale one there redrew maps the new object is far
+    // from. NaN reaches no view and no light; the update replaces it the
+    // same frame, as a new node has moved.
+    this.worldMin.fill(NaN, i * 3, i * 3 + 3);
+    this.worldMax.fill(NaN, i * 3, i * 3 + 3);
     return i;
   }
 

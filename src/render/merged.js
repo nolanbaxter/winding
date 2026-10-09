@@ -325,7 +325,8 @@ export class MergedDraws {
         const p = gpu.batchPrimitive[b];
         const item = gpu.batchOrder[gpu.batchFirst[b]];
         const tag = (slot << group.shift) >>> 0;
-        table.set([item, p.baseVertex], slotTotal++ * TABLE_WORDS);
+        table[slotTotal * TABLE_WORDS] = item;
+        table[slotTotal++ * TABLE_WORDS + 1] = p.baseVertex;
         const chunks = p.chunks;
         const count = chunks?.count ?? 1;
         for (let k = 0; k < count; k++) {
@@ -333,7 +334,8 @@ export class MergedDraws {
           const indices = chunks ? Math.min(CHUNK_TRIANGLES * 3, p.indexCount - first) : p.indexCount;
           const span = Math.ceil(indices / SPAN);
           const o = j * INFO_WORDS;
-          info.set([item, g, indices, p.firstIndex + first, place + first, tag, spans, span], o);
+          info[o] = item; info[o + 1] = g; info[o + 2] = indices; info[o + 3] = p.firstIndex + first;
+          info[o + 4] = place + first; info[o + 5] = tag; info[o + 6] = spans; info[o + 7] = span;
           if (chunks) {
             infoF32.set(chunks.min.subarray(k * 3, k * 3 + 3), o + 8);
             infoF32.set(chunks.max.subarray(k * 3, k * 3 + 3), o + 12);

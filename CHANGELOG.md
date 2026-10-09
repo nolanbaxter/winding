@@ -52,7 +52,10 @@ pixels. Sponza GPU -8%, -21% with depth of field set; a town of untextured build
   -17%. Their depth prepass also reads the position alone, not the whole vertex: another 3-5%.
   The same pixels.
 - **Adding or removing an object no longer redraws every shadow map.** Only the maps its box
-  reaches are redrawn, as for anything that moves. The same shadows as a full redraw.
+  reaches are redrawn, as for anything that moves -- a new object's box no longer starts as the one
+  last in its slot, which reached maps it did not. Its rebuild also allocates less. A town of 900
+  buildings, one box added: that frame 16.9 -> 14.5 ms, against 6.0 steady; the same shadows as a
+  full redraw. The rest is the batches and merged lists rebuilt whole, for a later release.
 
 ## [1.6.0] - 2026-10-07
 

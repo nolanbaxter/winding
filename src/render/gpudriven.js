@@ -687,7 +687,10 @@ export class GpuDriven {
       // Skinning is part of the batch for the same reason winding is: it is a
       // different pipeline, and it binds a second vertex buffer besides.
       const skinned = scene.renderableSkin[i] >= 0;
-      const key = `${primitiveId(primitive)}:${material}:${mirrored ? 1 : 0}:${skinned ? 1 : 0}`;
+      // A number, not a string: one string a renderable was garbage for every
+      // add or remove of anything. Exact while primitive ids stay under 2^39;
+      // the material field is 12 bits (MaterialRegistry's limit).
+      const key = ((primitiveId(primitive) * 4096 + material) * 2 + (mirrored ? 1 : 0)) * 2 + (skinned ? 1 : 0);
 
       let batch = batchOf.get(key);
       if (batch === undefined) {
