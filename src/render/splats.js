@@ -512,6 +512,13 @@ export class SplatPass {
     this.sorted = 0;
     /** The least a splat may add to the picture, opacity x pixels, and be drawn; see makeKeys. */
     this.cull = SPLAT_CULL;
+    /**
+     * The projection without TAA's jitter, when the frame is jittered: what
+     * the sort is decided by. The jitter moves a fraction of a pixel every
+     * frame, and a still camera under TAA re-sorted every cloud every frame.
+     */
+    this.unjittered = null;
+    this._sortedFor = new Float32Array(CLOUD_FLOATS);
     this._sort = (pass) => this._encodeSort(pass);
     this._draw = (pass) => this._encodeDraw(pass);
   }
@@ -580,10 +587,13 @@ export class SplatPass {
       // was sorted for is kept when the sort is recorded, not here: a frame
       // that throws before then must not leave it looking sorted.
       // A new cull threshold changes which splats are in it, as a move does.
-      const sort = !sameFloats(state.last, f, CLOUD_FLOATS) || state.cull !== this.cull;
+      const key = this._sortedFor;
+      key.set(f.subarray(0, CLOUD_FLOATS));
+      if (this.unjittered !== null) key.set(this.unjittered, 16);
+      const sort = !sameFloats(state.last, key, CLOUD_FLOATS) || state.cull !== this.cull;
       state.cull = this.cull;
       if (sort) {
-        state.next.set(f.subarray(0, CLOUD_FLOATS));
+        state.next.set(key);
         this.rhi.queue.writeBuffer(state.args, 0, this._args);
         this.sorted++;
       }

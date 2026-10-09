@@ -27,7 +27,7 @@ import { handleIndex } from '../core/handle.js';
 import { DIRECTIONAL_FLOATS } from '../scene/scene.js';
 
 import {
-  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND, ALPHA_OPAQUE,
+  MaterialRegistry, variantPipelineState, VARIANT_MIRRORED, VARIANT_SKINNED, VARIANT_TRANSMISSIVE, VARIANT_EXTENDED, ALPHA_BLEND, ALPHA_OPAQUE, ALPHA_MASK,
 } from './material.js';
 import { pbrShader, FRAME_BYTES } from './shaders/pbr.js';
 import { SHEEN_ALBEDO } from './sheen.js';
@@ -41,7 +41,7 @@ import { DepthOfField } from './dof.js';
 import { ProbeSet, FACE_CAMERAS, flipInto, PROBE_FLOATS } from './probes.js';
 import { Environment } from './ibl.js';
 import { Camera } from '../scene/camera.js';
-import { createTexture, cubeFaceView } from '../rhi/texture.js';
+import { createTexture, cubeFaceView, warmMipPipelines } from '../rhi/texture.js';
 import { OIT_RESOLVE_SHADER } from './shaders/oit.js';
 import { SkyboxPass } from './skybox.js';
 import { ShadowMaps, stableShadowDistance } from './shadows.js';
@@ -490,12 +490,19 @@ export class Renderer {
   }
 
   async _init() {
+    // What every texture's mips, transmission's copy and the decal array draw
+    // with, built now rather than by the first use mid-frame.
+    const mips = warmMipPipelines(this.rhi, [
+      ...['rgba8unorm', 'rgba8unorm-srgb'].flatMap((format) => ['fsBox', 'fsHalve', 'fsBleed'].map((entry) => [format, entry])),
+      [HDR_FORMAT, 'fs'], ['rgba8unorm-srgb', 'fs'],
+    ]);
     this.gpu = await GpuDriven.create(this.rhi, this.maxDraws, this.materials);
     /** One draw per material for the one-object batches: see merged.js. */
     this.merged = await MergedDraws.create(this.rhi, this.geometry);
     this.gpu.merged = this.merged;
     this._makeDrawBindGroup();
     this.clusters = await ClusteredLights.create(this.rhi);
+    await mips;
     // Two modules: the plain one declares no extension textures, so its
     // pipelines take the core material layout.
     [this.shader, this.extendedShader] = await Promise.all([
@@ -676,6 +683,17 @@ export class Renderer {
           targets: descriptor.targets.map((t) => ({ format: t.format, writeMask: 0 })),
         };
         merged.depth = { ...descriptor.depth, depthCompare: 'greater-equal', depthWriteEnabled: false };
+      } else if ((variant & 3) === ALPHA_MASK) {
+        // A masked one's prepass discards what the mask cuts, so its shading
+        // draw matches it without discarding: early-Z works again, and a leaf
+        // behind a leaf shades nothing. 'equal', not 'greater-equal': a cut
+        // texel lies nearer than the depth behind it, and would pass that.
+        merged.prepass = {
+          ...merged, label: `${descriptor.label}:merged-mask-depth`, fragmentEntry: 'fsDepthMask',
+          targets: descriptor.targets.map((t) => ({ format: t.format, writeMask: 0 })),
+        };
+        merged.depth = { ...descriptor.depth, depthCompare: 'equal', depthWriteEnabled: false };
+        merged.constants = { ...descriptor.constants, USE_ALPHA_MASK: 0 };
       }
       this._merged.set(descriptor, merged);
     }
@@ -1220,10 +1238,15 @@ export class Renderer {
     this._sky().update(camera, 1.0, this.fog === null ? null : this._fogData);
     // Materials a clip changed since the last frame. Uploaded here rather than
     // by the player, because the scene does not own the GPU.
-    // A changed factor can change an alpha-shaped shadow, which no box says.
-    const materialsChanged = scene.changedMaterials.size > 0;
-    if (materialsChanged) {
-      for (const [id, record] of scene.changedMaterials) this.materials.update(id, record);
+    // A changed factor can change an alpha-shaped shadow, which no box says --
+    // but only a masked or blended material's: an opaque one casts depth
+    // alone, so its colour, glow or roughness animating redraws no shadow.
+    let shapedChanged = false;
+    if (scene.changedMaterials.size > 0) {
+      for (const [id, record] of scene.changedMaterials) {
+        this.materials.update(id, record);
+        shapedChanged ||= this.materials.alphaModes[id] !== ALPHA_OPAQUE;
+      }
       scene.changedMaterials.clear();
     }
     p?.mark('lights');
@@ -1231,12 +1254,12 @@ export class Renderer {
     // then point and spot views. Each writes its slot into the light's record,
     // so both run before the records are uploaded. Growing either array
     // replaces what the frame group names.
-    // Every shadow map is drawn again for a new scene, a changed material, or
+    // Every shadow map is drawn again for a new scene, a changed alpha-shaped material, or
     // LOD -- whose casters are the levels the CAMERA shows, so they change as
     // it moves. And for a probe capture, which draws from other eyes into the
     // same layers, and then once more after it. Something added or removed
     // redraws only the maps its box reaches (scene.removedBoxes, and movers).
-    changes.all = target !== null || materialsChanged || this.gpu.hasLod
+    changes.all = target !== null || shapedChanged || this.gpu.hasLod
       || this._shadowCacheScene !== scene || this._shadowCacheRevision === -1;
     this.shadows.boundBatches(scene, this.gpu, items, anyMoved, deformed);
     this.shadows.update(camera, scene, changes,
@@ -1463,6 +1486,7 @@ export class Renderer {
     const cull = this.splatCull;
     if (!(cull >= 0 && Number.isFinite(cull))) throw new Error(`splatCull must be 0 or more, got ${cull}`);
     this.splats.cull = cull;
+    this.splats.unjittered = jittered ? this._taaSaved.projection : null;
     const clouds = this.splats.prepare(scene, camera, environment, width, height);
     this.stats.splats = this.splats.count;
     this._blendInLate = !this._frameOIT && ambient === null && !transmissive && sprites === 0 && emitters === 0 && clouds === 0;

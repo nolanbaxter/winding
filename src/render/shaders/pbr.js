@@ -1614,6 +1614,20 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
 @fragment
 fn fsDepth() {}
 
+/**
+ * The same for an alpha-masked group: its cut-out texels discarded, by the
+ * very test shadeSurface makes, so depth holds only what the mask keeps. The
+ * shading draw after it then matches that depth exactly and needs no discard
+ * of its own -- which is what lets early-Z drop the leaves behind a leaf.
+ */
+@fragment
+fn fsDepthMask(v : VertexOut) {
+  let uvBaseColor = transformUV(0u, select(v.uv, v.uv1, (u32(material.uvSets) & 1u) != 0u));
+  let sampled = textureSampleBias(baseColorMap, surfSampler, uvBaseColor, frame.probeInfo.z)
+    * material.baseColor * v.color;
+  if (sampled.a < material.alphaCutoff) { discard; }
+}
+
 @fragment
 fn fs(v : VertexOut, @builtin(front_facing) frontFacing : bool) -> @location(0) vec4<f32> {
   return shade(v, frontFacing);

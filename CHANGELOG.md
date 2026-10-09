@@ -56,6 +56,16 @@ pixels. Sponza GPU -8%, -21% with depth of field set; a town of untextured build
   last in its slot, which reached maps it did not. Its rebuild also allocates less. A town of 900
   buildings, one box added: that frame 16.9 -> 14.5 ms, against 6.0 steady; the same shadows as a
   full redraw. The rest is the batches and merged lists rebuilt whole, for a later release.
+- **Cut-out foliage shades each pixel once.** An alpha-masked merged group draws a depth prepass
+  that discards what its mask cuts, then shades with an equal depth test and no discard, so early-Z
+  drops the leaves behind a leaf. 1,200 double-sided leaf quads, each its own mesh: main pass -6%.
+  Instanced foliage is unchanged.
+- **An animated colour, glow or roughness no longer redraws every shadow map.** Only a masked or
+  blended material's change can reshape a shadow; an opaque one casts depth alone.
+- **Splats under TAA sort only when the view moves.** The sort was decided by the projection with
+  TAA's jitter in it, which moves every frame, so a still camera re-sorted every cloud each frame.
+- **The pipelines that build texture mips are built at start,** in the background, not on the
+  first texture streamed in during play.
 
 ## [1.6.0] - 2026-10-07
 

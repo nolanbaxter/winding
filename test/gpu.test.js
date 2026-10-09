@@ -1802,6 +1802,14 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         cam.position.set([0, 0, 5]);
         if (!(b1 > 150 && r1 < 30)) throw new Error(`from behind, the centre is ${r1},_,${b1}, not blue: the order did not follow the camera`);
         if (sorted !== 0 || b2 !== b1 || r2 !== r1) throw new Error(`a frame where nothing moved sorted ${sorted} clouds, and drew ${r2},_,${b2} after ${r1},_,${b1}`);
+        // And with TAA on, whose jitter moves the projection every frame: still no sort.
+        probe.renderer.taa = true;
+        for (let i = 0; i < 200 && probe.renderer.taaPass === null; i++) { probe.renderFrame(scene, cam); await new Promise((r) => setTimeout(r, 10)); }
+        await centre(scene);
+        await centre(scene);
+        const jitteredSorts = probe.renderer.splats.sorted;
+        probe.renderer.taa = false;
+        if (jitteredSorts !== 0) throw new Error(`with TAA on, a frame where nothing moved sorted ${jitteredSorts} clouds`);
         // And behind a quad at z = 2, which hides them both.
         scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [1, 1, 1, 1], emissiveFactor: [1, 1, 1] })))
           .setPosition(0, 0, 2).setScale(0.5, 0.5, 1);
