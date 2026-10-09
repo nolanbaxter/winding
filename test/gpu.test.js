@@ -41,24 +41,70 @@ const ALL_VARIANTS = [0, 1, 2, 4, 5, 6];
 
 const results = [];
 
-function check(name, ok, detail = '') {
-  results.push({ name, ok, detail });
+function check(name, ok, detail = '', extra = {}) {
+  results.push({ name, ok, detail, ...extra });
   console[ok ? 'log' : 'error'](`${ok ? 'ok  ' : 'FAIL'}  ${name}${detail ? `\n      ${detail}` : ''}`);
 }
 
+// Which checks this run makes. All of them, opened by hand. On CI, only those
+// a change reaches (?steps=id,id; .github/affected.js picks them from
+// test/gpu-map.json), split across runners (?shard=i/n). The first BASE_STEPS
+// make the engine and scene the rest draw with, so every run makes them; and a
+// check the map does not know yet -- new since it was made -- always runs, in
+// shard 0, so nothing new is ever left out.
+const query = new URLSearchParams(globalThis.location?.search ?? '');
+const ONLY = query.has('steps') ? new Set(query.get('steps').split(',').filter(Boolean)) : null;
+const SHARD = query.has('shard') ? query.get('shard').split('/').map(Number) : [0, 1];
+const BASE_STEPS = 5;
+let stepCount = 0;
+let roundRobin = 0;
+let mapped = null;
+
+/** A check's id: its name, hashed (FNV-1a), short enough that a list of them fits in a URL. */
+export function stepId(name) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < name.length; i++) { h ^= name.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36);
+}
+
+/** Whether this run makes the check `id`. */
+function selected(id) {
+  if (stepCount++ < BASE_STEPS) return true;
+  if (ONLY === null) return roundRobin++ % SHARD[1] === SHARD[0];
+  return ONLY.has(id) || (mapped !== null && !(id in mapped) && SHARD[0] === 0);
+}
+
+// Recording the map (GPU_MAP=1 node test/gpu.ci.js): the runner is told where
+// each check starts and ends, and takes the code coverage in between.
+const mark = typeof globalThis.__coverageMark === 'function'
+  ? (phase, id, name) => new Promise((resolve) => {
+    globalThis.__markDone = resolve;
+    globalThis.__coverageMark(JSON.stringify({ phase, id, name }));
+  })
+  : null;
+
 /** Runs fn, and turns a throw into a failed check rather than a dead page. */
 async function step(name, fn) {
+  const id = stepId(name);
+  if (!selected(id)) return true;
+  await mark?.('start', id, name);
+  const started = performance.now();
   try {
     const detail = await fn();
-    check(name, true, typeof detail === 'string' ? detail : '');
+    check(name, true, typeof detail === 'string' ? detail : '', { id, ms: Math.round(performance.now() - started) });
     return true;
   } catch (error) {
-    check(name, false, error.message);
+    check(name, false, error.message, { id, ms: Math.round(performance.now() - started) });
     return false;
+  } finally {
+    await mark?.('end', id, name);
   }
 }
 
 export async function run(canvas, onDone) {
+  if (ONLY !== null) {
+    try { mapped = (await (await fetch(new URL('./gpu-map.json', import.meta.url))).json()).steps; } catch { mapped = {}; }
+  }
   if (!navigator.gpu) {
     check('WebGPU is available', false, 'navigator.gpu is undefined -- this browser cannot run the test');
     return finish(onDone);

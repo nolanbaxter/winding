@@ -17,7 +17,7 @@ npm test
 ```
 
 The Node suites: about 750 checks, no browser, no install (there is nothing to install). CI runs
-them on Node 20, 22 and 24 for every push and pull request.
+them on Node 20, 22 and 24 -- the ones your change reaches (see below).
 
 ```bash
 npm run test:gpu
@@ -30,6 +30,23 @@ reaches the screen. CI runs it as well, in headless Chrome on a software GPU
 fails the pull request. A software GPU is not your GPU, though: run the page on real hardware
 before any pull request that touches `src/render` or `src/rhi`, and say in the pull request that
 it passed.
+
+### What CI runs
+
+Only what a change reaches. `.github/affected.js` reads the change and picks the Node suites whose
+imports reach a changed file, the type check if declarations changed, and the GPU checks that run a
+changed function -- from `test/gpu-map.json`, which records, for every function in `src/` the GPU
+suite runs, which checks run it. Those are split across up to four runners. A change to what every
+check sets up, to the GPU suite itself, or to CI runs all of it; docs, the changelog and benchmarks
+run nothing of it. `node .github/affected.js <base> <head>` shows the plan for any range.
+
+The map stays usable as the code moves -- line numbers are carried from its commit through git --
+and a check it does not know always runs. Remake it after adding or reshaping GPU checks, or once a
+release, on a machine with a GPU and `src/` committed:
+
+```bash
+npm run test:gpu:map
+```
 
 ## What a change includes
 
