@@ -164,6 +164,19 @@ completion and hover help.
 </script>
 ```
 
+**Check first, where WebGPU may be missing.** Winding draws with WebGPU alone -- no WebGL fallback,
+since the culling, clustering and merged draws that make it fast need compute shaders WebGL does not
+have. Chrome, Edge and Safari have it, and Firefox on Windows; for the rest, ask before you start and
+show something else:
+
+```js
+if (await Winding.supported()) {
+  const engine = await Winding.create(canvas);
+} else {
+  canvas.replaceWith(Object.assign(new Image(), { src: 'still.jpg', alt: 'The scene' }));
+}
+```
+
 **Pin the version.** `@latest` re-resolves on every page load, so a release you have never seen can
 change what your page runs. A pinned URL is immutable on both jsDelivr and unpkg.
 

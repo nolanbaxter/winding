@@ -116,6 +116,7 @@ export async function run(canvas, onDone) {
   let engine;
 
   const created = await step('device and shaders come up', async () => {
+    if (!(await Winding.supported())) throw new Error('Winding.supported() said no on a page that has WebGPU');
     engine = await Winding.create(canvas, {
       // Deliberately far too small. Every container that sizes itself off this
       // has to grow during the run, which means the whole suite below doubles

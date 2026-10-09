@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **[`Winding.supported()`](docs/API.md#winding-supported)**: whether `Winding.create` can work in
+  this browser -- WebGPU, and a GPU it will hand out -- as `true` or `false`, never a throw. Ask
+  before creating an engine and show a still, a video or a message where the answer is no; the
+  README's install section shows how.
+
 ## [1.6.1] - 2026-10-09
 
 **Off means off, for every scene.** A sweep of every feature for work done with nothing to do,
