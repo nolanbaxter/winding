@@ -268,7 +268,7 @@ export function packSprites(scene, camera, out = null) {
     const glyph = box !== null;
     const texture = glyph ? source.font.texture : source.texture;
     const blend = source.blend;
-    const rect = glyph ? source.font.metrics.glyphs.get(box.char).rect : spriteRect(source);
+    const rect = glyph ? source.font.rectOf(box.char) : spriteRect(source);
     const color = source.color;
     out[o] = world[m + 12];
     out[o + 1] = world[m + 13];
@@ -400,6 +400,9 @@ export class SpritePass {
       this._runs = [];
       return 0;
     }
+    // Text laid out before a font's atlas started again gets its glyphs back
+    // now, before anything is packed against the atlas.
+    for (const record of scene.texts.values()) record.font.ensureBoxes(record);
     const last = this._packed;
     if (!moved && last !== null && last !== undefined && last.scene === scene && last.revision === scene.revision
       && last.changes === scene.changes && last.width === width && last.height === height

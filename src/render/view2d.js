@@ -494,7 +494,7 @@ export function write2D(out, o, world, entity, source, box, firstPoint = 0, piec
     height = box.height * source.size;
     pivotX = -box.x / box.width;
     pivotY = (box.y + box.height) / box.height;
-    rect = source.font.metrics.glyphs.get(box.char).rect;
+    rect = source.font.rectOf(box.char);
   } else {
     rect = spriteRect(source);
     // A unit is a pixel, so a sprite given no size is its frame's own.
@@ -707,6 +707,8 @@ export class View2D {
    */
   prepare(scene, camera, width, height, moved) {
     const world = scene.transforms.world;
+    // Glyphs back in an atlas that started again, before it is built against.
+    for (const record of scene.texts.values()) record.font.ensureBoxes(record);
     // A font's atlas grows when any scene needs new glyphs, which moves every
     // glyph's rect and replaces its texture: this view's too.
     // Holes from removals are compacted away once they are a quarter of it.
@@ -891,6 +893,15 @@ export class View2D {
         if (!live.has(map)) {
           gpu.texture.destroy();
           this._tilemaps.delete(map);
+        }
+      }
+      // And the padded copies of tilesets no map here uses any more: kept,
+      // each tileset an editor reloaded left one behind, unloaded or not.
+      const tilesets = new Set([...live].map((map) => map.tileset));
+      for (const [tileset, byLayout] of this._padded ?? []) {
+        if (!tilesets.has(tileset)) {
+          for (const padded of byLayout.values()) padded.texture.destroy();
+          this._padded.delete(tileset);
         }
       }
     }

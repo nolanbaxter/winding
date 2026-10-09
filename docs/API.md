@@ -256,7 +256,7 @@ const font = await engine.loadFont('64px Inter');
 scene.addText({ font, text: 'Gate 3', size: 0.4 });
 ```
 
-Notes: pick a size near the one the text is mostly seen at. It stays sharp above it and down to about an eighth of it. Free with [`engine.unload`](#engine-unload).
+Notes: pick a size near the one the text is mostly seen at. It stays sharp above it and down to about an eighth of it. Glyphs are drawn into an atlas as text first needs them; at 4096 by 4096 it starts again, empty, and text on screen draws its glyphs back. Free with [`engine.unload`](#engine-unload).
 
 <a id="engine-loadlut"></a>
 ### `engine.loadLUT(source, options)` → `Promise<LUT>`
@@ -1313,7 +1313,7 @@ Starts a clip, by name or by index into [`node.animations`](#node-animations). W
 | `fade` | `0` | Seconds to cross-fade from what the layer is playing. On the base layer with nothing playing, the clip starts at full weight. On another layer it fades the layer in. |
 | `layer` | `'base'` | Which layer to play on. Make other layers first with `node.animation.layer(name)`. |
 | `weight` | `1` | The clip's weight within its layer, when fully in. |
-| `join` | `false` | Join the clips already playing on the layer instead of replacing them. Move weights with `node.animation.setWeight`. |
+| `join` | `false` | Join the clips already playing on the layer instead of replacing them. Move weights with `node.animation.setWeight`. A finished run of the same clip, holding its last frame, is replaced by the new one. |
 | `sync` | `false` | Share one clock with the layer's other synced clips, measured in cycles, so clips of different lengths stay in step. A synced clip loops, and one joining a group starts at the group's place, ignoring `time`. |
 
 Returns: the node. Does nothing if there is no such clip, or the node has no player.

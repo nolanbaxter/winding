@@ -286,7 +286,7 @@ function checked(caller, make) {
 }
 
 /** The engine's own bookkeeping in a record, which no option names. */
-const BOOKKEEPING = new Set(['added', 'owed', 'seed', 'dirty', 'options', 'boxes', 'block', 'kind', 'sizeGiven', 'placed', 'strokeEdge']);
+const BOOKKEEPING = new Set(['added', 'owed', 'seed', 'dirty', 'options', 'boxes', 'block', 'kind', 'sizeGiven', 'placed', 'strokeEdge', 'fontGeneration']);
 
 /**
  * A kind's options for a node, or null if it has none: a copy all the way

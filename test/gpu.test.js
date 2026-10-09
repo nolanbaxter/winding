@@ -2375,6 +2375,90 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return report;
   });
 
+  await step('a burst of shadowed lights gives its shadow layers back once it has passed', async () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false });
+    try {
+      probe.gpu.resize(160, 120);
+      probe.gpu.device.pushErrorScope('validation');
+      const scene = probe.createScene();
+      scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] }))).setScale(4, 4, 1);
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, 8]);
+      cam.target.set([0, 0, 0]);
+      const lights = [];
+      for (let i = 0; i < 12; i++) lights.push(scene.addLight({ type: 'point', position: [i - 6, 0, 2], intensity: 4, range: 4, castShadow: true }));
+      probe.renderFrame(scene, cam);
+      const burst = probe.renderer.shadows.localCapacity;
+      for (const l of lights) scene.remove(l);
+      for (let i = 0; i < 130; i++) probe.renderFrame(scene, cam);
+      const quiet = probe.renderer.shadows.localCapacity;
+      // And a light back afterwards draws its shadow into the smaller array.
+      scene.addLight({ type: 'point', position: [0, 0, 2], intensity: 4, range: 4, castShadow: true });
+      probe.renderFrame(scene, cam);
+      await probe.gpu.device.queue.onSubmittedWorkDone();
+      const error = await probe.gpu.device.popErrorScope();
+      const report = `${burst} layers for twelve point lights, ${quiet} after 130 quiet frames, ${probe.renderer.shadows.localCapacity} with one light back`;
+      if (error) throw new Error(`${report}; ${error.message}`);
+      if (!(burst >= 72 && quiet <= 8)) throw new Error(report);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('a font atlas at its cap starts again, and text drawn before keeps its glyphs', async () => {
+    // A script laid out a word at a time added a glyph for every new word,
+    // and the atlas doubled until it threw. At the cap it starts again empty,
+    // and text already on screen gets its glyphs back before it is drawn.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const SKY = [0, 0, 0];
+    const probe = await Winding.create(canvas, {
+      environment: { sky: { ground: SKY, horizon: SKY, zenith: SKY, sunIntensity: 0, glow: 0 } },
+      post: { strength: 0 },
+      antialias: false,
+    });
+    try {
+      probe.gpu.resize(160, 120);
+      probe.gpu.device.pushErrorScope('validation');
+      const font = await probe.loadFont('128px sans-serif');
+      font.atlasCap = 512;
+      const scene = probe.createScene();
+      scene.addText({ font, text: 'I', size: 1, color: [1, 0, 0, 1] });
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 0, 3]);
+      cam.target.set([0, 0, 0]);
+      const lit = async () => {
+        probe.renderFrame(scene, cam);
+        const pixels = await probe.gpu.readPixels();
+        let n = 0;
+        for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 200) n++;
+        return n;
+      };
+      const before = await lit();
+      // Far more than 512 x 512 holds at 128 px, as words would come.
+      for (let k = 0; k < 6; k++) font.ensure('ABCDEFGHJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.slice(k * 10, k * 10 + 10));
+      const restarted = font.generation;
+      const after = await lit();
+      const error = await probe.gpu.device.popErrorScope();
+      const report = `the I: ${before} px, then ${after} px after the atlas started again ${restarted} times, staying ${font.texture.width} wide`;
+      if (error) throw new Error(`${report}; ${error.message}`);
+      if (!(before > 100 && after === before && restarted > 0 && font.texture.width === 512)) throw new Error(report);
+      probe.unload(font);
+      return report;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a decal paints the base colour in its box, is lit as the surface is, only from the side it faces, and the last added on top', async () => {
     const canvas = document.createElement('canvas');
     canvas.style.width = '320px';

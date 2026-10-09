@@ -489,6 +489,9 @@ export function openSurface(positions, indices) {
   return false;
 }
 
+/** Frames a local shadow array may stay under a quarter used before it shrinks. */
+const LOCAL_SHRINK_FRAMES = 120;
+
 export class ShadowMaps {
   static async create(rhi, pipelines, drawLayout, options = {}, materialLayout = null) {
     const maps = new ShadowMaps(rhi, options);
@@ -909,7 +912,7 @@ export class ShadowMaps {
     });
     // As with the cascades: views written before the growth come across.
     const staging = new ArrayBuffer(this.alignment * capacity);
-    if (this.localStaging) new Uint8Array(staging).set(new Uint8Array(this.localStaging));
+    if (this.localStaging) new Uint8Array(staging).set(new Uint8Array(this.localStaging).subarray(0, staging.byteLength));
     this.localStaging = staging;
     this._localStagingF32 = new Float32Array(this.localStaging);
     this.localBuffer = createBuffer(rhi, {
@@ -918,7 +921,7 @@ export class ShadowMaps {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     const data = new Float32Array(capacity * LOCAL_VIEW_FLOATS);
-    if (this.localData) data.set(this.localData);
+    if (this.localData) data.set(this.localData.subarray(0, data.length));
     this.localData = data;
     for (let v = this._localExecutors.length; v < capacity; v++) {
       this._localExecutors.push((pass) => this._encodeView(pass, this.localBindGroup, v * this.alignment));
@@ -950,6 +953,15 @@ export class ShadowMaps {
    * `changes`, everything is drawn.
    */
   updateLocal(scene, camera, changes = null) {
+    // Grown for the most views ever on screen at once, and kept at that for
+    // good: a burst of sixteen shadowed lights left 96 MB behind at the
+    // default size. A spell using under a quarter of it gives the rest back,
+    // before this frame hands out any layer; the maps it held are redrawn.
+    if (this._localQuiet > LOCAL_SHRINK_FRAMES) {
+      this._localQuiet = 0;
+      this.localCapacity = 0;
+      this._growLocal(Math.max(1, this.localCount));
+    }
     frustumFromViewProjection(this._frustum, camera.viewProjection);
     const lights = scene.lights;
     const casters = scene.shadowCasters;
@@ -988,6 +1000,7 @@ export class ShadowMaps {
       count += views;
     }
     this.localCount = count;
+    this._localQuiet = this.localCapacity > 8 && count * 4 < this.localCapacity ? (this._localQuiet ?? 0) + 1 : 0;
     // A record not checked this frame missed this frame's changes, so it can
     // never be trusted again: a light off screen for a while, or moved to
     // other layers, draws afresh when it comes back.

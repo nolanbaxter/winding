@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.6.1] - 2026-10-08
+## [1.6.1] - 2026-10-09
 
 **Off means off, for every scene.** A sweep of every feature for work done with nothing to do,
 beyond the scenes the last release was measured on -- occlusion culling with nothing to cull, the
@@ -17,7 +17,7 @@ types not yet measured: merged meshes drawn direct, cut-out foliage, adds and re
 materials, splats under TAA. Each fix A/B'd, the same pixels but for a few at exact depth ties.
 Sponza GPU -24% against 1.6.0, measured in one page; a town of untextured buildings -12% to
 -24%; 10,000 objects and an idle character, CPU -40%. And nothing builds up: a soak of everything an
-app repeats, now part of the GPU suite, found and closed six leaks.
+app repeats, now part of the GPU suite, found and closed a dozen leaks.
 
 ### Changed
 
@@ -95,6 +95,18 @@ app repeats, now part of the GPU suite, found and closed six leaks.
   - The decal texture array was kept after the last decal was removed, and the sprite pass held the
     last texture and font it drew; a 3D scene's set of changed sprites kept every entity ever
     changed. Each is let go of now.
+  - **A font's atlas grew for good:** a glyph once drawn was kept, and a script laid out a word at a
+    time adds one for every new word, so changing text doubled the atlas until it passed the device's
+    limit and threw. At 4096 by 4096 it starts again, empty, and text on screen draws its glyphs back
+    before it is packed; the kerning memo is bounded too.
+  - **Point and spot shadow layers were kept at the most ever on screen:** twelve shadowed point
+    lights left 128 layers, 128 MB at the default size, after they were gone. Under a quarter used
+    for 120 frames, the array shrinks to what is drawn.
+  - **A clip joined over and over** -- a hit reaction, a footstep -- added a track each time, kept
+    and sampled for good once finished. Joining a clip replaces a finished run of it; past 64 tracks
+    on a layer the console says so.
+  - A 2D view kept the padded copy of every tileset it had drawn, unloaded or not; the particle pass
+    and the job system held the last scene drawn. Each is let go of now.
 
 ## [1.6.0] - 2026-10-07
 

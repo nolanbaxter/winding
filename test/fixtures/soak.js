@@ -121,7 +121,7 @@ export async function soak({ Winding, Camera, Camera2D, rounds = 4, only = null,
       const scene = watch('dropped scene', engine.createScene());
       for (let i = 0; i < 20; i++) scene.add(box).setPosition(i - 10, 0, -3);
       scene.addLight({ type: 'directional', direction: [-0.3, -1, -0.4], intensity: 3 });
-      scene.addLight({ type: 'point', position: [0, 2, 0], intensity: 5, range: 6, castShadows: true });
+      scene.addLight({ type: 'point', position: [0, 2, 0], intensity: 5, range: 6, castShadow: true });
       await frames(scene);
     },
     // Spawning and despawning.
@@ -145,11 +145,18 @@ export async function soak({ Winding, Camera, Camera2D, rounds = 4, only = null,
     async resizing() {
       for (const [w, h] of [[400, 225], [512, 288], [320, 180]]) { engine.gpu.resize(w, h); await frames(base, camera, 2); }
     },
+    // A burst of shadowed lights, then a long quiet: their shadow layers go back.
+    async lightBurst() {
+      const lights = [];
+      for (let i = 0; i < 12; i++) lights.push(base.addLight({ type: 'point', position: [i - 6, 2, 0], intensity: 4, range: 4, castShadow: true }));
+      await frames(base);
+      for (const l of lights) base.remove(l);
+    },
     // Lights coming and going, shadows and all.
     async lights() {
       const lights = [];
       for (let i = 0; i < 6; i++) {
-        lights.push(base.addLight({ type: i % 2 ? 'spot' : 'point', position: [i - 3, 2, 1], intensity: 4, range: 5, castShadows: true }));
+        lights.push(base.addLight({ type: i % 2 ? 'spot' : 'point', position: [i - 3, 2, 1], intensity: 4, range: 5, castShadow: true }));
       }
       await frames(base);
       for (const l of lights) base.remove(l);
