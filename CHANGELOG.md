@@ -15,8 +15,8 @@ sky under everything, OIT and depth of field with nothing to show, texture looku
 not have, an idle character that cost a scene its static fast paths -- then of hitches and of scene
 types not yet measured: merged meshes drawn direct, cut-out foliage, adds and removes, animated
 materials, splats under TAA. Each fix A/B'd, the same pixels but for a few at exact depth ties.
-Sponza GPU -24% against 1.6.0, measured in one page; a town of untextured buildings -12% to -24%; 10,000 objects and an
-idle character, CPU -40%.
+Sponza GPU -24% against 1.6.0, measured in one page; a town of untextured buildings -12% to
+-24%; 10,000 objects and an idle character, CPU -40%.
 
 ### Changed
 
