@@ -1,3 +1,5 @@
+<img src="docs/images/mascot.png" align="right" width="190" alt="Winding's mascot: a geometric robot, waving">
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/wordmark-dark.svg">
   <img src="docs/wordmark-light.svg" alt="Winding" width="380">
