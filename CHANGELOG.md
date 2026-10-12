@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **[Hello world, side by side](docs/SIDE-BY-SIDE.md)**: the same small program in Winding,
+  Three.js, Babylon.js and PlayCanvas, each run to check it works, with the engine versions it was
+  written against.
+
 ## [1.7.0] - 2026-10-09
 
 **Ask first.** `Winding.supported()` says whether an engine can be made here, so a page can show

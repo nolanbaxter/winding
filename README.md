@@ -127,6 +127,10 @@ seven seconds, and holds still for anyone who asked for less motion; every numbe
 description. To rerun it, open <code>bench/compare.html</code> as a file in Chrome or Edge: it runs
 every scene twice and shows the results.</sub>
 
+**The code, side by side.** [Hello world, side by side](docs/SIDE-BY-SIDE.md) has the same small
+program written in all four engines: a model, a sun with shadows and an orbit camera. It also lists
+what each engine does for you and what you have to write.
+
 ## Install
 
 There is no build step and there are no dependencies, so a URL is the whole install. The files you
