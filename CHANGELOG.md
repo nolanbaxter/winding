@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Three.js, Babylon.js and PlayCanvas, each run to check it works, with the engine versions it was
   written against.
 
+### Changed
+
+- **The logo** is redrawn: each of the four sails is folded, one half a shade darker, and the hub
+  is a pin with a rim and a glint of light. The same sails in the same colours, so it reads as the
+  same mark. The wordmarks, the favicon and the social card follow it.
+
 ## [1.7.0] - 2026-10-09
 
 **Ask first.** `Winding.supported()` says whether an engine can be made here, so a page can show
