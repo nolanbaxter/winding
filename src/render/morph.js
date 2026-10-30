@@ -123,6 +123,18 @@ export class MorphStore {
     return base;
   }
 
+  /** Write one primitive's deltas where allocate() put them before, after a lost device. */
+  writeAt(base, deltas) {
+    this.rhi.queue.writeBuffer(this.deltaBuffer, base * MORPH_FLOAT_BYTES, deltas);
+  }
+
+  /** New buffers on a new device, at the capacities these had; the allocator is kept. writeAt refills the deltas. */
+  restore() {
+    this.deltaBuffer = this._createDeltaBuffer(this.deltaCapacity);
+    this.weightBuffer = this._createWeightBuffer(this.weightCapacity);
+    this.revision++;
+  }
+
   /**
    * Give back `length` floats at `base`, from an unloaded asset.
    *

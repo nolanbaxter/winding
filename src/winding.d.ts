@@ -123,7 +123,10 @@ export interface DeviceLost {
   reason: string;
   message: string;
   recoverable: boolean;
-  action: 'reload';
+  /** 'recover' while the engine rebuilds itself on a new device; 'reload' when it cannot. */
+  action: 'recover' | 'reload';
+  /** With 'recover': settles once the engine is drawing again, or rejects if no GPU came back. */
+  recovered?: Promise<void>;
 }
 
 /** Auto exposure's settings. Ranges in stops, speeds in stops a second. */
@@ -227,6 +230,8 @@ export interface Device {
   readonly height: number;
   readonly pixelRatio: number;
   readPixels(region?: { x?: number; y?: number; width?: number; height?: number }): Promise<Uint8Array>;
+  /** Lose the device on purpose, as a driver reset would, to test recovery. */
+  loseForTest(): void;
 }
 
 export interface ShadowMaps {

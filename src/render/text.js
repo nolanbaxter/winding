@@ -446,6 +446,18 @@ export class Font {
     shelf.height = Math.max(shelf.height, h);
   }
 
+  /**
+   * After a lost device: an empty atlas on the new one, as when a full atlas
+   * starts again. Text adds its glyphs back as it is next drawn (ensureBoxes).
+   */
+  restore() {
+    this.metrics.glyphs.clear();
+    this._shelf = { x: 0, y: 0, height: 0 };
+    this._atlasSize = 512;
+    this.generation++;
+    this._make(this._atlasSize);
+  }
+
   destroy() {
     this.texture.texture.destroy();
   }

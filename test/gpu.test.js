@@ -4008,6 +4008,85 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return `${unprepared} pipelines started by the first frames without prepare, none with it, and AO from the first frame`;
   });
 
+  await step('after the GPU device is lost, the engine recovers and draws the same frame', async () => {
+    // Everything a load hands out is rebuilt in place on the new device: a
+    // textured model and a skinned one, a sprite's texture, a font, a LUT,
+    // the default sky and a render target, which the app draws into again.
+    // The same objects, ids and offsets, so the frame after recovery is the
+    // frame before it, pixel for pixel.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    let lost = null;
+    const probe = await Winding.create(canvas, { onDeviceLost: (detail) => { lost = detail; } });
+    try {
+      probe.gpu.resize(160, 120);
+      const scene = probe.createScene();
+      const floor = await probe.load(buildFeatureGLB({ imageURI: twoToneImageURI('#3060ff', '#ffd040'), baseColorFactor: [1, 1, 1, 1] }));
+      scene.add(floor).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(2, 2, 1);
+      scene.add(await probe.load(buildRiggedGLB())).setPosition(1.2, 0, 0.5);
+      scene.addLight({ type: 'directional', direction: [-0.3, -1, -0.4], intensity: 3 });
+      const pin = await probe.loadTexture(twoToneImageURI('#ff2020', '#20ff20'));
+      scene.addSprite({ texture: pin, position: [-1.4, 1, 0], size: [0.6, 0.6] });
+      const font = await probe.loadFont('48px sans-serif');
+      scene.addText({ font, text: 'Ok', size: 0.5, position: [0, 1.4, 0] });
+      const minimap = await probe.createTarget({ size: [32, 32] });
+      scene.addSprite({ texture: minimap, position: [1.4, 1.2, 0], size: [0.5, 0.5] });
+      const cube = `LUT_3D_SIZE 2\n${[0, 1].flatMap((b) => [0, 1].flatMap((g) => [0, 1].map((r) => [r * 0.9, g, b].join(' ')))).join('\n')}`;
+      probe.grading = { lut: await probe.loadLUT(cube) };
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 2.5, 4]);
+      cam.target.set([0, 0.5, 0]);
+      const top = new Camera({ fovY: 1, near: 0.1 });
+      top.position.set([0, 6, 0.01]);
+      const frame = async () => {
+        probe.renderFrame(scene, top, { target: minimap });
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        return probe.gpu.readPixels();
+      };
+      await probe.prepare(scene, cam);
+      const before = await frame();
+
+      // The skinned model is held by the scene alone, through its primitives,
+      // as an asset added straight from load() is. Collected first, an asset
+      // recovery holds only weakly was simply not rebuilt: this made that
+      // happen every run rather than one in three.
+      globalThis.gc?.();
+      probe.gpu.loseForTest();
+      for (let i = 0; i < 100 && lost === null; i++) await new Promise((r) => setTimeout(r, 10));
+      if (lost === null) throw new Error('onDeviceLost was not called');
+      if (lost.action !== 'recover' || !lost.recoverable) throw new Error(`told to ${lost.action}, recoverable ${lost.recoverable}`);
+      await lost.recovered;
+      probe.gpu.device.pushErrorScope('validation');
+      // The target's picture went with the device, as the API says: drawn again by frame().
+      await probe.prepare(scene, cam);
+      const after = await frame();
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      let differ = 0;
+      for (let i = 0; i < before.length; i += 4) {
+        if (before[i] !== after[i] || before[i + 1] !== after[i + 1] || before[i + 2] !== after[i + 2]) differ++;
+      }
+      if (differ > 0) {
+        let x0 = 999, y0 = 999, x1 = -1, y1 = -1, most = 0;
+        for (let i = 0; i < before.length; i += 4) {
+          const d = Math.max(Math.abs(before[i] - after[i]), Math.abs(before[i + 1] - after[i + 1]), Math.abs(before[i + 2] - after[i + 2]));
+          if (d === 0) continue;
+          const p = i / 4, x = p % 160, y = Math.floor(p / 160);
+          x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); most = Math.max(most, d);
+        }
+        const at = (x, y) => { const i = (y * 160 + x) * 4; return [before[i], before[i + 1], before[i + 2]] + ' -> ' + [after[i], after[i + 1], after[i + 2]]; };
+        throw new Error(`${differ} of ${before.length / 4} pixels differ after recovery, in x ${x0}-${x1} y ${y0}-${y1}, `
+          + `by up to ${most}; centre ${at(80, 60)}, middle of them ${at((x0 + x1) >> 1, (y0 + y1) >> 1)}`);
+      }
+      return `recovered (${lost.reason}); the frame after is the frame before, ${before.length / 4} pixels`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a scene added to and removed from draws what a scene built fresh draws', async () => {
     // Adding or removing rewrites only the renderable slots that changed --
     // the one added, and the one a removal moved the last renderable into --

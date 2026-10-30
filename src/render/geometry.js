@@ -65,6 +65,17 @@ export class GeometryArena {
     const vertexCount = vertices.byteLength / VERTEX_STRIDE_BYTES;
     const baseVertex = this._place('vertex', vertexCount, VERTEX_STRIDE_BYTES);
     const firstIndex = this._place('index', indices.length, INDEX_BYTES);
+    this.writeAt(baseVertex, firstIndex, vertices, indices, skin);
+    return { baseVertex, firstIndex };
+  }
+
+  /**
+   * Write a primitive where allocate() placed it before: after a lost device,
+   * the same file read again goes back to the same place, so every primitive
+   * object and every draw that names its baseVertex and firstIndex is right.
+   */
+  writeAt(baseVertex, firstIndex, vertices, indices, skin = null) {
+    const vertexCount = vertices.byteLength / VERTEX_STRIDE_BYTES;
     const queue = this.rhi.queue;
     queue.writeBuffer(this.vertexBuffer, baseVertex * VERTEX_STRIDE_BYTES, vertices.buffer ?? vertices, vertices.byteOffset ?? 0, vertices.byteLength);
     queue.writeBuffer(this.indexBuffer, firstIndex * INDEX_BYTES, indices.buffer, indices.byteOffset, indices.byteLength);
@@ -81,7 +92,19 @@ export class GeometryArena {
       this.skinBuffer ??= this._create('geometry-skin', this.vertexCapacity * SKIN_STRIDE_BYTES, GPUBufferUsage.VERTEX);
       queue.writeBuffer(this.skinBuffer, baseVertex * SKIN_STRIDE_BYTES, skin);
     }
-    return { baseVertex, firstIndex };
+  }
+
+  /**
+   * New buffers on a new device, at the capacities these had and empty. The
+   * allocator is kept, so what was placed stays placed; writeAt refills it.
+   */
+  restore() {
+    this.vertexBuffer = this._create('geometry-vertices', this.vertexCapacity * VERTEX_STRIDE_BYTES, GPUBufferUsage.VERTEX);
+    this.positionBuffer = this._create('geometry-positions', this.vertexCapacity * POSITION_BYTES, GPUBufferUsage.VERTEX);
+    this.indexBuffer = this._create('geometry-indices', this.indexCapacity * INDEX_BYTES, GPUBufferUsage.INDEX);
+    this.skinBuffer = this.skinBuffer === null ? null
+      : this._create('geometry-skin', this.vertexCapacity * SKIN_STRIDE_BYTES, GPUBufferUsage.VERTEX);
+    this.revision++;
   }
 
   /** Give back what allocate() returned, for `vertexCount` vertices and `indexCount` indices. */

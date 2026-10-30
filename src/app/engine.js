@@ -98,6 +98,19 @@ export function createModuleWorker(
   return new WorkerClass(shim, { type: 'module' });
 }
 
+/**
+ * What a renderer is set to, carried to the one that replaces it after a lost
+ * device: every live setting a frame reads (Winding._settings lists the same).
+ */
+function carrySettings(from, to) {
+  for (const key of ['exposure', 'autoExposure', 'softShadows', 'taa', 'splatCull', 'resolution', 'fog', 'dof',
+    'skybox', 'shadowDistance', 'lightDistance', 'ao', 'oit', 'profiler']) to[key] = from[key];
+  to.debug.depthTest = from.debug.depthTest;
+  for (const key of ['threshold', 'knee', 'filterRadius', 'strength', 'levels', 'antialias', 'grading']) to.post[key] = from.post[key];
+  for (const key of ['lambda', 'casterExtent', 'normalBias']) to.shadows[key] = from.shadows[key];
+  to.gpuTiming.enabled = from.gpuTiming.enabled;
+}
+
 export class Winding {
   /**
    * Whether Winding.create can work here: WebGPU, and a GPU it will hand out.
@@ -151,7 +164,7 @@ export class Winding {
     // A failure past this point would otherwise strand the device and its
     // resize observer, with no engine for anyone to call destroy() on.
     try {
-      const renderer = await Renderer.create(rhi, {
+      const rendererOptions = {
         maxDraws: options.maxDraws,
         exposure: options.exposure,
         shadows: options.shadows,
@@ -166,7 +179,8 @@ export class Winding {
         dof: options.dof,
         autoExposure: options.autoExposure,
         taa: options.taa,
-      });
+      };
+      const renderer = await Renderer.create(rhi, rendererOptions);
 
       const environment = new Environment(rhi, options.environment ?? {});
 
@@ -181,6 +195,8 @@ export class Winding {
 
       const engine = new Winding(rhi, renderer, environment, jobs);
       engine.onDemand = options.onDemand !== false;
+      // What a renderer is made with, for the one a lost device's recovery makes.
+      engine._rendererOptions = rendererOptions;
       return engine;
     } catch (error) {
       rhi.destroy();
@@ -227,12 +243,34 @@ export class Winding {
     /** What the last frame run() drew was drawn from; see _idle. */
     this._drawn = null;
 
-    // The device was lost, or the canvas left the document. Either way nothing
+    // The canvas left the document, or the device was destroyed rather than
+    // lost (a lost one is recovered from: onLost, below). Either way nothing
     // this engine draws can be seen again, so it lets go of everything --
     // including its workers, which nothing else would ever end. Whether or not
     // run() is driving it: an engine that failed before run(), or one driven
     // through renderFrame(), has no loop to notice.
     rhi.onUnusable = () => this.destroy();
+    // A device lost underneath it, rather than destroyed: a new one, and
+    // everything loaded rebuilt on it, in place. See _recover.
+    rhi.onLost = (detail) => this._lost(detail);
+    /**
+     * Everything a load handed out, weakly -- an app that drops an asset
+     * without unloading it is not made to keep it -- with what rebuilding it
+     * on a new device takes: { ref, kind, source, options }.
+     */
+    this._made = new Map();
+    this._madeKey = new WeakMap();
+    this._madeCount = 0;
+    this._gone = new FinalizationRegistry((key) => this._made.delete(key));
+    /** Scenes made here, weakly: their captured probes are captured again after recovery. */
+    this._scenes = new Set();
+    /** Loads under way, which recovery lets finish before it begins. */
+    this._inflight = new Set();
+    /** A promise while the engine is recovering from a lost device, else null. */
+    this._recovering = null;
+    /** Counted up at every loss: a load that saw it change was built on a lost device. */
+    this._generation = 0;
+    this._keep(environment, 'environment');
     // It may already have happened: create() compiles pipelines for hundreds
     // of milliseconds before this runs, and nobody was listening then.
     if (rhi.destroyed || rhi.canvas.isConnected === false) queueMicrotask(() => this.destroy());
@@ -253,6 +291,7 @@ export class Winding {
     const { capacity, renderableCapacity, lightCapacity } = options;
     const scene = new Scene({ capacity, renderableCapacity, lightCapacity });
     scene.environment = environment;
+    this._scenes.add(new WeakRef(scene));
     return scene;
   }
 
@@ -271,6 +310,10 @@ export class Winding {
    */
   async loadTexture(source, options = {}) {
     checkOptions('loadTexture', options);
+    return this._loading(() => this._loadTexture(source, options), (made) => this._keep(made, 'texture', source, options));
+  }
+
+  async _loadTexture(source, options) {
     const { srgb = true, pixelated = false, label = 'texture', fetch = globalThis.fetch } = options;
     this._assertAlive('loadTexture');
     let image = source;
@@ -282,6 +325,8 @@ export class Winding {
     // The bytes as authored: no colour conversion and no premultiplying, as
     // for glTF images (scene/gltf/images.js). Whether they are sRGB is the
     // texture's format's business.
+    // An ImageBitmap the app closed after loading cannot be read again.
+    if (image instanceof ImageBitmap && image.width === 0) throw new Error('loadTexture: the ImageBitmap was closed');
     const bitmap = image instanceof ImageBitmap
       ? image
       : await createImageBitmap(image, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
@@ -309,9 +354,11 @@ export class Winding {
     this._assertAlive('loadFont');
     const px = /(\d+(?:\.\d+)?)px/.exec(css);
     if (px === null) throw new Error(`loadFont: the font needs a size in pixels, like '64px sans-serif'; got '${css}'`);
-    await document.fonts?.load(css);
-    this._assertAlive('loadFont');
-    return new Font(this.gpu, css, Number(px[1]));
+    return this._loading(async () => {
+      await document.fonts?.load(css);
+      this._assertAlive('loadFont');
+      return new Font(this.gpu, css, Number(px[1]));
+    }, (made) => this._keep(made, 'font'));
   }
 
   /**
@@ -332,8 +379,11 @@ export class Winding {
       if (!response.ok) throw new Error(`loadLUT: ${source} returned ${response.status}`);
       text = await response.text();
     }
-    this._assertAlive('loadLUT');
-    return uploadLUT(this.gpu, parseCube(text));
+    const cube = parseCube(text);
+    return this._loading(async () => {
+      this._assertAlive('loadLUT');
+      return uploadLUT(this.gpu, cube);
+    }, (made) => this._keep(made, 'lut'));
   }
 
   /** Colour grading, read and set any time: { whiteBalance, contrast, saturation, lut }. See render/grading.js. */
@@ -360,6 +410,10 @@ export class Winding {
   async loadEnvironment(source, options = {}) {
     this._assertAlive('loadEnvironment');
     checkOptions('loadEnvironment', options);
+    return this._loading(() => this._loadEnvironment(source, options), (made) => this._keep(made, 'environment', source, options));
+  }
+
+  async _loadEnvironment(source, options) {
     const { fetch: fetchImpl = globalThis.fetch, size, irradianceSize, prefilterMips, label } = options;
     let bytes = source;
     if (typeof source === 'string') {
@@ -388,6 +442,10 @@ export class Winding {
    */
   async loadSplats(source, options = {}) {
     checkOptions('loadSplats', options);
+    return this._loading(() => this._loadSplats(source, options), (made) => this._keep(made, 'splats', source, options));
+  }
+
+  async _loadSplats(source, options) {
     const { fetch = globalThis.fetch } = options;
     this._assertAlive('loadSplats');
     let bytes = source;
@@ -425,6 +483,16 @@ export class Winding {
    */
   async load(source, options = {}) {
     checkOptions('load', options);
+    return this._loading(() => this._load(source, options), (made) => this._keep(made, 'model', source, options));
+  }
+
+  /**
+   * The body of load(). With `into`, an asset this file built before, on a
+   * device since lost: the file is read again and its geometry, deltas and
+   * textures go back where they were, under the same material ids, so every
+   * scene drawing it and every clip animating it carries on unchanged.
+   */
+  async _load(source, options, into = null) {
     const { retainGeometry = false } = options;
     this._assertAlive('load');
     let bytes = source;
@@ -490,6 +558,7 @@ export class Winding {
     }
     // Built as the images landed; given them too, for anything not made yet.
     textures.bitmaps = bitmaps;
+    if (into !== null) return this._refill(into, model, textures);
 
     // Filled in as it is built, so a throw part way through -- a texture past
     // the device limit, a mesh with too many targets, a pipeline that will
@@ -580,6 +649,10 @@ export class Winding {
             meshIndex: m,
             /** Renderables drawing this, across every scene. See Scene.add. */
             instances: 0,
+            // A scene holds primitives, not the asset: this keeps the asset alive
+            // for as long as anything draws it, so a lost device's recovery,
+            // which holds assets only weakly, still finds it to rebuild.
+            asset,
           };
           primitives.push(built);
 
@@ -617,6 +690,33 @@ export class Winding {
     return asset;
   }
 
+  /** _load with `into`: the asset's place, ids and records kept, its GPU contents made again. */
+  _refill(into, model, textures) {
+    const same = model.meshes.length === into.meshes.length && model.meshes.every((mesh, m) => (
+      mesh.primitives.length === into.meshes[m].primitives.length
+      && mesh.primitives.every((p, k) => p.vertexCount === into.meshes[m].primitives[k].vertexCount
+        && p.indexCount === into.meshes[m].primitives[k].indexCount)));
+    if (!same) {
+      textures.releaseBitmaps();
+      textures.destroy();
+      throw new Error('the file is not the one loaded before');
+    }
+    const registry = this.renderer.materials;
+    // The records the asset's clips write stay the ones registered; only the textures are new.
+    model.materials.forEach((material, m) => registry.restoreTextures(into.materialIds[m], textures.texturesFor(material)));
+    textures.releaseBitmaps();
+    into.textures = textures;
+    model.meshes.forEach((mesh, m) => mesh.primitives.forEach((primitive, p) => {
+      const built = into.meshes[m].primitives[p];
+      const skin = primitive.jointIndices
+        ? new Uint8Array(packSkinVertices(primitive.jointIndices, primitive.jointWeights, primitive.vertexCount))
+        : null;
+      this.renderer.geometry.writeAt(built.baseVertex, built.firstIndex, primitive.vertices, primitive.indices, skin);
+      if (primitive.morph) this.renderer.morph.writeAt(built.morphBase, primitive.morph.deltas);
+    }));
+    return into;
+  }
+
   /** glTF lets a primitive have no material; the spec's default is a white dielectric. */
   _defaultMaterial() {
     if (this._defaultMaterialId < 0) {
@@ -642,6 +742,7 @@ export class Winding {
    */
   unload(asset) {
     if (asset.unloaded) return;
+    this._forget(asset);
     if (!Array.isArray(asset.meshes)) {
       // Everything but a model: a font or an environment frees itself; a
       // texture or a LUT is its GPU texture.
@@ -732,6 +833,8 @@ export class Winding {
       // device -- one more full loop per edit, until the adapter ran out.
       if (this.gpu.canvas.isConnected === false) { this.destroy(); return; }
       this._raf = requestAnimationFrame(loop);
+      // Nothing can be drawn while a lost device is replaced; the loop waits it out.
+      if (this._recovering) return;
 
       this.clock.begin(nowMs / 1000);
       // Before update(), so a callback that reads a bone's world position sees
@@ -881,6 +984,7 @@ export class Winding {
    */
   async prepare(scene, camera = null) {
     this._assertAlive('prepare');
+    await this._recovering;
     if (!(scene instanceof Scene)) throw new Error('prepare: takes (scene, camera), the scene from createScene()');
     const views = camera === null ? [] : [camera];
     const all = new Camera({ near: 0.01 });
@@ -915,6 +1019,8 @@ export class Winding {
   renderFrame(scene, camera, options = {}) {
     this._assertAlive('renderFrame');
     checkOptions('renderFrame', options);
+    // While a lost device is replaced there is nothing to draw with: a frame asked for then is skipped.
+    if (this._recovering) return;
     const { target = null } = options;
     if (target !== null && !(target instanceof RenderTarget && target.rhi === this.gpu)) {
       throw new Error("renderFrame: target must be one this engine's createTarget made");
@@ -946,7 +1052,9 @@ export class Winding {
     if (!(Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0 && width <= most && height <= most)) {
       throw new Error(`createTarget: size must be [width, height], whole pixels from 1 to ${most}, got ${size}`);
     }
-    return this.renderer.createTarget(width, height, { pixelated: pixelated === true, label });
+    const target = await this.renderer.createTarget(width, height, { pixelated: pixelated === true, label });
+    this._keep(target, 'target');
+    return target;
   }
 
   /** A run or renderFrame's hud with its camera filled in: the one given, or a plain Camera2D, kept. */
@@ -975,10 +1083,152 @@ export class Winding {
    */
   async captureProbes(scene, probes) {
     this._assertAlive('captureProbes');
+    await this._recovering;
     // Where each probe's node is now, before any is captured from there.
     scene.update();
     const records = probes === undefined ? undefined : probes.map((node) => scene._probe('captureProbes', node));
     await this.renderer.captureProbes(scene, records);
+  }
+
+  /** Remember what a load handed out, with what rebuilding it takes. */
+  _keep(object, kind, source = null, options = null) {
+    const key = ++this._madeCount;
+    this._made.set(key, { ref: new WeakRef(object), kind, source, options });
+    this._madeKey.set(object, key);
+    this._gone.register(object, key, object);
+  }
+
+  _forget(object) {
+    const key = this._madeKey?.get(object);
+    if (key === undefined) return;
+    this._made.delete(key);
+    this._gone.unregister(object);
+  }
+
+  /**
+   * Run one load, and run it again if the device is lost while it is under
+   * way: it was building on a device that is gone. A load asked for while
+   * the engine recovers waits, and starts on the new device.
+   */
+  async _loading(make, keep) {
+    for (;;) {
+      await this._recovering;
+      const generation = this._generation;
+      const attempt = make();
+      this._inflight.add(attempt);
+      try {
+        const made = await attempt;
+        keep(made);
+        return made;
+      } catch (error) {
+        if (this._generation === generation || this._destroyed) throw error;
+      } finally {
+        this._inflight.delete(attempt);
+      }
+    }
+  }
+
+  /**
+   * The device went away underneath the engine: a driver reset, the GPU
+   * process crashing, a laptop or a Steam Deck waking from sleep. Recover,
+   * and tell the app, whose onDeviceLost gets `recovered`: a promise that
+   * settles when the engine is drawing again.
+   */
+  _lost(detail) {
+    this._generation++;
+    // A loss during a recovery queues another behind it, on the device that one brings.
+    const before = this._recovering;
+    const recovered = (async () => {
+      await before;
+      await this._recover();
+    })();
+    // What everything else waits on: settles either way, and clears itself if nothing followed it.
+    const waiting = recovered.catch(() => {}).then(() => {
+      if (this._recovering === waiting) this._recovering = null;
+    });
+    this._recovering = waiting;
+    recovered.catch((error) => {
+      console.error(`Winding could not recover from a lost GPU device: ${error.message}`);
+      this.destroy();
+    });
+    detail.recovered = recovered;
+    if (this.gpu.onDeviceLost) this.gpu.onDeviceLost(detail);
+    else console.warn(`WebGPU device lost (${detail.reason}): ${detail.message || 'no message'}. Recovering.`);
+  }
+
+  /**
+   * A new device, and everything loaded rebuilt on it, in place: the same
+   * asset, texture, font, environment, splat and target objects, the same
+   * material ids and geometry offsets, so the app's scenes and nodes need
+   * nothing done. Models are read again from where they came from; what was
+   * drawn into a render target is gone, and is the app's to draw again.
+   */
+  async _recover() {
+    // Loads under way finish first, on the lost device; they are rebuilt with the rest.
+    while (this._inflight.size > 0) await Promise.allSettled([...this._inflight]);
+    if (this._destroyed) return;
+    const old = this.renderer;
+    await this.gpu.replace();
+    if (this._destroyed) return;
+    old.geometry.restore();
+    old.morph.restore();
+    old.materials.restore();
+
+    const live = [];
+    for (const [key, entry] of this._made) {
+      const object = entry.ref.deref();
+      if (object === undefined || object.unloaded) this._made.delete(key);
+      else live.push([object, entry]);
+    }
+    const restore = async (object, entry) => {
+      try {
+        await this._restore(object, entry);
+      } catch (error) {
+        console.warn(`Winding: a ${entry.kind} could not be rebuilt after the lost device: ${error.message}`);
+      }
+    };
+    // Models first: the materials' bind groups wait on their textures.
+    for (const [object, entry] of live) if (entry.kind === 'model') await restore(object, entry);
+    old.materials.finishRestore();
+
+    const renderer = await Renderer.create(this.gpu, this._rendererOptions,
+      { materials: old.materials, geometry: old.geometry, morph: old.morph });
+    // In place before the rest: splats and targets are made through it.
+    this.renderer = renderer;
+    for (const [object, entry] of live) if (entry.kind !== 'model') await restore(object, entry);
+    carrySettings(old, renderer);
+    await renderer.ensureVariants(old.materials.variantList());
+    this._drawn = null;
+
+    // Captured probes saw the scene through the lost device: captured again.
+    for (const ref of this._scenes) {
+      const scene = ref.deref();
+      if (scene === undefined) { this._scenes.delete(ref); continue; }
+      const captured = scene.reflectionProbes.filter((probe) => probe.captured);
+      if (captured.length === 0) continue;
+      for (const probe of captured) probe.captured = false;
+      scene.probeRevision++;
+      await renderer.captureProbes(scene, captured);
+    }
+  }
+
+  /** One thing a load handed out, rebuilt on the new device in place. */
+  async _restore(object, { kind, source, options }) {
+    if (kind === 'model') await this._load(source, options, object);
+    else if (kind === 'texture') Object.assign(object, await this._loadTexture(source, options));
+    else if (kind === 'font') object.restore();
+    else if (kind === 'lut') Object.assign(object, uploadLUT(this.gpu, object));
+    else if (kind === 'splats') Object.assign(object, await this._loadSplats(source, options));
+    else if (kind === 'target') {
+      Object.assign(object, await this.renderer.createTarget(object.width, object.height, { pixelated: object.pixelated, label: object.label }));
+    } else if (kind === 'environment') {
+      Object.assign(object, source !== null
+        ? await this._loadEnvironment(source, options)
+        : new Environment(this.gpu, {
+          sky: object.sky, size: object.size, irradianceSize: object._irradianceSize,
+          prefilterMips: object.prefilterMips, capture: object._capture,
+        }));
+    }
   }
 
   /** Lines for the next frame: line, box, sphere, axes. See render/debug.js. */

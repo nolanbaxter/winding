@@ -70,7 +70,7 @@ Every call, setting and entry, A to Z by its name.
 
 **F** &nbsp; [`engine.renderer.post.filterRadius`](#post-filterradius) · [`engine.renderer.fog`](#renderer-fog) · [`camera.follow()`](#camera-follow) · [`Benchmark.format()`](#benchmark-format) · [`engine.fps`](#engine-fps) · [`scene.frame()`](#scene-frame) · [`orbit.frameBounds()`](#orbitcontroller-framebounds) · [`camera.frameBounds()`](#camera-framebounds)
 
-**G** &nbsp; [`engine.gpu`](#engine-gpu) · [`engine.grading`](#engine-grading) · [`engine.renderer.post.grading`](#post-grading)
+**G** &nbsp; [`engine.gpu`](#engine-gpu) · [`GPU lost`](#device-lost) · [`engine.grading`](#engine-grading) · [`engine.renderer.post.grading`](#post-grading)
 
 **H** &nbsp; [`HUD`](#view2d-hud)
 
@@ -78,7 +78,7 @@ Every call, setting and entry, A to Z by its name.
 
 **K** &nbsp; [`engine.renderer.post.knee`](#post-knee)
 
-**L** &nbsp; [`engine.renderer.lightDistance`](#renderer-lightdistance) · [`engine.renderer.post.levels`](#post-levels) · [`scene.lightOf()`](#scene-lightof) · [`engine.debug.line()`](#debug-line) · [`linearToSrgb()`](#color-lineartosrgb) · [`lit`](#view2d-lighting) · [`engine.load()`](#engine-load) · [`engine.loadEnvironment()`](#engine-loadenvironment) · [`engine.loadFont()`](#engine-loadfont) · [`engine.loadLUT()`](#engine-loadlut) · [`engine.loadSplats()`](#engine-loadsplats) · [`engine.loadTexture()`](#engine-loadtexture)
+**L** &nbsp; [`engine.gpu.loseForTest()`](#engine-gpu-losefortest) · [`engine.renderer.lightDistance`](#renderer-lightdistance) · [`engine.renderer.post.levels`](#post-levels) · [`scene.lightOf()`](#scene-lightof) · [`engine.debug.line()`](#debug-line) · [`linearToSrgb()`](#color-lineartosrgb) · [`lit`](#view2d-lighting) · [`engine.load()`](#engine-load) · [`engine.loadEnvironment()`](#engine-loadenvironment) · [`engine.loadFont()`](#engine-loadfont) · [`engine.loadLUT()`](#engine-loadlut) · [`engine.loadSplats()`](#engine-loadsplats) · [`engine.loadTexture()`](#engine-loadtexture)
 
 **M** &nbsp; [`mat4`](#math-mat4)
 
@@ -116,7 +116,7 @@ Creates an engine on a `<canvas>`: requests the WebGPU device, compiles the rend
 |---|---|---|
 | `label` | `'winding'` | Label of the GPU device, shown in WebGPU error messages. |
 | `powerPreference` | `'high-performance'` | Passed to `requestAdapter`: `'high-performance'` or `'low-power'`. |
-| `onDeviceLost` | `null` | `(detail) => {}` when the GPU goes away. `detail` is `{ reason, message, recoverable, action: 'reload' }`. Without it the loss is logged to the console. The engine destroys itself either way. |
+| `onDeviceLost` | `null` | `(detail) => {}` when the GPU goes away. `detail` is `{ reason, message, recoverable, action, recovered }`. When `action` is `'recover'`, the engine rebuilds itself on a new device and `recovered` settles once it is drawing again; see [When the GPU is lost](#device-lost). Without it the loss is logged to the console. |
 | `onError` | `null` | `(error) => {}` for uncaptured WebGPU errors. Without it they go to `console.error`. |
 | `exposure` | `1` | Starting value of [`renderer.exposure`](#renderer-exposure). |
 | `autoExposure` | `null` | Starting value of [`renderer.autoExposure`](#renderer-autoexposure). |
@@ -159,7 +159,6 @@ import { Winding, Camera } from 'winding-engine';
 const engine = await Winding.create(canvas, {
   ao: true,
   shadows: { size: 4096 },
-  onDeviceLost: () => location.reload(),
 });
 ```
 
@@ -375,7 +374,7 @@ engine.run(scene, camera, {
 });
 ```
 
-Notes: animations and particles advance on real time each frame, before `update`. Without `update`, `engine.clock.elapsed` does not advance. With [`engine.onDemand`](#engine-ondemand) on, a frame where nothing changed is skipped. If the canvas leaves the document or the device is lost, the loop destroys the engine.
+Notes: animations and particles advance on real time each frame, before `update`. Without `update`, `engine.clock.elapsed` does not advance. With [`engine.onDemand`](#engine-ondemand) on, a frame where nothing changed is skipped. If the canvas leaves the document, the loop destroys the engine. While the engine recovers from a lost GPU it draws nothing, and the loop carries on once it is back: see [When the GPU is lost](#device-lost).
 
 <a id="engine-stop"></a>
 ### `engine.stop()` → `void`
@@ -502,7 +501,7 @@ Stops the loop and frees everything the engine owns: workers, renderer, its defa
 engine.destroy();
 ```
 
-Notes: afterwards every method that uses the GPU throws `'<method>: this engine was destroyed'`. Environments from [`engine.loadEnvironment`](#engine-loadenvironment) die with the device. The engine also destroys itself when the device is lost or the canvas leaves the document. A destroyed engine lets go of its canvas, so the canvas can be given to a new one.
+Notes: afterwards every method that uses the GPU throws `'<method>: this engine was destroyed'`. Environments from [`engine.loadEnvironment`](#engine-loadenvironment) die with the device. The engine also destroys itself when the canvas leaves the document, or when it cannot recover from a lost device. A destroyed engine lets go of its canvas, so the canvas can be given to a new one.
 
 <a id="engine-grading"></a>
 ### `engine.grading` → `object | null`
@@ -638,6 +637,48 @@ const at = (x, y) => pixels.subarray((y * engine.gpu.width + x) * 4, (y * engine
 ```
 
 Notes: call it straight after `renderFrame`, with nothing awaited between. The browser shows a frame and hands the canvas a fresh, blank one as soon as the page waits for anything, so a read after an `await` returns zeros. For the same reason, read once a frame and index into the result, rather than reading pixel by pixel.
+
+<a id="device-lost"></a>
+### When the GPU is lost
+
+The GPU device can go away underneath a page: a driver reset, the browser's GPU process crashing, or a laptop or Steam Deck waking from sleep. The engine then gets a new device on the same canvas and rebuilds everything it had loaded, in place:
+
+- **Models** are read again from the URL or bytes they came from, and their geometry, morph targets and textures go back exactly where they were, under the same material ids. A clip animating a material carries on.
+- **Textures, fonts, LUTs, environments, splats and render targets** are rebuilt into the same objects.
+- **Scenes** need nothing done: every node, sprite, text and light holds what it held. Captured reflection probes are captured again.
+- **Loads under way** when it happens finish and are rebuilt with the rest, and a load that fails because of the loss is run again on the new device. Loads asked for during recovery wait for it.
+
+While it recovers, `run` and `renderFrame` draw nothing, and `prepare` and `captureProbes` wait. On a laptop, a crashed GPU process took 1.7 s to recover from.
+
+A few things can't come back, because they only ever existed on the GPU:
+
+- **What was drawn into a render target.** The target is there, empty: draw into it again. A target redrawn every frame needs nothing.
+- **Particles in flight.** Emitters keep emitting, starting over.
+- **TAA's history and auto exposure's adaptation**, which settle again over a few frames.
+
+`engine.renderer` is a new object afterwards, with the same settings. Read it from the engine rather than keeping your own reference to it.
+
+To rebuild a model, the engine keeps where it came from: a URL costs nothing, and bytes are kept for as long as the model is loaded, so a model loaded from bytes holds its file's size of memory. A texture loaded from an `ImageBitmap` you close afterwards can't be read again, and draws blank after a recovery; load it from a URL or a Blob instead.
+
+`onDeviceLost` is told, with `action: 'recover'` and `recovered`, a promise that settles when the engine is drawing again. If recovery fails (no GPU comes back), it rejects and the engine destroys itself.
+
+```js
+const engine = await Winding.create(canvas, {
+  onDeviceLost: ({ recovered }) => {
+    banner.show('Graphics reset');
+    recovered.then(() => banner.hide());
+  },
+});
+```
+
+<a id="engine-gpu-losefortest"></a>
+### `engine.gpu.loseForTest()` → `void`
+
+Loses the GPU device on purpose, as a driver reset would, so recovery can be tested: everything above happens, and `onDeviceLost` is called with `reason: 'unknown'`.
+
+```js
+engine.gpu.loseForTest();
+```
 
 <a id="renderer-settings"></a>
 ## Renderer settings

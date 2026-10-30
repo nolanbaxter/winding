@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time a frame asks for them, and until then frames draw without them, so they appeared a few
   frames into play. A scene with decals, AO, TAA and particles started 17 pipeline builds in its
   first frames; after `prepare`, none, and AO draws from the first frame.
+- **[A lost GPU device is recovered from](docs/API.md#device-lost).** A driver reset, the GPU
+  process crashing, or a Steam Deck waking from sleep used to end the session: the engine destroyed
+  itself and the page had to reload. Now it gets a new device on the same canvas and rebuilds what
+  it loaded in place -- models read again from where they came from, under the same material ids
+  and geometry offsets -- so scenes, nodes and loaded objects carry on untouched. A crashed GPU
+  process in Electron took 1.7 s to come back from. `onDeviceLost` is told `action: 'recover'`
+  and `recovered`, a promise for when it is drawing again. [`engine.gpu.loseForTest()`](docs/API.md#engine-gpu-losefortest)
+  loses the device on purpose, to test it.
 
 ## [1.8.0] - 2026-10-30
 

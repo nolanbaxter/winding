@@ -222,30 +222,7 @@ export class MaterialRegistry {
     this._frameTextures = frameTextures;
     this.extensionSlots = extensionSlotCount(this._limit, frameTextures);
 
-    // Two layouts: the core textures, which every material binds and the
-    // shadow pass reads, and those plus the extension slots, for materials
-    // the extended shader draws. A plain material binding a dozen unused
-    // slots cost the CPU about 0.14 ms a frame on Sponza, in resource
-    // tracking on every material change.
-    const core = [
-      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: MATERIAL_BYTES } },
-      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // base colour
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // normal
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // metallic/roughness
-      // Occlusion gets its own slot rather than riding in the R channel of
-      // the metallic-roughness map. Exporters usually pack them together, but
-      // glTF permits separate images and reading R from the wrong texture
-      // would darken the model with no error anywhere.
-      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // occlusion
-      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // emissive
-      { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-    ];
-    this.layout = rhi.device.createBindGroupLayout({ label: 'material', entries: core });
-    this.extendedLayout = rhi.device.createBindGroupLayout({
-      label: 'material-extended',
-      entries: [...core, ...Array.from({ length: this.extensionSlots }, (_, i) => (
-        { binding: EXTENSION_BINDING + i, visibility: GPUShaderStage.FRAGMENT, texture: {} }))],
-    });
+    this._makeLayouts();
 
     /** Per id: the core group, and the group its own pipelines bind (the extended one, if it has one). */
     this.bindGroups = [];
@@ -284,6 +261,34 @@ export class MaterialRegistry {
 
     this._defaults = defaultTextures(rhi);
     this._sampler = linearSampler(rhi);
+  }
+
+  /** The two material layouts, on the current device. */
+  _makeLayouts() {
+    // Two layouts: the core textures, which every material binds and the
+    // shadow pass reads, and those plus the extension slots, for materials
+    // the extended shader draws. A plain material binding a dozen unused
+    // slots cost the CPU about 0.14 ms a frame on Sponza, in resource
+    // tracking on every material change.
+    const core = [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform', minBindingSize: MATERIAL_BYTES } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // base colour
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // normal
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // metallic/roughness
+      // Occlusion gets its own slot rather than riding in the R channel of
+      // the metallic-roughness map. Exporters usually pack them together, but
+      // glTF permits separate images and reading R from the wrong texture
+      // would darken the model with no error anywhere.
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // occlusion
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {} },   // emissive
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+    ];
+    this.layout = this.rhi.device.createBindGroupLayout({ label: 'material', entries: core });
+    this.extendedLayout = this.rhi.device.createBindGroupLayout({
+      label: 'material-extended',
+      entries: [...core, ...Array.from({ length: this.extensionSlots }, (_, i) => (
+        { binding: EXTENSION_BINDING + i, visibility: GPUShaderStage.FRAGMENT, texture: {} }))],
+    });
   }
 
   /**
@@ -546,6 +551,50 @@ export class MaterialRegistry {
     this.bindGroups[id] = undefined;
     this.shadingGroups[id] = undefined;
     this._free.push(id);
+  }
+
+  /**
+   * After a lost device, part one: everything on the new one but the bind
+   * groups, which wait for each material's textures (restoreTextures). Every
+   * id, record and factor stays as it was -- a scene's ids and a clip's are
+   * still right -- and the factors go up again from the staging copy kept here.
+   */
+  restore() {
+    this.buffer = createBuffer(this.rhi, {
+      label: this._label,
+      size: this.stride * this.capacity,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.rhi.queue.writeBuffer(this.buffer, 0, this.staging, 0, this.stride * this.count);
+    this._makeLayouts();
+    this._defaults = defaultTextures(this.rhi);
+    this._sampler = linearSampler(this.rhi);
+    /** Ids still waiting for their textures on the new device. */
+    this._unrestored = new Set();
+    for (let id = 0; id < this.count; id++) if (this._records[id] !== undefined) this._unrestored.add(id);
+  }
+
+  /** Part two: a material's textures as the reloaded asset made them, on the new device. */
+  restoreTextures(id, textures) {
+    if (this._records[id] === undefined) return;
+    this._textures[id] = textures;
+    this._extensions[id] = this._extensionSlotsFor(this._records[id], textures);
+    this._unrestored.delete(id);
+  }
+
+  /**
+   * Part three: every bind group. A material whose asset could not be read
+   * again draws without its textures, rather than naming textures of a device
+   * that is gone -- which would be an error on every frame.
+   */
+  finishRestore() {
+    for (const id of this._unrestored) {
+      this._textures[id] = {};
+      this._extensions[id] = { bound: [], slots: this._extensions[id]?.slots.map(() => -1) ?? [] };
+      this._writeFactors(id, this._records[id]);
+    }
+    this._unrestored = null;
+    for (let id = 0; id < this.count; id++) if (this._records[id] !== undefined) this._makeBindGroups(id);
   }
 
   /** The core textures: what the shadow pass binds. */

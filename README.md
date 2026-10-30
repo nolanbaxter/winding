@@ -447,10 +447,11 @@ These are real and currently unaddressed.
   inside them stay in place as words, and Latin ligatures are not formed.
 - **A 2D sprite is picked by its quad**, clear pixels included: knowing which pixels are clear
   would mean keeping a CPU copy of every texture.
-- **Device loss ends the session.** `onDeviceLost` fires with enough to act on and the engine
-  destroys itself, but nothing is rebuilt — recovering would mean holding a CPU copy of every GPU
-  resource, textures' contents included, for the whole process lifetime. Create a new engine, or
-  reload.
+- **A lost GPU device is recovered from, mostly.** The engine gets a new device and rebuilds what
+  it loaded in place, reading models again from where they came from, so a scene carries on
+  untouched. What existed only on the GPU is gone: a render target's picture (draw it again),
+  particles in flight, and TAA's history. A model loaded from bytes keeps them for as long as it
+  is loaded. See [When the GPU is lost](docs/API.md#device-lost).
 
 ## Contributing
 

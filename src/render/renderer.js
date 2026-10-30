@@ -169,10 +169,10 @@ export class Renderer {
   static async create(rhi, {
     maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
     shadowDistance = null, post, gpuTiming = false, oit = false, ao = false, fog = null, dof = null, autoExposure = null, taa = false,
-  } = {}) {
+  } = {}, adopt = null) {
     const renderer = new Renderer(rhi, {
       maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao, fog, dof, autoExposure, taa,
-    });
+    }, adopt);
     await renderer._init();
     return renderer;
   }
@@ -180,7 +180,14 @@ export class Renderer {
   constructor(rhi, {
     maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = false,
     oit = false, ao = false, fog = null, dof = null, autoExposure = null, taa = false,
-  }) {
+  }, adopt = null) {
+    /**
+     * The stores that hold what was loaded -- materials by id, geometry and
+     * morph deltas by place -- taken over from a renderer whose device was
+     * lost, after each restore()d itself onto the new one: every id and
+     * offset a scene or an asset holds stays right. null makes new ones.
+     */
+    this._adopt = adopt;
     this.shadowOptions = shadows ?? {};
     this._fogOption = fog;
     this._dofOption = dof;
@@ -260,7 +267,7 @@ export class Renderer {
       { binding: 24, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
     ];
     checkStorageStages(rhi, frameEntries);
-    this.materials = new MaterialRegistry(rhi, {
+    this.materials = adopt?.materials ?? new MaterialRegistry(rhi, {
       capacity: 1024,
       frameTextures: frameEntries.filter((e) => e.texture && (e.visibility & GPUShaderStage.FRAGMENT)).length,
     });
@@ -420,9 +427,9 @@ export class Renderer {
     /** Joint matrices for every skinned instance, rebuilt each frame. */
     this.skinPalette = new SkinPalette(rhi);
     /** Morph deltas (static, per primitive) and weights (per frame, per instance). */
-    this.morph = new MorphStore(rhi);
+    this.morph = this._adopt?.morph ?? new MorphStore(rhi);
     /** Every primitive's vertices and indices, in two buffers: see geometry.js. */
-    this.geometry = new GeometryArena(rhi);
+    this.geometry = this._adopt?.geometry ?? new GeometryArena(rhi);
     this._paletteRevision = 0;
 
     /**
