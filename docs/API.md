@@ -639,13 +639,19 @@ The fixed-step clock `run` drives.
 | Field | Meaning |
 |---|---|
 | `fixedDt` | Simulation step in seconds, `1 / 60`. Writable: change it to change the `update` rate. |
+| `timeScale` | How fast simulated time runs: `1` real time, `0.25` slow motion, `0` stopped. Writable, 0 or more. Steps stay `fixedDt` long and come less often, and animations and particles slow with them; the HUD scene keeps real time. |
 | `elapsed` | Simulated seconds so far. Only advances when `run` has an `update`. |
 | `realDelta` | Real seconds since the last frame, capped at 0.25. |
+| `delta` | Simulated seconds this frame added: `realDelta` times `timeScale`. What the scene's animations and particles moved on by. |
 | `alpha` | How far between the last two steps this frame is, in [0, 1). |
 | `frame` | Frames begun. |
 
 ```js
 engine.run(scene, camera, { frame: (alpha, clock) => orbit.update(clock.realDelta) });
+
+// A hit-stop: the world holds for a tenth of a second, then carries on.
+engine.clock.timeScale = 0;
+setTimeout(() => { engine.clock.timeScale = 1; }, 100);
 ```
 
 <a id="engine-renderer"></a>

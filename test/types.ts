@@ -69,6 +69,9 @@ export async function threeD(): Promise<void> {
   engine.unload(sky);
 
   engine.run(scene, camera, { frame: (alpha, clock) => { orbit.update(clock.realDelta); stats.update(clock.realDelta); } });
+  engine.clock.timeScale = 0.25;
+  const simulated: number = engine.clock.delta;
+  void simulated;
   const report = await new Benchmark(engine).run(scene, camera, { frames: 300 });
   console.log(Benchmark.format(report), report.cpu[0].p95);
 

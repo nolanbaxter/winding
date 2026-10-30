@@ -204,8 +204,10 @@ export interface Hud {
 
 export interface Clock {
   fixedDt: number;
+  timeScale: number;
   readonly elapsed: number;
   readonly realDelta: number;
+  readonly delta: number;
   readonly alpha: number;
   readonly frame: number;
 }

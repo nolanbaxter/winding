@@ -851,8 +851,10 @@ export class Winding {
 
       this.clock.begin(nowMs / 1000);
       // Before update(), so a callback that reads a bone's world position sees
-      // this frame's pose rather than last frame's.
-      scene.advance(this.clock.realDelta);
+      // this frame's pose rather than last frame's. At the clock's time scale:
+      // slowed or stopped with the simulation. The HUD keeps real time, so a
+      // pause menu still moves.
+      scene.advance(this.clock.delta);
       hud?.scene.advance(this.clock.realDelta);
       if (update) while (this.clock.step()) update(this.clock.fixedDt, this.clock.elapsed);
       else this.clock.accumulator = 0;   // nothing to simulate; do not let it grow

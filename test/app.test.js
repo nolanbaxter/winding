@@ -2278,6 +2278,37 @@ test('1.0.1: run sees a frame drawn by hand, and a restart is no jump', () => {
   }
 });
 
+test('run moves the scene on at the time scale and the HUD in real time', () => {
+  const engine = Object.create(Winding.prototype);
+  engine.gpu = { width: 320, height: 240, destroyed: false, canvas: { isConnected: true } };
+  engine.renderer = { render() {} };
+  engine.onDemand = false; engine.skippedFrames = 0; engine._running = false;
+  engine.clock = new Clock();
+  engine._fpsAccum = 0; engine._fpsFrames = 0;
+  engine._remember = () => {};
+  let raf = null;
+  const [request, cancel] = [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame];
+  globalThis.requestAnimationFrame = (f) => { raf = f; return 1; };
+  globalThis.cancelAnimationFrame = () => {};
+  try {
+    const world = new Scene({ capacity: 8 }), hud = new Scene({ capacity: 8 });
+    const moved = { world: 0, hud: 0 };
+    world.advance = (dt) => { moved.world += dt; };
+    hud.advance = (dt) => { moved.hud += dt; };
+    let steps = 0;
+    engine.clock.timeScale = 0.5;
+    engine.run(world, new Camera(), { hud: { scene: hud }, update: () => { steps++; } });
+    for (let ms = 0; ms <= 1000; ms += 10) raf(ms);
+    engine.stop();
+    close(moved.world, 0.5, 1e-9, 'the scene at half speed');
+    close(moved.hud, 1, 1e-9, 'the HUD in real time');
+    assert.ok(Math.abs(steps - 30) <= 1, `half a second of steps in a second: ${steps}`);
+  } finally {
+    globalThis.requestAnimationFrame = request;
+    globalThis.cancelAnimationFrame = cancel;
+  }
+});
+
 test('1.0.1: a removed parent, a morph back at rest, levels of detail, renamed names, and a clamped orbit', () => {
   // A removed node's slot is the next one's: hanging something off it is an error.
   const scene = new Scene({ capacity: 16 });

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **[`engine.clock.timeScale`](docs/API.md#engine-clock)**: slow motion, hit-stop and pause.
+  `0.25` runs the world at a quarter speed and `0` stops it: `update` steps keep their length and
+  come less often, and animations and particles slow with them, while a HUD scene keeps real time
+  so a pause menu still moves. `clock.delta` is the frame's simulated seconds.
 - **[`engine.prepare(scene, camera)`](docs/API.md#engine-prepare)**: builds everything a scene will
   draw with, behind a loading screen. Probes, decals, AO, OIT, TAA and FXAA are built the first
   time a frame asks for them, and until then frames draw without them, so they appeared a few

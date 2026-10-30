@@ -574,6 +574,24 @@ test('a long stall is clamped instead of spiraling', () => {
   assert.ok(steps <= 16, `clamped to ${steps} steps, not 1800`);
 });
 
+test('a time scale slows the steps, not their length, and 0 stops them', () => {
+  const c = new Clock(1 / 60);
+  c.timeScale = 0.25;
+  let steps = 0;
+  for (let i = 0; i <= 240; i++) {
+    c.begin(i / 60);
+    while (c.step()) steps++;
+  }
+  assert.ok(Math.abs(steps - 60) <= 1, `four real seconds at a quarter speed: ${steps} steps, not 60`);
+  close(c.delta, c.realDelta * 0.25, 1e-12, 'delta is the scaled frame');
+  c.timeScale = 0;
+  const elapsed = c.elapsed;
+  for (let i = 241; i < 300; i++) { c.begin(i / 60); while (c.step()); }
+  assert.equal(c.elapsed, elapsed, 'stopped');
+  assert.ok(c.realDelta > 0, 'real time still passes');
+  for (const bad of [-1, NaN, Infinity]) assert.throws(() => { c.timeScale = bad; }, /^Error: clock.timeScale must be a finite number, 0 or more$/);
+});
+
 test('a backwards clock does not drain the accumulator', () => {
   const c = new Clock(1 / 60);
   c.begin(10);
