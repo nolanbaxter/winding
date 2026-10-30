@@ -21,6 +21,7 @@
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer } from '../rhi/buffer.js';
+import { checkOptions } from '../core/options.js';
 
 const BINS = 64;
 /** log2 luminance the bins span; bin 0 holds anything darker, and black. */
@@ -133,6 +134,7 @@ export function autoExposureSettings(value) {
   if (typeof value !== 'object') {
     throw new Error(`autoExposure: true, { min, max, brighten, darken }, or null to turn it off, got ${value}`);
   }
+  checkOptions('autoExposure', value);
   const s = { ...AUTO_EXPOSURE_DEFAULTS, ...value };
   for (const key of ['min', 'max']) {
     if (!Number.isFinite(s[key])) throw new Error(`autoExposure: ${key} must be a finite number of stops, got ${s[key]}`);

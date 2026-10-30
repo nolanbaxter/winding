@@ -15,12 +15,15 @@
 
 import { renamed } from '../core/assert.js';
 import { mat4Create } from '../core/math/mat4.js';
+import { checkOptions } from '../core/options.js';
 
 export class Camera2D {
-  constructor({
-    position = [0, 0], zoom = 1, angle = 0, pivot = [0, 0],
-    background = [0, 0, 0, 1], pixelSnap = false, ambient = [0, 0, 0], anchor, rotation,
-  } = {}) {
+  constructor(options = {}) {
+    checkOptions('Camera2D', options);
+    const {
+      position = [0, 0], zoom = 1, angle = 0, pivot = [0, 0],
+      background = [0, 0, 0, 1], pixelSnap = false, ambient = [0, 0, 0], anchor, rotation,
+    } = options;
     if (rotation !== undefined) throw new Error('Camera2D: rotation is now angle, in the same radians, as node.setAngle takes');
     if (anchor !== undefined) throw new Error('Camera2D: anchor is now pivot -- the point of the view placed at position, as a sprite\'s pivot is');
     /**

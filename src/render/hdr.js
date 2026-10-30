@@ -19,7 +19,11 @@
  *
  * @returns {{ width: number, height: number, data: Float32Array }} RGB, 3 floats a pixel
  */
-export function parseHDR(bytes, { maxDimension = Infinity } = {}) {
+import { checkOptions } from '../core/options.js';
+
+export function parseHDR(bytes, options = {}) {
+  checkOptions('parseHDR', options);
+  const { maxDimension = Infinity } = options;
   if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
   let at = 0;
   const line = () => {

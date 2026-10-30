@@ -18,6 +18,8 @@
  * against the horizon falls to 2% (Koschmieder). It is what "you can see
  * 200 m" means, and it fixes the extinction: e^(-sigma V) = 0.02.
  */
+import { checkOptions } from '../core/options.js';
+
 export const VISIBILITY_CONTRAST = 0.02;
 
 /**
@@ -28,7 +30,9 @@ export const VISIBILITY_CONTRAST = 0.02;
  *   albedo       the share of light the medium scatters rather than absorbs
  * Returns { extinction, height, inverseScaleHeight, albedo }.
  */
-export function fogCoefficients({ visibility, height = 0, scaleHeight = Infinity, albedo = [1, 1, 1] }) {
+export function fogCoefficients(fog) {
+  checkOptions('fog', fog);
+  const { visibility, height = 0, scaleHeight = Infinity, albedo = [1, 1, 1] } = fog;
   if (!(visibility > 0 && Number.isFinite(visibility))) {
     throw new Error(`fog: visibility must be a positive number of metres, got ${visibility}`);
   }

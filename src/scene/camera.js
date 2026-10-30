@@ -23,6 +23,7 @@ import {
   mat4Create, mat4Invert, mat4LookAt, mat4Multiply, mat4PerspectiveReverseZInfinite,
   mat4OrthographicReverseZ,
 } from '../core/math/mat4.js';
+import { checkOptions } from '../core/options.js';
 
 /**
  * How far back a sphere of `radius` has to sit to fill the view.
@@ -73,9 +74,9 @@ const ORTHO_DEFAULT_FAR = 1000;
 const FRAME_DIRECTION = vec3Create();
 
 export class Camera {
-  constructor({
-    fovY = Math.PI / 3, near = 0.1, orthographic = false, far = ORTHO_DEFAULT_FAR,
-  } = {}) {
+  constructor(options = {}) {
+    checkOptions('Camera', options);
+    const { fovY = Math.PI / 3, near = 0.1, orthographic = false, far = ORTHO_DEFAULT_FAR } = options;
     /**
      * Parallel projection: size on screen does not change with depth.
      * Isometric views, CAD, a 2D overlay. See the header for what it shows.
@@ -195,7 +196,9 @@ export class Camera {
    * is 1 before the first frame rather than the canvas's -- pass it explicitly
    * when framing during setup.
    */
-  frameBounds(min, max, { margin = 1, aspect = this.aspect } = {}) {
+  frameBounds(min, max, options = {}) {
+    checkOptions('frameBounds', options);
+    const { margin = 1, aspect = this.aspect } = options;
     if (DEBUG) {
       assertFinite(min, 'frameBounds min', 0, 3);
       assertFinite(max, 'frameBounds max', 0, 3);

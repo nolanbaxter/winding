@@ -21,6 +21,7 @@ import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { clampSampler } from '../rhi/texture.js';
+import { checkOptions } from '../core/options.js';
 
 const BLACK = { r: 0, g: 0, b: 0, a: 0 };
 
@@ -33,7 +34,9 @@ export const DOF_SAMPLES = 64;
  * front -- and the largest disc the far distance reaches, which sizes the
  * gather. Returns { scale, largest }.
  */
-export function lensCoefficients({ focusDistance, fStop, sensorHeight = 0.024 }, fovY, screenHeight) {
+export function lensCoefficients(dof, fovY, screenHeight) {
+  checkOptions('dof', dof);
+  const { focusDistance, fStop, sensorHeight = 0.024 } = dof;
   if (!(focusDistance > 0 && Number.isFinite(focusDistance))) throw new Error(`dof: focusDistance must be positive, got ${focusDistance}`);
   if (!(fStop > 0 && Number.isFinite(fStop))) throw new Error(`dof: fStop must be positive, got ${fStop}`);
   if (!(sensorHeight > 0 && Number.isFinite(sensorHeight))) throw new Error(`dof: sensorHeight must be positive, got ${sensorHeight}`);

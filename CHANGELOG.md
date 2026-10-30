@@ -12,12 +12,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **[Hello world, side by side](docs/SIDE-BY-SIDE.md)**: the same small program in Winding,
   Three.js, Babylon.js and PlayCanvas, each run to check it works, with the engine versions it was
   written against.
+- **A misspelt option says so.** An option a call doesn't take used to be dropped without a word:
+  `castShadows` for `castShadow` turned no shadows off and said nothing. Now the console says it
+  once, with the nearest name the call does take --
+  `addLight: unknown option 'castShadows' (did you mean 'castShadow'?); it is ignored` -- and the
+  call goes ahead as before. Every call that takes options does this, and so do the settings
+  objects (`fog`, `dof`, `autoExposure`, `grading`). A warning, not an error, so code that runs
+  today keeps running.
 
 ### Changed
 
 - **The logo** is redrawn: each of the four sails is folded, one half a shade darker, and the hub
   is a pin with a rim and a glint of light. The same sails in the same colours, so it reads as the
   same mark. The wordmarks, the favicon, the social card and the README's effects tile follow it.
+- **Adding or removing an object rewrites only what it changed.** It used to rewrite every
+  object's draw data and upload every batch table whole. Now only the slot it took is rewritten,
+  or the slot a removal moved the last object into, and a table sends only its entries that
+  changed. In a town of 900 buildings, each its own mesh, a frame that adds or removes one
+  uploaded 1.1 MB and now uploads 141 KB, and its CPU time fell from a median of about 2.9 ms to
+  2.0–2.8 ms, with the worst case down from 6.0 to 4.0. What it saves grows with the number of
+  distinct meshes. Each object's "was it visible last frame" flag now survives the change too,
+  so occlusion culling carries on through it. A scene with skins or morphs still rewrites
+  everything, since their palette and weight offsets can shift for objects that didn't change.
 
 ## [1.7.0] - 2026-10-09
 

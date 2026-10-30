@@ -74,6 +74,37 @@ export function addToRuns(runs, i, mergeGap) {
   else runs.push(i, i);
 }
 
+/**
+ * Upload the entries of a u32 table that differ from what the GPU holds, and
+ * note them as held. Entry k is `next[k * stride]`, at byte k * stride * 4 of
+ * `buffer`; `held[k]` is what was last uploaded there. Changed entries go in
+ * runs merged as addToRuns merges them, so a rebuild after one object came or
+ * went sends its handful of entries, not the table -- the per-batch uniforms
+ * alone were 786 KB a rebuild in a town of 900 buildings.
+ *
+ * Returns the bytes sent. `all` sends everything: a buffer just made holds
+ * nothing `held` describes.
+ */
+export function writeChanged(queue, buffer, next, held, count, stride = 1, all = false) {
+  const gap = Math.floor(WRITE_CALL_BYTES / (stride * 4));
+  let first = -1, last = -1, bytes = 0;
+  const flush = () => {
+    if (first < 0) return;
+    const length = (last - first) * stride + 1;
+    queue.writeBuffer(buffer, first * stride * 4, next, first * stride, length);
+    bytes += length * 4;
+  };
+  for (let k = 0; k < count; k++) {
+    const value = next[k * stride];
+    if (!all && held[k] === value) continue;
+    held[k] = value;
+    if (first >= 0 && k - last - 1 <= gap) last = k;
+    else { flush(); first = last = k; }
+  }
+  flush();
+  return bytes;
+}
+
 
 /**
  * Cull phases, each writing its own slice of the indirect arguments and the
@@ -407,6 +438,7 @@ export class GpuDriven {
     // index the visible list absolutely, by firstInstance: a base of 0 for the
     // camera's, and the shadow slice's base for the shadow pass's.
     this.batchStaging = new ArrayBuffer(this.alignment * (this.batchCapacity * CULL_PHASES + 2));
+    this.batchStagingU32 = new Uint32Array(this.batchStaging);
     this.batchBuffer = createBuffer(rhi, {
       label: 'batch-info',
       size: this.batchStaging.byteLength,
@@ -452,6 +484,19 @@ export class GpuDriven {
     this.stats = { batches: 0, items: 0, uploaded: 0, transparent: 0 };
     /** This frame's changed runs, as [first, last, first, last, ...]; reused. */
     this._runs = [];
+    /**
+     * What each batch table last uploaded, entry by entry, so a rebuild sends
+     * only what changed (writeChanged). Not valid until a first full upload,
+     * and not after a grow: a new buffer holds none of it.
+     */
+    this._held = {
+      itemBatch: new Uint32Array(capacity), batchOrder: new Uint32Array(capacity),
+      batchFirst: new Uint32Array(this.batchCapacity), batchBase: new Uint32Array(this.batchCapacity * CULL_PHASES + 2),
+    };
+    this._heldValid = false;
+    /** The renderables a rebuild found changed (Scene.renderablesTouched), to rewrite next update; marked by slot. */
+    this._touched = [];
+    this._touchedMark = new Uint8Array(capacity);
   }
 
   async _init() {
@@ -545,6 +590,11 @@ export class GpuDriven {
     this.batchOrder = new Uint32Array(capacity);
     this.transparentItems = new Uint32Array(capacity);
     this._zeroFlags = new Uint32Array(capacity);
+    this._held.itemBatch = new Uint32Array(capacity);
+    this._held.batchOrder = new Uint32Array(capacity);
+    this._heldValid = false;
+    this._touchedMark = new Uint8Array(capacity);
+    this._touched.length = 0;
 
     for (const buffer of [
       this.drawDataBuffer, this.boundsBuffer, this.itemBatchBuffer,
@@ -603,6 +653,10 @@ export class GpuDriven {
     this.indirectData = new Uint32Array(capacity * CULL_PHASES * (INDIRECT_BYTES / 4));
     // One slot per (phase, batch), plus the blended draws' two.
     this.batchStaging = new ArrayBuffer(this.alignment * (capacity * CULL_PHASES + 2));
+    this.batchStagingU32 = new Uint32Array(this.batchStaging);
+    this._held.batchFirst = new Uint32Array(capacity);
+    this._held.batchBase = new Uint32Array(capacity * CULL_PHASES + 2);
+    this._heldValid = false;
 
     this.batchFirstBuffer.destroy();
     this.indirectBuffer.destroy();
@@ -648,6 +702,23 @@ export class GpuDriven {
     // start has to bring these with it. Without this the scene's own growth
     // would just relocate the failure into a writeBuffer validation error.
     if (count > this.capacity) this._grow(count);
+
+    // Which renderables changed since the batches were last built from this
+    // scene: those are rewritten at the next update and the rest kept. Anything
+    // else rewrites them all -- another scene in between, a grow, or skins and
+    // morphs, whose palette and weight offsets can shift for renderables that
+    // did not change at all.
+    const touched = scene.renderablesTouched;
+    scene.renderablesTouched = [];
+    const incremental = touched !== null && scene.id === this.sceneId && !this._needsFullUpload
+      && scene.skins.length === 0 && scene.morphs.length === 0;
+    if (incremental) {
+      for (const i of touched) {
+        if (i < count && this._touchedMark[i] === 0) { this._touchedMark[i] = 1; this._touched.push(i); }
+      }
+    } else {
+      this._needsFullUpload = true;
+    }
 
     // Key on the primitive object plus material id. The primitive is a stable
     // reference from the asset, so identity is the right comparison.
@@ -742,38 +813,38 @@ export class GpuDriven {
         const slot = phase * this.batchCapacity + b;
         // The visible list is still renderable-sized -- only the slot table is
         // per batch -- so the base it stores is a VISIBLE index.
-        new Uint32Array(this.batchStaging, slot * this.alignment, 1)[0] =
-          phase * this.capacity + this.batchFirst[b];
+        this.batchStagingU32[slot * this.alignment / 4] = phase * this.capacity + this.batchFirst[b];
       }
     }
     // The transparent draws' base, always 0: they address the visible list
     // through firstInstance, which a direct draw may set freely.
     this.transparentBatchSlot = this.batchCapacity * CULL_PHASES;
-    new Uint32Array(this.batchStaging, this.transparentBatchSlot * this.alignment, 1)[0] = 0;
+    this.batchStagingU32[this.transparentBatchSlot * this.alignment / 4] = 0;
     // With LOD, the shadow pass reads the shadow slice, not the static order,
     // so the blended casters are copied into that slice's tail -- past every
     // slot the shadow phase can emit to, as the camera's are.
-    new Uint32Array(this.batchStaging, (this.transparentBatchSlot + 1) * this.alignment, 1)[0] =
-      CULL_SHADOW * this.capacity;
+    this.batchStagingU32[(this.transparentBatchSlot + 1) * this.alignment / 4] = CULL_SHADOW * this.capacity;
     /** Per blended item, in transparentItems order: whether its LOD level shows this frame. */
     if (!(this.casterSelected?.length >= this.transparentCount)) this.casterSelected = new Uint8Array(this.capacity);
     this.casterSelected.fill(1);
 
     const queue = this.rhi.queue;
-    queue.writeBuffer(this.itemBatchBuffer, 0, this.itemBatch, 0, count);
-    queue.writeBuffer(this.batchFirstBuffer, 0, this.batchFirst, 0, Math.max(this.batchCount, 1));
-    queue.writeBuffer(this.batchOrderBuffer, 0, this.batchOrder, 0, Math.max(this.opaqueCount + this.transparentCount, 1));
+    const all = !this._heldValid, held = this._held;
+    writeChanged(queue, this.itemBatchBuffer, this.itemBatch, held.itemBatch, count, 1, all);
+    writeChanged(queue, this.batchFirstBuffer, this.batchFirst, held.batchFirst, this.batchCount, 1, all);
+    writeChanged(queue, this.batchOrderBuffer, this.batchOrder, held.batchOrder, this.opaqueCount + this.transparentCount, 1, all);
     if (this.hasLod && this.transparentCount > 0) {
       queue.writeBuffer(this.visibleBuffer, (CULL_SHADOW * this.capacity + this.opaqueCount) * 4,
         this.transparentItems, 0, this.transparentCount);
     }
-    queue.writeBuffer(this.batchBuffer, 0, this.batchStaging);
-    // Item indices have just been reassigned, so last frame's flags describe
-    // whatever used to occupy those slots. Starting from zero costs one frame
-    // in which everything is found by the late phase, which is correct.
-    queue.writeBuffer(this.visibleFlagsBuffer, 0, this._zeroFlags, 0, Math.max(count, 1));
-
-    this._needsFullUpload = true;
+    writeChanged(queue, this.batchBuffer, this.batchStagingU32, held.batchBase, this.batchCapacity * CULL_PHASES + 2, this.alignment / 4, all);
+    this._heldValid = true;
+    // A slot whose renderable changed keeps the flag of the one before it. That
+    // is safe: the early phase draws an item only if it is in view, and the late
+    // phase skips exactly what the early one drew, so a wrong flag draws an item
+    // a phase early or late, never twice or not at all. Reset only when every
+    // slot may have changed, which costs a frame without occlusion culling.
+    if (this._needsFullUpload) queue.writeBuffer(this.visibleFlagsBuffer, 0, this._zeroFlags, 0, Math.max(count, 1));
     this.sceneId = scene.id;
     this.sceneRevision = scene.revision;
     this.stats.batches = this.batchCount;
@@ -821,16 +892,17 @@ export class GpuDriven {
     // Nothing moved and no skin or morph changed a box (`deformed`): there is
     // nothing to rewrite, and the scan to find that out was 0.8 ms a frame at
     // 100,000 renderables.
-    const scan = full || scene.transforms.movedPending || deformed;
-    // Only what moved, when that is listed and nothing deformed.
-    const listed = !full && items !== null && !deformed;
+    const touched = this._touched.length > 0 ? this._touchedMark : null;
+    const scan = full || scene.transforms.movedPending || deformed || touched !== null;
+    // Only what moved, when that is listed, nothing deformed, and no rebuild left renderables to rewrite.
+    const listed = !full && items !== null && !deformed && touched === null;
     const n = listed ? items.length : count;
     for (let k = 0; scan && k < n; k++) {
       const i = listed ? items[k] : k;
       // Skinned and morphed boxes come from joints and weights, which change
       // without the mesh's own node moving -- the usual rig. Gated on the node
       // alone, a character walked off its box and was culled where it stood.
-      if (!listed && !full && moved[scene.renderableMatrixSlot[i]] === 0
+      if (!listed && !full && moved[scene.renderableMatrixSlot[i]] === 0 && touched?.[i] !== 1
         && (!deformed || (scene.renderableSkin[i] < 0 && scene.renderableMorph[i] < 0))) continue;
 
       const drawFloat = i * (DRAW_DATA_BYTES / 4);
@@ -893,6 +965,8 @@ export class GpuDriven {
       addToRuns(runs, i, mergeGap);
     }
     this._needsFullUpload = false;
+    for (const i of this._touched) this._touchedMark[i] = 0;
+    this._touched.length = 0;
     let uploaded = 0;
     for (let r = 0; r < runs.length; r += 2) uploaded += runs[r + 1] - runs[r] + 1;
     this.stats.uploaded = uploaded;

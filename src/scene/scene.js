@@ -27,6 +27,7 @@ import {
 } from '../core/math/mat4.js';
 import { quatCreate, quatLookAlong } from '../core/math/quat.js';
 import { grownCapacity, growArray } from '../core/grow.js';
+import { checkOptions } from '../core/options.js';
 
 const DEFAULT_CAPACITY = 4096;
 
@@ -493,7 +494,9 @@ export function spriteRect(record) {
  *
  * `count` stops short of a last row that is not full; `first` skips frames.
  */
-export function spriteSheet({ columns, rows = 1, count = columns * rows, first = 0 } = {}) {
+export function spriteSheet(options = {}) {
+  checkOptions('spriteSheet', options);
+  const { columns, rows = 1, count = columns * rows, first = 0 } = options;
   if (!(Number.isInteger(columns) && columns > 0 && Number.isInteger(rows) && rows > 0)) {
     throw new Error(`spriteSheet: columns and rows must be whole numbers above zero, got ${columns} x ${rows}`);
   }
@@ -575,7 +578,9 @@ function relativeTRS(finest, level) {
 }
 
 export class Scene {
-  constructor({ capacity = DEFAULT_CAPACITY, renderableCapacity = capacity, lightCapacity = 256 } = {}) {
+  constructor(options = {}) {
+    checkOptions('Scene', options);
+    const { capacity = DEFAULT_CAPACITY, renderableCapacity = capacity, lightCapacity = 256 } = options;
     /** Unique for the life of the page. See nextSceneId. */
     this.id = nextSceneId++;
     this.capacity = capacity;
@@ -596,6 +601,14 @@ export class Scene {
      * entry -- it is new, so it moved, and its box is recorded as any mover's.
      */
     this.removedBoxes = new BoxList();
+    /**
+     * The renderable slots whose contents changed since the renderer last
+     * rebuilt its batches: one added, or one a removal moved the last
+     * renderable into. The renderer rewrites these and keeps the rest. null
+     * once there are more entries than slots, which says "all of them" as
+     * well and keeps a scene that is changed but never drawn from growing it.
+     */
+    this.renderablesTouched = [];
     this.renderableEntity = new Uint32Array(renderableCapacity);
     /** Which transform slot each renderable reads its world matrix from. */
     this.renderableMatrixSlot = new Uint32Array(renderableCapacity);
@@ -779,7 +792,9 @@ export class Scene {
    * upload, pipeline compilation -- already happened in engine.load(). Adding
    * to a scene must never be the thing that stalls a frame.
    */
-  add(asset, { parent = null } = {}) {
+  add(asset, options = {}) {
+    checkOptions('add', options);
+    const { parent = null } = options;
     this.changes++;
     // Its buffers and textures are destroyed; drawing it would fail on the GPU.
     if (asset.unloaded) throw new Error('Scene.add: this asset was unloaded; load it again');
@@ -979,6 +994,14 @@ export class Scene {
     return new Node(this, handle);
   }
 
+  /** Note slot `i` in renderablesTouched, or give up listing past one entry a slot. */
+  _touchRenderable(i) {
+    const touched = this.renderablesTouched;
+    if (touched === null) return;
+    if (touched.length >= this.renderableCount) this.renderablesTouched = null;
+    else touched.push(i);
+  }
+
   /** `lod`: { slot, sphere, low, high } for a level of an LOD group; see add(). */
   _addRenderable(entity, primitive, skin = -1, morph = -1, lod = null) {
     if (this.renderableCount >= this.renderableCapacity) {
@@ -986,6 +1009,7 @@ export class Scene {
     }
     const i = this.renderableCount++;
     this.revision = nextRevision++;
+    this._touchRenderable(i);
 
     this.renderableEntity[i] = entity;
     this.renderableMatrixSlot[i] = handleIndex(entity);
@@ -1074,7 +1098,9 @@ export class Scene {
   }
 
   /** An empty node, for grouping things you position together. */
-  createNode({ parent = null } = {}, caller = 'createNode') {
+  createNode(options = {}, caller = 'createNode') {
+    if (caller === 'createNode') checkOptions('createNode', options);
+    const { parent = null } = options;
     const parentEntity = this._parentOf(caller, parent);
     const entity = this.entities.alloc();
     this.transforms.add(entity, { parent: parentEntity });
@@ -1151,6 +1177,7 @@ export class Scene {
         // the wrong thing.
         this.worldMin.copyWithin(i * 3, last * 3, last * 3 + 3);
         this.worldMax.copyWithin(i * 3, last * 3, last * 3 + 3);
+        this._touchRenderable(i);
       }
       this.renderablePrimitive[last] = undefined;
       this.renderableMorphExtent[last] = null;
@@ -1286,7 +1313,9 @@ export class Scene {
    *
    * Unlit: the colour is the colour, lit by nothing. Scaled by the node.
    */
-  addSprite({ texture, position = [0, 0, 0], parent = null, ...options } = {}) {
+  addSprite(given = {}) {
+    checkOptions('addSprite', given);
+    const { texture, position = [0, 0, 0], parent = null, ...options } = given;
     this.changes++;
     const record = spriteRecord({ texture, ...options });
     record.added = this._added++;
@@ -1313,6 +1342,7 @@ export class Scene {
 
   /** Change a sprite's options; the same names addSprite takes. */
   setSprite(node, changes) {
+    checkOptions('setSprite', changes);
     this.changes++;
     const current = this.sprites.get(node.entity);
     if (current === undefined) throw new Error('setSprite: this node has no sprite');
@@ -1398,7 +1428,9 @@ export class Scene {
    *
    * Placed, turned (node.setAngle) and scaled by its node. A 3D camera doesn't draw it.
    */
-  addShape({ position = [0, 0, 0], parent = null, ...options } = {}) {
+  addShape(given = {}) {
+    checkOptions('addShape', given);
+    const { position = [0, 0, 0], parent = null, ...options } = given;
     this.changes++;
     const record = shapeRecord(options);
     record.added = this._added++;
@@ -1411,6 +1443,7 @@ export class Scene {
 
   /** Change a shape's options; the same names addShape takes. */
   setShape(node, changes) {
+    checkOptions('setShape', changes);
     this.changes++;
     const current = this.shapes.get(node.entity);
     if (current === undefined) throw new Error('setShape: this node has no shape');
@@ -1439,7 +1472,9 @@ export class Scene {
    *
    * Placed, turned and scaled by its node. A 3D camera doesn't draw it.
    */
-  addPath({ position = [0, 0, 0], parent = null, ...options } = {}) {
+  addPath(given = {}) {
+    checkOptions('addPath', given);
+    const { position = [0, 0, 0], parent = null, ...options } = given;
     this.changes++;
     this.spriteOrder++;
     const record = pathRecord(options);
@@ -1452,6 +1487,7 @@ export class Scene {
 
   /** Change a path's options; the same names addPath takes. */
   setPath(node, changes) {
+    checkOptions('setPath', changes);
     this.changes++;
     const current = this.paths.get(node.entity);
     if (current === undefined) throw new Error('setPath: this node has no path');
@@ -1498,7 +1534,9 @@ export class Scene {
    * Particles live in world space once born: a moving emitter leaves a trail.
    * Advance them with scene.advance(dt) -- engine.run does.
    */
-  addEmitter({ position = [0, 0, 0], parent = null, ...options } = {}) {
+  addEmitter(given = {}) {
+    checkOptions('addEmitter', given);
+    const { position = [0, 0, 0], parent = null, ...options } = given;
     this.changes++;
     this.spriteOrder++;
     const record = emitterRecord(options);
@@ -1511,6 +1549,7 @@ export class Scene {
 
   /** Change an emitter's options; the same names addEmitter takes. Its particles live on. */
   setEmitter(node, changes) {
+    checkOptions('setEmitter', changes);
     this.changes++;
     const current = this.emitters.get(node.entity);
     if (current === undefined) throw new Error('setEmitter: this node has no emitter');
@@ -1569,7 +1608,9 @@ export class Scene {
    * Lit by nothing: drawn as the capture saw it, hidden by geometry in
    * front of it, and casting no shadow. See render/splats.js.
    */
-  addSplats({ splats, position = [0, 0, 0], parent = null } = {}) {
+  addSplats(options = {}) {
+    checkOptions('addSplats', options);
+    const { splats, position = [0, 0, 0], parent = null } = options;
     if (!(splats?.centers !== undefined && Number.isInteger(splats.count))) {
       throw new Error('addSplats: splats must be what engine.loadSplats returned');
     }
@@ -1599,7 +1640,9 @@ export class Scene {
    *   lineHeight  in ems; the font's own by default
    *   facing      'camera' (by default), 'upright' or 'plane', as for sprites
    */
-  addText({ position = [0, 0, 0], parent = null, ...options } = {}) {
+  addText(given = {}) {
+    checkOptions('addText', given);
+    const { position = [0, 0, 0], parent = null, ...options } = given;
     this.changes++;
     const record = textRecord(options);
     record.added = this._added++;
@@ -1612,6 +1655,7 @@ export class Scene {
 
   /** Change a text's options -- its string, say; the same names addText takes. */
   setText(node, changes) {
+    checkOptions('setText', changes);
     this.changes++;
     const current = this.texts.get(node.entity);
     if (current === undefined) throw new Error('setText: this node has no text');
@@ -1651,7 +1695,9 @@ export class Scene {
    * shadowed and fogged as the surface is. A surface facing away from it is
    * not painted. Decals added later paint over earlier ones.
    */
-  addDecal({ position = [0, 0, 0], parent = null, ...options } = {}) {
+  addDecal(given = {}) {
+    checkOptions('addDecal', given);
+    const { position = [0, 0, 0], parent = null, ...options } = given;
     this.changes++;
     const record = decalRecord(options);
     const node = this.createNode({ parent }, 'addDecal');
@@ -1662,6 +1708,7 @@ export class Scene {
 
   /** Change a decal's options; the same names addDecal takes. */
   setDecal(node, changes) {
+    checkOptions('setDecal', changes);
     this.changes++;
     const current = this.decals.get(node.entity);
     if (current === undefined) throw new Error('setDecal: this node has no decal');
@@ -1696,7 +1743,9 @@ export class Scene {
    *
    * Not drawn by a 3D camera.
    */
-  addTilemap({ position = [0, 0, 0], parent = null, ...options } = {}) {
+  addTilemap(given = {}) {
+    checkOptions('addTilemap', given);
+    const { position = [0, 0, 0], parent = null, ...options } = given;
     this.changes++;
     this.spriteOrder++;
     const record = tilemapRecord(options);
@@ -1712,6 +1761,7 @@ export class Scene {
    * kept unless given -- and must be, if the map changes size.
    */
   setTilemap(node, changes) {
+    checkOptions('setTilemap', changes);
     this.changes++;
     const current = this.tilemaps.get(node.entity);
     if (current === undefined) throw new Error('setTilemap: this node has no tilemap');
@@ -1782,7 +1832,9 @@ export class Scene {
    * turn or scale it. Moving the node moves it, and it shows nothing again
    * until it is captured where it now is. Removed like any node.
    */
-  addProbe({ position = [0, 0, 0], parent = null, ...options } = {}) {
+  addProbe(given = {}) {
+    checkOptions('addProbe', given);
+    const { position = [0, 0, 0], parent = null, ...options } = given;
     this.changes++;
     const node = this.createNode({ parent }, 'addProbe');
     node.setPosition(...position);
@@ -1795,6 +1847,7 @@ export class Scene {
 
   /** Change a probe's options; the same names addProbe takes. It must be captured again. */
   setProbe(node, changes) {
+    checkOptions('setProbe', changes);
     const probe = this._probe('setProbe', node);
     this.changes++;
     const next = checked('setProbe', () => probeRecord({ size: probe.size, fade: probe.fade, ...changes }));
@@ -1858,19 +1911,21 @@ export class Scene {
    * tested against every cluster in the scene -- the radius is what makes
    * clustering possible at all, not a shortcut.
    */
-  addLight({
-    position = [0, 0, 0],
-    color = [1, 1, 1],
-    intensity = 1,
-    radius = 10,
-    direction = null,
-    type = direction ? 'spot' : 'point',
-    innerAngle = 0.2,
-    outerAngle = 0.5,
-    parent = null,
-    castShadow,
-    size = 0,
-  } = {}) {
+  addLight(options = {}) {
+    checkOptions('addLight', options);
+    const {
+      position = [0, 0, 0],
+      color = [1, 1, 1],
+      intensity = 1,
+      radius = 10,
+      direction = null,
+      type = direction ? 'spot' : 'point',
+      innerAngle = 0.2,
+      outerAngle = 0.5,
+      parent = null,
+      castShadow,
+      size = 0,
+    } = options;
     this.changes++;
     if (type !== 'point' && type !== 'spot' && type !== 'directional') {
       throw new Error(`addLight: type must be point, spot or directional, got ${type}`);
@@ -1899,6 +1954,7 @@ export class Scene {
    * given changing. Move or aim it through its node.
    */
   setLight(node, changes) {
+    checkOptions('setLight', changes);
     const current = this.lightOf(node);
     if (current === null) throw new Error('setLight: this node is not a light');
     for (const key of ['type', 'position', 'direction', 'parent']) {
@@ -2299,7 +2355,9 @@ export class Scene {
    * @param direction vec3, world space; normalized, or distances come back scaled
    * @returns `{ node, renderable, distance }`, or null
    */
-  raycast(origin, direction, { maxDistance = Infinity } = {}) {
+  raycast(origin, direction, options = {}) {
+    checkOptions('raycast', options);
+    const { maxDistance = Infinity } = options;
     // Unconditional, not DEBUG-only: this is a trust boundary, and a ray with a
     // NaN component is not merely wrong, it is INVISIBLY wrong. The slab test
     // derives no constraint from a NaN axis, so such a ray "hits" the first

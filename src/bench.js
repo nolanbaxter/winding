@@ -30,6 +30,8 @@
 // than most optimizations change them. Compare shares within a run, or measure
 // before and after in the same page, alternating.
 
+import { checkOptions } from './core/options.js';
+
 const now = () => (globalThis.performance?.now?.() ?? Date.now());
 
 export class Benchmark {
@@ -95,7 +97,9 @@ export class Benchmark {
    * `update(i)` runs before each frame, untimed -- animate the camera or the
    * scene there, so the benchmark sees work that changes.
    */
-  async run(scene, camera, { frames = 300, warmup = 30, update = null } = {}) {
+  async run(scene, camera, options = {}) {
+    checkOptions('benchmark.run', options);
+    const { frames = 300, warmup = 30, update = null } = options;
     const engine = this.engine;
     const queue = engine.gpu.device.queue;
 

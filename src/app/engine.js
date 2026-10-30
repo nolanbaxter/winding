@@ -44,6 +44,7 @@ import { JobSystem, JOB_COMPOSE_TRANSFORMS } from '../core/jobs.js';
 import { composeRange } from '../scene/transformJob.js';
 import { sharedMemoryAvailable } from '../core/shared.js';
 import { TAA_SETTLE } from '../render/taa.js';
+import { checkOptions } from '../core/options.js';
 
 
 /**
@@ -127,6 +128,9 @@ export class Winding {
    * lost.
    */
   static async create(canvas, options = {}) {
+    checkOptions('create', options);
+    checkOptions('create', options.shadows, 'shadows.', 'create shadows');
+    checkOptions('create', options.post, 'post.', 'create post');
     // This used to be accepted as "an Environment to share". It could never
     // work: its cubemaps belong to the device that baked them, and every
     // create() makes a new device, so every frame was a validation error.
@@ -240,11 +244,13 @@ export class Winding {
 
   createScene(options = {}) {
     this._assertAlive('createScene');
+    checkOptions('createScene', options);
     const environment = options.environment ?? this.environment;
     if (environment.rhi !== this.gpu) {
       throw new Error('createScene: that Environment belongs to another engine');
     }
-    const scene = new Scene(options);
+    const { capacity, renderableCapacity, lightCapacity } = options;
+    const scene = new Scene({ capacity, renderableCapacity, lightCapacity });
     scene.environment = environment;
     return scene;
   }
@@ -262,7 +268,9 @@ export class Winding {
    * CSS's image-rendering: pixelated draws it.
    * Returns { texture, view, width, height, pixelated }; engine.unload() it when done.
    */
-  async loadTexture(source, { srgb = true, pixelated = false, label = 'texture', fetch = globalThis.fetch } = {}) {
+  async loadTexture(source, options = {}) {
+    checkOptions('loadTexture', options);
+    const { srgb = true, pixelated = false, label = 'texture', fetch = globalThis.fetch } = options;
     this._assertAlive('loadTexture');
     let image = source;
     if (typeof source === 'string') {
@@ -313,7 +321,9 @@ export class Winding {
    * `source` is a URL or the file's text. `fetch` downloads a URL, as every
    * loader's does.
    */
-  async loadLUT(source, { fetch = globalThis.fetch } = {}) {
+  async loadLUT(source, options = {}) {
+    checkOptions('loadLUT', options);
+    const { fetch = globalThis.fetch } = options;
     this._assertAlive('loadLUT');
     let text = source;
     if (!/LUT_3D_SIZE/i.test(source)) {
@@ -331,6 +341,7 @@ export class Winding {
   }
 
   set grading(value) {
+    checkOptions('grading', value);
     this.renderer.post.grading = value ?? null;
   }
 
@@ -347,7 +358,8 @@ export class Winding {
    */
   async loadEnvironment(source, options = {}) {
     this._assertAlive('loadEnvironment');
-    const { fetch: fetchImpl = globalThis.fetch, ...environmentOptions } = options;
+    checkOptions('loadEnvironment', options);
+    const { fetch: fetchImpl = globalThis.fetch, size, irradianceSize, prefilterMips, label } = options;
     let bytes = source;
     if (typeof source === 'string') {
       const response = await fetchImpl(source);
@@ -358,7 +370,7 @@ export class Winding {
       bytes = new Uint8Array(source);
     }
     const map = parseHDR(bytes, { maxDimension: this.gpu.limits.maxTextureDimension2D });
-    return new Environment(this.gpu, { ...environmentOptions, map });
+    return new Environment(this.gpu, { size, irradianceSize, prefilterMips, label, map });
   }
 
   /**
@@ -373,7 +385,9 @@ export class Winding {
    * splats, and the box around their centres. engine.unload() it when no
    * scene draws it any more.
    */
-  async loadSplats(source, { fetch = globalThis.fetch } = {}) {
+  async loadSplats(source, options = {}) {
+    checkOptions('loadSplats', options);
+    const { fetch = globalThis.fetch } = options;
     this._assertAlive('loadSplats');
     let bytes = source;
     if (typeof source === 'string') {
@@ -409,6 +423,7 @@ export class Winding {
    * or `credentials: 'omit'`. Bytes with no `baseURL` can reach no URL at all.
    */
   async load(source, options = {}) {
+    checkOptions('load', options);
     const { retainGeometry = false } = options;
     this._assertAlive('load');
     let bytes = source;
@@ -689,6 +704,7 @@ export class Winding {
    */
   run(scene, camera, options = {}) {
     this._assertAlive('run');
+    checkOptions('run', options);
     if (!(scene instanceof Scene)) {
       throw new Error('run: takes (scene, camera, { update, frame, hud }), the scene first, from createScene()');
     }
@@ -862,6 +878,7 @@ export class Winding {
    */
   renderFrame(scene, camera, options = {}) {
     this._assertAlive('renderFrame');
+    checkOptions('renderFrame', options);
     const { target = null } = options;
     if (target !== null && !(target instanceof RenderTarget && target.rhi === this.gpu)) {
       throw new Error("renderFrame: target must be one this engine's createTarget made");
@@ -884,7 +901,9 @@ export class Winding {
    *   hud.addSprite({ texture: map, position: [16, 16], pivot: [0, 0] });
    *   engine.renderFrame(world, overhead, { target: map });   // whenever it changes
    */
-  async createTarget({ size, pixelated = false, label = 'target' } = {}) {
+  async createTarget(options = {}) {
+    checkOptions('createTarget', options);
+    const { size, pixelated = false, label = 'target' } = options;
     this._assertAlive('createTarget');
     const most = this.gpu.limits.maxTextureDimension2D;
     const [width, height] = size ?? [];

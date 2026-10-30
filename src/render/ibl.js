@@ -21,6 +21,7 @@ import { compileShaderSync } from '../rhi/shader.js';
 import { sharedPipelines } from '../rhi/pipeline.js';
 import { createPipelineLayout } from '../rhi/bindgroups.js';
 import { createBuffer } from '../rhi/buffer.js';
+import { checkOptions } from '../core/options.js';
 
 const FACE_COUNT = 6;
 const PARAMS_BYTES = 16;   // face:u32, roughness:f32, sampleCount:u32, envSize:f32
@@ -378,9 +379,10 @@ fn fsPrefilter(v : VertexOut) -> @location(0) vec4<f32> {
  * gives is the same.
  */
 export class Environment {
-  constructor(rhi, {
-    size, irradianceSize = 32, prefilterMips = 6, label = 'env', sky = null, map = null, capture = false,
-  } = {}) {
+  constructor(rhi, options = {}) {
+    checkOptions('Environment', options);
+    checkOptions('Environment', options.sky, 'sky.', 'Environment sky');
+    let { size, irradianceSize = 32, prefilterMips = 6, label = 'env', sky = null, map = null, capture = false } = options;
     this.rhi = rhi;
     const max = rhi.limits.maxTextureDimension2D;
     if (map !== null) {
