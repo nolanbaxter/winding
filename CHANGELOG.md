@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time a frame asks for them, and until then frames draw without them, so they appeared a few
   frames into play. A scene with decals, AO, TAA and particles started 17 pipeline builds in its
   first frames; after `prepare`, none, and AO draws from the first frame.
+- **[`engine.createMesh(options)`](docs/API.md#engine-createmesh)** makes a mesh from arrays --
+  positions, and optionally indices, normals, UVs and vertex colours, with a colour, metalness and
+  roughness -- for terrain, generated maps and props built in code. Without normals it is shaded
+  flat, the low-poly look. It comes back as a model, as `load` does: culled, merged, shadowed and
+  rebuilt after a lost GPU device like any loaded file.
 - **[`node.setVisible(visible)`](docs/API.md#node-setvisible)** shows or hides a node and everything
   under it -- meshes and their shadows, sprites, text, shapes, paths, tilemaps, emitters, decals,
   splats and lights -- and [`node.visible`](docs/API.md#node-visible) reads it back. A hidden node

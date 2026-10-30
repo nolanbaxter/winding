@@ -36,6 +36,7 @@ import { parseCube, uploadLUT } from '../render/grading.js';
 import { packSkinVertices } from '../render/vertex.js';
 import { packMorphCountStride } from '../render/morph.js';
 import { Scene } from '../scene/scene.js';
+import { meshGLB } from '../scene/gltf/write.js';
 import { Camera } from '../scene/camera.js';
 import { Camera2D } from '../scene/camera2d.js';
 import { loadGLTF, DEFAULT_MATERIAL } from '../scene/gltf/parse.js';
@@ -715,6 +716,18 @@ export class Winding {
       if (primitive.morph) this.renderer.morph.writeAt(built.morphBase, primitive.morph.deltas);
     }));
     return into;
+  }
+
+  /**
+   * A mesh made from arrays: terrain from a noise field, a map from a
+   * generator, a prop built in code. Returns a model, as load() does, for
+   * scene.add(). See docs/API.md for what each array holds.
+   */
+  async createMesh(options = {}) {
+    this._assertAlive('createMesh');
+    checkOptions('createMesh', options);
+    checkOptions('createMesh', options.material, 'material.', 'createMesh material');
+    return this.load(meshGLB(options));
   }
 
   /** glTF lets a primitive have no material; the spec's default is a white dielectric. */

@@ -22,6 +22,19 @@ export async function threeD(): Promise<void> {
 
   const camera = new Camera({ fovY: 0.8 });
   camera.position.set([0, 2, 6]);
+
+  // A mesh from arrays, hidden and shown, a scene prepared, a device lost on purpose.
+  const terrain = await engine.createMesh({
+    positions: [0, 0, 0, 1, 0, 0, 0, 0, 1], colors: [1, 0, 0, 0, 1, 0, 0, 0, 1], material: { roughness: 0.8 },
+  });
+  const ground: Node = scene.add(terrain).setVisible(false);
+  const shown: boolean = ground.visible;
+  void shown;
+  await engine.prepare(scene, camera);
+  engine.gpu.loseForTest();
+  // @ts-expect-error -- a mesh needs its positions
+  await engine.createMesh({ indices: [0, 1, 2] });
+
   const orbit = new OrbitController(camera, canvas, { distance: 4, target: [0, 1, 0] });
   orbit.desired.yaw += Math.PI / 2;
   const stats = new StatsOverlay(engine);

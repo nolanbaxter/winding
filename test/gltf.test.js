@@ -19,6 +19,7 @@ import {
 } from '../src/scene/gltf/images.js';
 import { TransformStore } from '../src/scene/transform.js';
 import { unweldAndComputeFlatNormals, generateTangents } from '../src/scene/gltf/tangents.js';
+import { meshGLB } from '../src/scene/gltf/write.js';
 import { decodeAttributes, decodeTriangles, decodeIndexSequence, FILTERS } from '../src/scene/gltf/meshopt.js';
 
 let passed = 0;
@@ -779,6 +780,66 @@ await atest('a mesh with no UVs still produces a finite tangent', async () => {
 });
 
 // ------------------------------------------------------------------ nodes
+
+console.log('\nmeshes made from arrays (createMesh)');
+
+await atest('a mesh from arrays reads back as the file it was written to', async () => {
+  // A quad, two triangles over four vertices, coloured at each corner, with UVs.
+  const model = await loadGLTF(meshGLB({
+    positions: [0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1],
+    indices: [0, 2, 1, 0, 3, 2],
+    normals: [0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0],
+    uvs: [0, 0, 1, 0, 1, 1, 0, 1],
+    colors: [1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
+    material: { color: [0.5, 0.5, 0.5, 1], roughness: 0.4 },
+  }));
+  const primitive = model.meshes[0].primitives[0];
+  assert.equal(primitive.vertexCount, 4);
+  assert.equal(primitive.indexCount, 6);
+  vecClose(primitive.bounds.min, [0, 0, 0]);
+  vecClose(primitive.bounds.max, [1, 0, 1]);
+  const packed = new Uint32Array(primitive.vertices.buffer);
+  assert.equal(packed[VERTEX_COLOR_INDEX] >>> 0, 0xff0000ff, 'its first corner red');
+  const material = model.materials[0];
+  assert.equal(material.metallic, 0, 'a dielectric unless asked');
+  close(material.roughness, 0.4);
+  assert.equal(material.alphaMode, 'OPAQUE');
+});
+
+await atest('without normals a mesh is flat-shaded, and without indices every three positions are a triangle', async () => {
+  // Two triangles meeting at a crease, no indices and no normals: each face its own normal.
+  const model = await loadGLTF(meshGLB({ positions: [0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0, 0] }));
+  const primitive = model.meshes[0].primitives[0];
+  assert.equal(primitive.indexCount, 6);
+  const v = primitive.vertices;
+  const normalOf = (vertex) => [v[vertex * VERTEX_STRIDE_FLOATS + 3], v[vertex * VERTEX_STRIDE_FLOATS + 4], v[vertex * VERTEX_STRIDE_FLOATS + 5]];
+  vecClose(normalOf(0), [0, 1, 0], EPS, 'the floor faces up');
+  vecClose(normalOf(3), [0, 0, -1], EPS, 'the wall faces -z, as its winding says');
+});
+
+await atest('a translucent colour, or a translucent vertex, makes a mesh blended', async () => {
+  const tri = [0, 0, 0, 1, 0, 0, 0, 1, 0];
+  assert.equal((await loadGLTF(meshGLB({ positions: tri, material: { color: [1, 1, 1, 0.5] } }))).materials[0].alphaMode, 'BLEND');
+  assert.equal((await loadGLTF(meshGLB({ positions: tri, colors: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0.2] }))).materials[0].alphaMode, 'BLEND');
+  assert.equal((await loadGLTF(meshGLB({ positions: tri, colors: [1, 1, 1, 1, 1, 1, 1, 1, 1] }))).materials[0].alphaMode, 'OPAQUE');
+});
+
+test('a mesh past 65,535 vertices indexes with 32 bits', () => {
+  const positions = new Float32Array(70000 * 3);
+  const glb = meshGLB({ positions, indices: [0, 1, 69999] });
+  const { json } = parseContainer(glb.buffer);
+  assert.equal(json.accessors[json.meshes[0].primitives[0].indices].componentType, 5125);
+});
+
+test('what a mesh is made from is checked, every error naming createMesh', () => {
+  assert.throws(() => meshGLB({}), /^Error: createMesh: positions is required/);
+  assert.throws(() => meshGLB({ positions: [0, 0] }), /createMesh: positions must be x, y, z for each vertex: a multiple of 3 numbers, got 2/);
+  assert.throws(() => meshGLB({ positions: [0, 0, 0, 1, 0, 0] }), /without indices, every three positions are a triangle/);
+  assert.throws(() => meshGLB({ positions: [0, 0, NaN, 1, 0, 0, 0, 1, 0] }), /positions must be finite numbers, got NaN at 2/);
+  assert.throws(() => meshGLB({ positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], indices: [0, 1, 3] }), /indices must be whole numbers from 0 to 2, got 3 at 2/);
+  assert.throws(() => meshGLB({ positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], normals: [0, 1, 0] }), /normals must be 3 numbers for each of the 3 vertices, got 3/);
+  assert.throws(() => meshGLB({ positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], material: { metallic: 2 } }), /material.metallic must be from 0 to 1, got 2/);
+});
 
 console.log('\nnodes and instantiation');
 

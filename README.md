@@ -342,7 +342,8 @@ tangents, both UV sets and vertex colours. Point and spot lights (`KHR_lights_pu
 come in on their nodes. These extensions are shaded as their specs say: emissive strength, texture
 transforms, unlit, IOR, specular, clear coat, sheen, anisotropy, iridescence, transmission and
 volume, quantized attributes, `KHR_animation_pointer`, and meshopt compression (both the EXT and KHR
-forms, decoded by a decoder written from the specs — no library, no WebAssembly). Levels of detail
+forms, decoded by a decoder written from the specs — no library, no WebAssembly). Meshes made in
+code, from arrays ([`engine.createMesh`](docs/API.md#engine-createmesh)), come in the same way. Levels of detail
 (`MSFT_lod`) are switched on the GPU. Any other extension a file *requires* is refused rather than
 loaded into geometry that is quietly wrong. A file you didn't write can't ask for more than the
 device can hold: counts, strides, offsets, sparse data, NaNs and image sizes are checked before

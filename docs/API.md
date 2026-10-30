@@ -62,7 +62,7 @@ Every call, setting and entry, A to Z by its name.
 
 **B** &nbsp; [`camera.background`](#camera2d-background) · [`new Benchmark()`](#benchmark) · [`scene.bounds()`](#scene-bounds) · [`engine.debug.box()`](#debug-box) · [`scene.burst()`](#scene-burst)
 
-**C** &nbsp; [`Camera properties`](#camera-properties) · [`new Camera()`](#camera) · [`new Camera2D()`](#camera2d) · [`engine.captureProbes()`](#engine-captureprobes) · [`node.children()`](#node-children) · [`scene.childrenOf()`](#scene-childrenof) · [`engine.debug.circle()`](#debug-circle) · [`engine.clock`](#engine-clock) · [`colorFromBytes()`](#color-colorfrombytes) · [`colorFromHex()`](#color-colorfromhex) · [`Winding.create()`](#winding-create) · [`scene.createNode()`](#scene-createnode) · [`engine.createScene()`](#engine-createscene) · [`engine.createTarget()`](#engine-createtarget)
+**C** &nbsp; [`Camera properties`](#camera-properties) · [`engine.createMesh()`](#engine-createmesh) · [`new Camera()`](#camera) · [`new Camera2D()`](#camera2d) · [`engine.captureProbes()`](#engine-captureprobes) · [`node.children()`](#node-children) · [`scene.childrenOf()`](#scene-childrenof) · [`engine.debug.circle()`](#debug-circle) · [`engine.clock`](#engine-clock) · [`colorFromBytes()`](#color-colorfrombytes) · [`colorFromHex()`](#color-colorfromhex) · [`Winding.create()`](#winding-create) · [`scene.createNode()`](#scene-createnode) · [`engine.createScene()`](#engine-createscene) · [`engine.createTarget()`](#engine-createtarget)
 
 **D** &nbsp; [`engine.debug`](#engine-debug) · [`scene.decalOf()`](#scene-decalof) · [`engine.debug.depthTest`](#debug-depthtest) · [`engine.destroy()`](#engine-destroy) · [`node.destroy()`](#node-destroy) · [`overlay.destroy()`](#statsoverlay-destroy) · [`orbit.detach()`](#orbitcontroller-detach) · [`engine.renderer.dof`](#renderer-dof) · [`orbit.dragged`](#orbitcontroller-dragged) · [`engine.renderer.drawSkybox` (renamed)](#renderer-drawskybox)
 
@@ -240,6 +240,53 @@ engine.unload(helmet);
 ```
 
 Notes: only models are checked for use. A texture, font, LUT, environment or splats is freed at once, so stop using it first (remove its sprites, text or splat nodes, clear `engine.grading`, move scenes to another environment).
+
+<a id="engine-createmesh"></a>
+### `engine.createMesh(options)` → `Promise<Model>`
+
+A mesh made from arrays: terrain from a noise field, a map from a generator, a prop built in code. Returns a model, as [`engine.load`](#engine-load) does, for [`scene.add`](#scene-add): add it as many times as you like, and [`engine.unload`](#engine-unload) it when no scene draws it.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `positions` | required | x, y, z for each vertex, in metres: an array of numbers or a `Float32Array`. |
+| `indices` | none | Three a triangle, counter-clockwise seen from its front, each a vertex number. Without them, every three positions are a triangle. |
+| `normals` | flat | x, y, z for each vertex. Without them, each triangle is shaded flat, its own normal, as glTF does: the faceted look of low-poly. |
+| `uvs` | none | u, v for each vertex, for a texture's coordinates. |
+| `colors` | none | r, g, b or r, g, b, a for each vertex, 0 to 1, in linear light. Multiplied by the material's colour. |
+| `material` | `{}` | How the surface looks; see below. |
+
+| Field | Default | Meaning |
+|---|---|---|
+| `color` | `[1, 1, 1, 1]` | Base colour, r, g, b, a in linear light, 0 or more. |
+| `metallic` | `0` | 0 for anything but bare metal, 1 for metal. |
+| `roughness` | `1` | 0 is a mirror, 1 matte. |
+| `emissive` | `[0, 0, 0]` | Light it gives off, linear r, g, b, 0 or more. |
+| `doubleSided` | `false` | Draw and light both sides of each triangle. |
+
+Returns: a model, as `engine.load` returns.
+
+Throws: `'createMesh: positions is required: x, y, z for each vertex'`; `'createMesh: positions must be x, y, z for each vertex: a multiple of 3 numbers, got …'`; `'createMesh: … must be finite numbers, got … at …'`; `'createMesh: … must be N numbers for each of the … vertices, got …'`; `'createMesh: colors must be 3 or 4 numbers (RGB or RGBA) for each of the … vertices, got …'`; `'createMesh: indices must be three a triangle: a multiple of 3, got …'`; `'createMesh: indices must be whole numbers from 0 to …, got … at …'`; `'createMesh: without indices, every three positions are a triangle: … vertices is not a whole number of them'`; `'createMesh: material.color must be 4 finite numbers, 0 or more, got …'`; `'createMesh: material.metallic must be from 0 to 1, got …'`; `'createMesh: material.roughness must be from 0 to 1, got …'`; `'createMesh: material.emissive must be 3 finite numbers, 0 or more, got …'`.
+
+```js
+// A height field: a grid of vertices, two triangles a cell, shaded flat.
+const N = 64, positions = [], colors = [], indices = [];
+for (let z = 0; z < N; z++) {
+  for (let x = 0; x < N; x++) {
+    const h = noise(x * 0.1, z * 0.1) * 4;
+    positions.push(x, h, z);
+    colors.push(...(h > 2 ? [0.9, 0.9, 0.9] : [0.25, 0.5, 0.2]));
+  }
+}
+for (let z = 0; z < N - 1; z++) {
+  for (let x = 0; x < N - 1; x++) {
+    const a = z * N + x;
+    indices.push(a, a + N, a + 1, a + 1, a + N, a + N + 1);
+  }
+}
+scene.add(await engine.createMesh({ positions, colors, indices }));
+```
+
+Notes: the arrays are written into a glTF file and loaded, so a mesh made this way is what a loaded one is: shaded, culled, merged with others drawn alone, and its pipelines built before it is handed back. It is blended, with its own draw order, if its colour's alpha or any vertex's is below 1. The arrays are copied; changing them afterwards changes nothing, so to reshape a mesh make it again and unload the old one. After a lost GPU device it is rebuilt from that copy ([When the GPU is lost](#device-lost)).
 
 <a id="engine-loadtexture"></a>
 ### `engine.loadTexture(source, options)` → `Promise<Texture>`

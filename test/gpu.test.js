@@ -4008,6 +4008,54 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return `${unprepared} pipelines started by the first frames without prepare, none with it, and AO from the first frame`;
   });
 
+  await step('a mesh made from arrays draws its vertex colours, flat-shaded, as a loaded one does', async () => {
+    // A 9 x 9 grid, red down its left edge and blue down its right, bumped
+    // into hills, with no normals: drawn from above, red on the left of the
+    // frame and blue on the right.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 120);
+      const N = 9, positions = [], colors = [], indices = [];
+      for (let z = 0; z < N; z++) {
+        for (let x = 0; x < N; x++) {
+          const u = x / (N - 1);
+          positions.push(x - 4, 0.3 * Math.sin(x) * Math.cos(z), z - 4);
+          colors.push(1 - u, 0.1, u);
+        }
+      }
+      for (let z = 0; z < N - 1; z++) {
+        for (let x = 0; x < N - 1; x++) {
+          const a = z * N + x;
+          indices.push(a, a + N, a + 1, a + 1, a + N, a + N + 1);
+        }
+      }
+      const terrain = await probe.createMesh({ positions, colors, indices });
+      const scene = probe.createScene();
+      scene.add(terrain);
+      scene.addLight({ type: 'directional', direction: [0, -1, -0.2], intensity: 3 });
+      const cam = new Camera({ fovY: 1.2, near: 0.1 });
+      cam.position.set([0, 8, 0.01]);
+      cam.target.set([0, 0, 0]);
+      await probe.prepare(scene, cam);
+      for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels();
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      const at = (x, y) => { const i = (y * 160 + x) * 4; return [pixels[i], pixels[i + 1], pixels[i + 2]]; };
+      const left = at(50, 60), right = at(110, 60);
+      if (!(left[0] > left[2] + 40 && right[2] > right[0] + 40)) throw new Error(`left ${left}, right ${right}: not red then blue`);
+      return `left ${left}, right ${right}`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a hidden node draws as if it were not there, shadows and light included, and comes back shown', async () => {
     // Under one parent: a mesh drawn merged, three instances of another drawn
     // as a batch, a sprite, text, a point light and a decal. Hidden, the frame

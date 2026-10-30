@@ -119,6 +119,20 @@ export interface PostOptions {
   grading?: Grading | null;
 }
 
+/** engine.createMesh's arrays, a number each component, and its surface. */
+export interface MeshOptions {
+  /** x, y, z for each vertex, in metres. */
+  positions: ArrayLike<number>;
+  /** Three a triangle, counter-clockwise from its front. Without them, every three positions are one. */
+  indices?: ArrayLike<number>;
+  /** x, y, z for each vertex. Without them, each triangle is shaded flat. */
+  normals?: ArrayLike<number>;
+  uvs?: ArrayLike<number>;
+  /** r, g, b or r, g, b, a for each vertex, linear, 0 to 1. */
+  colors?: ArrayLike<number>;
+  material?: { color?: Vec4; metallic?: number; roughness?: number; emissive?: Vec3; doubleSided?: boolean };
+}
+
 export interface DeviceLost {
   reason: string;
   message: string;
@@ -318,6 +332,8 @@ export class Winding {
 
   createScene(options?: CreateSceneOptions): Scene;
   load(source: string | ArrayBuffer | Uint8Array, options?: { retainGeometry?: boolean; baseURL?: string; fetch?: Fetch }): Promise<Model>;
+  /** A mesh made from arrays: terrain, a generated map, a prop built in code. */
+  createMesh(options: MeshOptions): Promise<Model>;
   loadTexture(source: string | ImageBitmapSource, options?: { srgb?: boolean; pixelated?: boolean; label?: string; fetch?: Fetch }): Promise<Texture>;
   loadFont(css: string): Promise<Font>;
   loadLUT(source: string, options?: { fetch?: Fetch }): Promise<LUT>;

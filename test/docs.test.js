@@ -103,7 +103,8 @@ function tablesUnder(id) {
  */
 const TABLES = {
   create: ['winding-create', 0], 'create shadows': ['winding-create', 1],
-  createScene: ['engine-createscene', 0], load: ['engine-load', 0], loadTexture: ['engine-loadtexture', 0],
+  createScene: ['engine-createscene', 0], load: ['engine-load', 0],
+  createMesh: ['engine-createmesh', 0], 'createMesh material': ['engine-createmesh', 1], loadTexture: ['engine-loadtexture', 0],
   loadLUT: ['engine-loadlut', 0], loadEnvironment: ['engine-loadenvironment', 0], run: ['engine-run', 0],
   renderFrame: ['engine-renderframe', 0], createTarget: ['engine-createtarget', 0], grading: ['engine-grading', 0],
   autoExposure: ['renderer-autoexposure', 0], fog: ['renderer-fog', 0], dof: ['renderer-dof', 0],

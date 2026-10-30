@@ -23,6 +23,8 @@ export const OPTIONS = {
   createScene: ['environment', 'capacity', 'renderableCapacity', 'lightCapacity'],
   load: ['retainGeometry', 'baseURL', 'fetch'],
   loadTexture: ['srgb', 'pixelated', 'label', 'fetch'],
+  createMesh: ['positions', 'indices', 'normals', 'uvs', 'colors', 'material'],
+  'createMesh material': ['color', 'metallic', 'roughness', 'emissive', 'doubleSided'],
   loadLUT: ['fetch'],
   loadSplats: ['fetch'],
   loadEnvironment: ['fetch', 'size', 'irradianceSize', 'prefilterMips', 'label'],
