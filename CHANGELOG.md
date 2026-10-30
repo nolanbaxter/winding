@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time a frame asks for them, and until then frames draw without them, so they appeared a few
   frames into play. A scene with decals, AO, TAA and particles started 17 pipeline builds in its
   first frames; after `prepare`, none, and AO draws from the first frame.
+- **[`node.setVisible(visible)`](docs/API.md#node-setvisible)** shows or hides a node and everything
+  under it -- meshes and their shadows, sprites, text, shapes, paths, tilemaps, emitters, decals,
+  splats and lights -- and [`node.visible`](docs/API.md#node-visible) reads it back. A hidden node
+  is not hit by a ray or a pick. Nothing is rebuilt to hide or show, so a pool of bullets or debris
+  is far cheaper than removing and adding: the work is one pass over the nodes in a frame where
+  something changed.
 - **[A lost GPU device is recovered from](docs/API.md#device-lost).** A driver reset, the GPU
   process crashing, or a Steam Deck waking from sleep used to end the session: the engine destroyed
   itself and the page had to reload. Now it gets a new device on the same canvas and rebuilds what

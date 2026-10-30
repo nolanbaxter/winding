@@ -385,6 +385,10 @@ export function order2D(scene) {
     for (const [entity, record] of kind) items.push({ entity, source: record, layer: record.layer, added: record.added ?? 0 });
   }
   for (const [entity, record] of scene.emitters) items.push({ entity, source: record, layer: record.layer, added: record.added ?? 0, emitter: true });
+  // Hidden (node.setVisible): left out; a change of visibility lays the view out again.
+  if (scene._hiddenSelfCount > 0) {
+    for (let k = items.length - 1; k >= 0; k--) if (scene.hidden[handleIndex(items[k].entity)] === 1) items.splice(k, 1);
+  }
   items.sort((p, q) => p.layer - q.layer || p.added - q.added);
   const entries = [];
   const runs = [];

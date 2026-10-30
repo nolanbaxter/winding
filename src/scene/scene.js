@@ -11,7 +11,7 @@
 
 import { assertFinite } from '../core/assert.js';
 import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
-import { TransformStore } from './transform.js';
+import { TransformStore, NO_PARENT } from './transform.js';
 import { Node } from './node.js';
 import { Camera } from './camera.js';
 import {
@@ -609,6 +609,20 @@ export class Scene {
      * well and keeps a scene that is changed but never drawn from growing it.
      */
     this.renderablesTouched = [];
+    /**
+     * Visibility, by entity slot: `_hiddenSelf` for a node hidden itself
+     * (node.setVisible), `hidden` for one hidden at all, itself or by an
+     * ancestor -- what everything drawn reads. Worked out at update(), once a
+     * frame and only after a change (_refreshVisibility).
+     */
+    this._hiddenSelf = new Uint8Array(capacity);
+    this.hidden = new Uint8Array(capacity);
+    this._hiddenSelfCount = 0;
+    this._visibilityDirty = false;
+    /** Per renderable: hidden, as last worked out; how many are; and which changed this frame, for the renderer. */
+    this.renderableHidden = new Uint8Array(renderableCapacity);
+    this.hiddenRenderables = 0;
+    this.visibilityChanged = [];
     this.renderableEntity = new Uint32Array(renderableCapacity);
     /** Which transform slot each renderable reads its world matrix from. */
     this.renderableMatrixSlot = new Uint32Array(renderableCapacity);
@@ -1053,6 +1067,7 @@ export class Scene {
     this.renderableMorphExtent.length = capacity;
     this.renderableMorphPad = growArray(this.renderableMorphPad, capacity);
     this.renderableLodSlot = growArray(this.renderableLodSlot, capacity);
+    this.renderableHidden = growArray(this.renderableHidden, capacity);
     this.renderableLodSphere = growArray(this.renderableLodSphere, capacity, 4);
     this.renderableCoverage = growArray(this.renderableCoverage, capacity, 2);
     this.localMin = growArray(this.localMin, capacity, 3);
@@ -1113,6 +1128,8 @@ export class Scene {
    * a stranger -- and removing the stranger took it too.
    */
   _parentOf(caller, parent) {
+    // A node placed under one that may be hidden is hidden with it: worked out at update().
+    if (this._hiddenSelfCount > 0) this._visibilityDirty = true;
     if (parent === null || parent === undefined) return NULL_HANDLE;
     if (parent.scene !== this) throw new Error(`${caller}: parent is a node of another scene`);
     if (!parent.alive) throw new Error(`${caller}: parent was removed`);
@@ -1121,6 +1138,59 @@ export class Scene {
 
   node(entity) {
     return new Node(this, entity);
+  }
+
+  /** node.setVisible: whether a node is drawn, with everything under it. */
+  _setVisible(node, visible) {
+    if (!node.alive) throw new Error('setVisible: this node was removed');
+    const slot = handleIndex(node.entity);
+    this._visibilityRoom();
+    const hide = visible ? 0 : 1;
+    if (this._hiddenSelf[slot] === hide) return;
+    this._hiddenSelf[slot] = hide;
+    this._hiddenSelfCount += hide === 1 ? 1 : -1;
+    this._visibilityDirty = true;
+    this.changes++;
+  }
+
+  _visibilityRoom() {
+    const capacity = this.transforms.capacity;
+    if (this.hidden.length >= capacity) return;
+    this.hidden = growArray(this.hidden, capacity);
+    this._hiddenSelf = growArray(this._hiddenSelf, capacity);
+  }
+
+  /**
+   * What is hidden, itself or by an ancestor: one pass in depth order, which
+   * puts every parent before its children, after any setVisible or reparent.
+   * ponytail: O(nodes) a frame that changed, not O(subtree); a walk of the
+   * subtrees changed (transforms._children) if a frame of many toggles shows it.
+   */
+  _refreshVisibility() {
+    this._visibilityDirty = false;
+    this._visibilityRoom();
+    const t = this.transforms, order = t.order, parent = t.parent, hidden = this.hidden, self = this._hiddenSelf;
+    let changed = false;
+    for (let k = 0; k < t.orderCount; k++) {
+      const e = order[k];
+      const p = parent[e];
+      const h = self[e] | (p !== NO_PARENT ? hidden[p] : 0);
+      if (h !== hidden[e]) { hidden[e] = h; changed = true; }
+    }
+    if (!changed) return;
+    for (let i = 0; i < this.renderableCount; i++) {
+      const h = hidden[this.renderableMatrixSlot[i]];
+      if (h === this.renderableHidden[i]) continue;
+      this.renderableHidden[i] = h;
+      this.hiddenRenderables += h === 1 ? 1 : -1;
+      this.visibilityChanged.push(i);
+      // Where it is, so a cached shadow map that showed it, or should now, is redrawn there.
+      this.removedBoxes.push(this.worldMin, this.worldMax, i * 3);
+    }
+    // Sprites, text, shapes, paths, tilemaps and emitters: laid out again without the hidden.
+    this.spriteOrder++;
+    this.layout2D++;
+    this.changes++;
   }
 
   childrenOf(node) {
@@ -1166,6 +1236,9 @@ export class Scene {
         this.renderableMorph[i] = this.renderableMorph[last];
         this.renderableMorphExtent[i] = this.renderableMorphExtent[last];
         this.renderableMorphPad[i] = this.renderableMorphPad[last];
+        if (this.renderableHidden[i] === 1) this.hiddenRenderables--;
+        this.renderableHidden[i] = this.renderableHidden[last];
+        this.renderableHidden[last] = 0;
         this.renderableLodSlot[i] = this.renderableLodSlot[last];
         this.renderableLodSphere.copyWithin(i * 4, last * 4, last * 4 + 4);
         this.renderableCoverage.copyWithin(i * 2, last * 2, last * 2 + 2);
@@ -1191,6 +1264,13 @@ export class Scene {
     }
 
     this._dropOwned(dying);
+    // Their slots will be someone else's: not hidden, and not counted.
+    for (const entity of doomed) {
+      const slot = handleIndex(entity);
+      if (this._hiddenSelf[slot] === 1) this._hiddenSelfCount--;
+      this._hiddenSelf[slot] = 0;
+      this.hidden[slot] = 0;
+    }
 
     // Lights on any doomed entity go too. Before the entities are freed, so
     // the handles are still the ones the map was built from.
@@ -1399,7 +1479,7 @@ export class Scene {
       type: spot ? 'spot' : 'point',
       color: Float32Array.from(light.subarray(o + 4, o + 7)),
       intensity: light[o + 7],
-      radius: light[o + 3],
+      radius: Math.abs(light[o + 3]),
       ...(spot ? { innerAngle: this._lightCone[index * 2], outerAngle: this._lightCone[index * 2 + 1] } : {}),
       castShadow,
       size,
@@ -1994,7 +2074,7 @@ export class Scene {
     this._writeLightProperties(index, {
       color: changes.color ?? [light[o + 4], light[o + 5], light[o + 6]],
       intensity: changes.intensity ?? light[o + 7],
-      radius: changes.radius ?? light[o + 3],
+      radius: changes.radius ?? Math.abs(light[o + 3]),
       spot,
       innerAngle: changes.innerAngle ?? this._lightCone[index * 2] ?? 0.2,
       outerAngle: changes.outerAngle ?? this._lightCone[index * 2 + 1] ?? 0.5,
@@ -2019,6 +2099,9 @@ export class Scene {
       light[o] = world[m + 12];
       light[o + 1] = world[m + 13];
       light[o + 2] = world[m + 14];
+      // Hidden: its radius made negative, which the cluster pass assigns
+      // nowhere (clustered.js); lightOf and setLight read its size.
+      light[o + 3] = this.hidden[m / 16] === 1 ? -Math.abs(light[o + 3]) : Math.abs(light[o + 3]);
 
       if (light[o + 14] === LIGHT_SPOT) {
         // -Z of the world matrix. Normalized, because a scaled parent scales
@@ -2043,6 +2126,8 @@ export class Scene {
     this.directionalEntity.length = count;
     let packed = 0;
     for (const [entity, { color, intensity }] of this._directional) {
+      // A hidden one is not packed: it lights nothing and casts nothing.
+      if (this.hidden[handleIndex(entity)] === 1) continue;
       const m = handleIndex(entity) * 16;
       const x = -world[m + 8];
       const y = -world[m + 9];
@@ -2158,6 +2243,7 @@ export class Scene {
    */
   update(jobs = null) {
     const recomposed = jobs?.parallel ? this.transforms.updateParallel(jobs) : this.transforms.update();
+    if (this._visibilityDirty) this._refreshVisibility();
     if (this.reflectionProbes.length > 0) this._placeProbes();
     return recomposed;
   }
@@ -2370,6 +2456,8 @@ export class Scene {
     const candidates = [];
 
     for (let i = 0; i < this.renderableCount; i++) {
+      // A hidden mesh is not there to hit.
+      if (this.renderableHidden[i] === 1) continue;
       // Of a mesh drawn in levels of detail, only the finest: a ray has no
       // distance to choose a level by, and a coarser level's looser shape
       // would be hit where the mesh shown up close isn't.
@@ -2657,6 +2745,7 @@ export class Scene {
     }
     const world = this.transforms.world;
     for (const [entity, kind] of this._picking.items) {
+      if (this.hidden[handleIndex(entity)] === 1) continue;
       const record = kind.get(entity);
       // Into the node's own frame: the inverse of its 2D transform.
       const m = handleIndex(entity) * 16;

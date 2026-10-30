@@ -163,13 +163,19 @@ export function updateWorldBounds(
  * is no box that means "nothing" which a caller would not have to special-case
  * anyway.
  */
-export function unionWorldBounds(count, worldMin, worldMax, outMin, outMax) {
-  if (count === 0) return false;
+export function unionWorldBounds(count, worldMin, worldMax, outMin, outMax, hidden = null) {
+  // Hidden ones (node.setVisible) are left out: a pool parked out of sight
+  // would otherwise stretch every range derived from this.
+  let first = 0;
+  while (first < count && hidden?.[first] === 1) first++;
+  if (first === count) return false;
 
-  outMin[0] = worldMin[0]; outMin[1] = worldMin[1]; outMin[2] = worldMin[2];
-  outMax[0] = worldMax[0]; outMax[1] = worldMax[1]; outMax[2] = worldMax[2];
+  const f = first * 3;
+  outMin[0] = worldMin[f]; outMin[1] = worldMin[f + 1]; outMin[2] = worldMin[f + 2];
+  outMax[0] = worldMax[f]; outMax[1] = worldMax[f + 1]; outMax[2] = worldMax[f + 2];
 
-  for (let i = 1; i < count; i++) {
+  for (let i = first + 1; i < count; i++) {
+    if (hidden?.[i] === 1) continue;
     const o = i * 3;
     if (worldMin[o] < outMin[0]) outMin[0] = worldMin[o];
     if (worldMin[o + 1] < outMin[1]) outMin[1] = worldMin[o + 1];

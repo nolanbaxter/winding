@@ -297,6 +297,8 @@ fn assignLights(
   let indexAt = select(0u, ${DECAL_INDEX_BASE}u, decal);
 
   let light = lights[li];
+  // A hidden light (node.setVisible) has its radius negated: it lights no cluster.
+  if (!decal && light.positionRadius.w < 0.0) { return; }
   // Lights arrive in world space; the cluster grid is view space.
   let centre = (params.view * vec4<f32>(light.positionRadius.xyz, 1.0)).xyz;
   let radius = light.positionRadius.w;

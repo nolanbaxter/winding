@@ -586,6 +586,10 @@ export class ParticleSystem {
     list.length = 0;
     let relayout = this.rings.size !== scene.emitters.size;
     for (const [entity, record] of scene.emitters) {
+      // Hidden: no births, and none owed for when it is shown again; what is
+      // alive runs on unseen, so its ring keeps its place.
+      const hidden = scene.hidden?.[handleIndex(entity)] === 1;
+      if (hidden) { record.owed = 0; record.burstOwed = 0; }
       // Frozen -- a reflection probe's capture -- draws them where they are
       // and leaves what they owe for the next real frame.
       const births = frozen ? 0 : Math.floor(record.owed);
@@ -621,7 +625,7 @@ export class ParticleSystem {
       }
       ring.clock = clock;
       if (bursting > 0) held.push({ count: bursting, until: clock + record.lifetime[1] });
-      list.push({ entity, record, ring, births: Math.min(births, ring.capacity), dt });
+      list.push({ entity, record, ring, births: Math.min(births, ring.capacity), dt, hidden });
     }
     const seeds = this._seeds;
     seeds.clear();
@@ -666,7 +670,7 @@ export class ParticleSystem {
     // the sort's key pass to count its live particles into.
     this.sorted = 0;
     if (camera.is2D !== true) {
-      for (const item of list) item.sortIndex = item.record.blend === 'alpha' ? this.sorted++ : -1;
+      for (const item of list) item.sortIndex = item.record.blend === 'alpha' && !item.hidden ? this.sorted++ : -1;
       if (this.sorted > 0) {
         const words = this.sorted * this.argsStride / 4;
         if (words * 4 > this._argsCapacity) {
@@ -865,6 +869,7 @@ export class ParticleSystem {
     pass.setBindGroup(0, frameGroup);
     let bound = null;
     for (const item of this._list) {
+      if (item.hidden) continue;
       if (item.record.blend !== bound) {
         pass.setPipeline(this.pipelines.get(this.descriptors[item.record.blend]));
         bound = item.record.blend;

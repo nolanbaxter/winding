@@ -781,6 +781,48 @@ test('removal swap-removes, so renderable indices are not stable', () => {
   assert.equal(scene.renderableEntity[0], second.entity, 'the last one moved down');
 });
 
+test('a hidden node hides what hangs under it, is passed over by a ray, and comes back shown', () => {
+  const scene = new Scene({ capacity: 64 });
+  const parent = scene.createNode();
+  const a = scene.add(fakeAsset(), { parent }).setPosition(0, 0, 0);
+  const b = scene.add(fakeAsset()).setPosition(5, 0, 0);
+  scene.update();
+  assert.equal(scene.raycast([0, 0, 10], [0, 0, -1])?.node.entity, a.entity, 'shown, it is hit');
+
+  parent.setVisible(false);
+  assert.equal(parent.visible, false);
+  assert.equal(a.visible, true, 'a node reports its own setting; its parent hides it');
+  scene.update();
+  assert.equal(scene.hidden[handleIndex(a.entity)], 1, 'hidden by its parent');
+  assert.equal(scene.hiddenRenderables, 1);
+  assert.deepEqual(scene.visibilityChanged, [0], 'its renderable listed for the renderer');
+  assert.equal(scene.raycast([0, 0, 10], [0, 0, -1]), null, 'hidden, a ray goes through it');
+  scene.visibilityChanged.length = 0;
+
+  // Placed under a hidden node, hidden with it.
+  b.setParent(parent);
+  scene.update();
+  assert.equal(scene.hiddenRenderables, 2);
+  assert.equal(scene.raycast([5, 0, 10], [0, 0, -1]), null);
+
+  parent.setVisible(true);
+  scene.update();
+  assert.equal(scene.hiddenRenderables, 0, 'shown again, everything under it');
+  assert.equal(scene.raycast([0, 0, 10], [0, 0, -1])?.node.entity, a.entity);
+
+  // Removed while hidden, it is counted no longer, and its slot is not left hidden.
+  a.setVisible(false);
+  scene.update();
+  assert.equal(scene.hiddenRenderables, 1);
+  scene.remove(a);
+  scene.update();
+  assert.equal(scene.hiddenRenderables, 0);
+  assert.equal(scene._hiddenSelfCount, 0);
+  const reused = scene.add(fakeAsset());
+  scene.update();
+  assert.equal(scene.hidden[handleIndex(reused.entity)], 0, 'a reused slot starts shown');
+});
+
 test('the slots an add or a removal changes are listed for the renderer, until there are more than slots', () => {
   const scene = new Scene({ capacity: 64 });
   const nodes = [0, 1, 2].map(() => scene.add(fakeAsset()));

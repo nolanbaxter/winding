@@ -19,6 +19,7 @@
 import {
   quatCreate, quatSetAxisAngle, quatFromEuler, quatNormalize, quatLookAlong,
 } from '../core/math/quat.js';
+import { handleIndex } from '../core/handle.js';
 
 // Shared scratch. Node methods are called from user code, never concurrently,
 // and a fresh quaternion per setRotation call would allocate in someone's loop.
@@ -96,6 +97,23 @@ export class Node {
   }
 
   /** Pass null to detach to the scene root. */
+  /**
+   * Whether this node, and everything under it, is drawn: meshes and their
+   * shadows, sprites, text, shapes, paths, tilemaps, emitters, decals, splats
+   * and lights. Far cheaper than removing and adding again, which is what a
+   * pool of bullets or debris wants. A hidden node is not picked or hit by a
+   * ray either. Returns the node.
+   */
+  setVisible(visible) {
+    this.scene._setVisible(this, visible !== false);
+    return this;
+  }
+
+  /** Whether setVisible left this node shown. Its ancestors may still hide it. */
+  get visible() {
+    return this.alive && this.scene._hiddenSelf[handleIndex(this.entity)] !== 1;
+  }
+
   setParent(node) {
     this.scene.transforms.setParent(this.entity, this.scene._parentOf('setParent', node));
     return this;

@@ -549,6 +549,7 @@ export class SplatPass {
     this.count = 0;
     this.sorted = 0;
     for (const [entity, record] of scene.splats) {
+      if (scene.hidden?.[handleIndex(entity)] === 1) continue;
       const splats = record.splats;
       if (splats.unloaded) throw new Error('addSplats: these splats were unloaded; remove the node first');
       const state = this._stateFor(record, splats, scene, entity);

@@ -618,6 +618,10 @@ export class Node {
   setAxisAngle(axis: Vec3, radians: number): this;
   setEuler(yaw: number, pitch: number, roll?: number): this;
   setParent(node: Node | null): this;
+  /** Show or hide this node and everything under it; cheaper than removing it. */
+  setVisible(visible: boolean): this;
+  /** Whether setVisible left this node shown. An ancestor may still hide it. */
+  readonly visible: boolean;
   worldPosition<T extends Vec3>(out: T): T;
   children(): Node[];
   play(nameOrIndex: string | number, options?: PlayOptions): this;

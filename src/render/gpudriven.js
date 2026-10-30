@@ -269,7 +269,9 @@ fn occluded(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
  */
 fn lodSelected(item : u32) -> bool {
   let sphere = bounds[item].lod;
-  if (sphere.w <= 0.0) { return true; }
+  // A negative radius is a hidden item (node.setVisible): selected by no view.
+  if (sphere.w < 0.0) { return false; }
+  if (sphere.w == 0.0) { return true; }
   let w = (params.viewProj * vec4<f32>(sphere.xyz, 1.0)).w;
   let coverage = select(3.0e38, sphere.w * params.projectionScale / w, w > 0.0);
   return coverage >= bounds[item].minPoint.w && coverage < bounds[item].maxPoint.w;
@@ -876,7 +878,8 @@ export class GpuDriven {
     writeChanged(queue, this.itemBatchBuffer, this.itemBatch, held.itemBatch, count, 1, all);
     writeChanged(queue, this.batchFirstBuffer, this.batchFirst, held.batchFirst, this.batchCount, 1, all);
     writeChanged(queue, this.batchOrderBuffer, this.batchOrder, held.batchOrder, this.opaqueCount + this.transparentCount, 1, all);
-    if (this.hasLod && this.transparentCount > 0) {
+    // Always: whether shadows read the shadow slice (selectsCasters) can change without a rebuild.
+    if (this.transparentCount > 0) {
       queue.writeBuffer(this.visibleBuffer, (CULL_SHADOW * this.capacity + this.opaqueCount) * 4,
         this.transparentItems, 0, this.transparentCount);
     }
@@ -935,6 +938,15 @@ export class GpuDriven {
     // Nothing moved and no skin or morph changed a box (`deformed`): there is
     // nothing to rewrite, and the scan to find that out was 0.8 ms a frame at
     // 100,000 renderables.
+    // Renderables shown or hidden this frame: their bounds carry it, so written again.
+    for (const i of scene.visibilityChanged) {
+      if (i < count && this._touchedMark[i] === 0) { this._touchedMark[i] = 1; this._touched.push(i); }
+    }
+    /** Whether anything was shown or hidden this frame: the merged shadow lists are written again. */
+    this.shownOrHidden = scene.visibilityChanged.length > 0;
+    scene.visibilityChanged.length = 0;
+    /** Whether any renderable is hidden: then shadows draw only the casters a cull selected, as with LOD. */
+    this.hiddenCasters = scene.hiddenRenderables > 0;
     const touched = this._touched.length > 0 ? this._touchedMark : null;
     const scan = full || scene.transforms.movedPending || deformed || touched !== null;
     // Only what moved, when that is listed, nothing deformed, and no rebuild left renderables to rewrite.
@@ -1004,6 +1016,8 @@ export class GpuDriven {
       } else {
         this.boundsData[b + 11] = 0;
       }
+      // Hidden: a negative radius, which lodSelected keeps out of every view.
+      if (scene.renderableHidden[i] === 1) this.boundsData[b + 11] = -1;
 
       addToRuns(runs, i, mergeGap);
     }
@@ -1118,6 +1132,14 @@ export class GpuDriven {
     pass.dispatchWorkgroups(Math.min(groups, 65535), Math.ceil(groups / 65535));
   }
 
+  /**
+   * Whether shadows draw only the casters a cull selected: with LOD, the
+   * level the camera shows, and with anything hidden, not that.
+   */
+  get selectsCasters() {
+    return this.hasLod || this.hiddenCasters === true;
+  }
+
   /** Dynamic offset for the zero-base slot the ordered draws bind. */
   transparentBatchOffset() {
     return this.transparentBatchSlot * this.alignment;
@@ -1136,7 +1158,8 @@ export class GpuDriven {
   lodSelected(item, viewProjection, projectionScale) {
     const b = item * BOUNDS_FLOATS;
     const radius = this.boundsData[b + 11];
-    if (radius <= 0) return true;
+    if (radius < 0) return false;
+    if (radius === 0) return true;
     const vp = viewProjection;
     const w = vp[3] * this.boundsData[b + 8] + vp[7] * this.boundsData[b + 9] + vp[11] * this.boundsData[b + 10] + vp[15];
     const coverage = w > 0 ? radius * projectionScale / w : 3.0e38;

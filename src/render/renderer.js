@@ -1140,13 +1140,15 @@ export class Renderer {
     // changed -- a renderable that moves can shrink the union as easily as
     // grow it, so it is recomputed whole, unless the few that moved can only
     // have grown it (see moveUnion).
-    const changed = moved > 0 || morphed > 0 || skinned > 0 || this._boundsRevision !== scene.revision;
-    const kept = changed && before !== null && this._hasSceneBounds && morphed === 0 && skinned === 0
+    // Something shown or hidden changes the extent as surely as something moving does.
+    const shownOrHidden = scene.visibilityChanged.length > 0;
+    const changed = moved > 0 || morphed > 0 || skinned > 0 || shownOrHidden || this._boundsRevision !== scene.revision;
+    const kept = changed && before !== null && this._hasSceneBounds && morphed === 0 && skinned === 0 && !shownOrHidden
       && this._boundsRevision === scene.revision
       && moveUnion(items, before, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax);
     if (changed && !kept) {
       this._hasSceneBounds = unionWorldBounds(
-        count, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax,
+        count, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax, scene.hiddenRenderables > 0 ? scene.renderableHidden : null,
       );
       this._boundsRevision = scene.revision;
     }
@@ -1415,12 +1417,13 @@ export class Renderer {
       visibleResource: visibleEarly,
     });
     // The merged groups' lists brought up to this frame's view.
-    const mergedLists = this.merged.addPass(graph, this.gpu, this.geometry, drawDataBuffer);
-
-    // Shadows draw the level of detail the camera chose. Only when there is
-    // any, and a shadow map to draw: otherwise this pass is not run.
+    // What the shadow passes read beside the map: the cull slices they draw from.
     const shadowReads = [];
-    if (this.gpu.hasLod && this.shadows.drawsAny()) {
+    const mergedLists = this.merged.addPass(graph, this.gpu, this.geometry, drawDataBuffer, shadowReads);
+
+    // Shadows draw the level of detail the camera chose, and nothing hidden.
+    // Only when there is any, and a shadow map to draw: otherwise this pass is not run.
+    if (this.gpu.selectsCasters && this.shadows.drawsAny()) {
       const indirectShadow = graph.importBuffer('indirect:shadow', this.gpu.indirectBuffer);
       const visibleShadow = graph.importBuffer('visible:shadow', this.gpu.visibleBuffer);
       this.gpu.addCullPass(graph, {
@@ -1941,7 +1944,7 @@ export class Renderer {
       const i = gpu.transparentItems[t];
       const o = i * 3;
       // The level the camera shows is the level that casts, on screen or not.
-      const selected = !gpu.hasLod || gpu.lodSelected(i, camera.viewProjection, projectionScale);
+      const selected = !gpu.selectsCasters || gpu.lodSelected(i, camera.viewProjection, projectionScale);
       gpu.casterSelected[t] = selected ? 1 : 0;
       if (!selected || !frustumTestAABB(this.frustum, scene.worldMin, scene.worldMax, o)) continue;
 

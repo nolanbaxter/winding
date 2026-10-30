@@ -32,6 +32,7 @@
 // Cascades and local views are two arrays only because they are two sizes.
 
 import { DEBUG, assert } from '../core/assert.js';
+import { handleIndex } from '../core/handle.js';
 import {
   mat4Create, mat4LookAt, mat4Multiply, mat4OrthographicReverseZ, mat4PerspectiveReverseZInfinite,
 } from '../core/math/mat4.js';
@@ -659,7 +660,7 @@ export class ShadowMaps {
     // `order` is the static batch order, or with LOD the shadow cull's slice;
     // a cascade's culled draws read theirs from the visible list as well.
     this._makeCascadeBindGroup = (gpu, palette, morph, buffer = this.cascadeBuffer,
-      order = gpu.hasLod ? gpu.visibleBuffer : gpu.batchOrderBuffer) => rhi.device.createBindGroup({
+      order = gpu.selectsCasters ? gpu.visibleBuffer : gpu.batchOrderBuffer) => rhi.device.createBindGroup({
       label: 'shadow-cascade',
       layout: this.cascadeLayout,
       entries: [
@@ -977,6 +978,7 @@ export class ShadowMaps {
       lights[o + 11] = 0;
       lights[o + 15] = 0;
       if (casters.size === 0 || !casters.has(scene.lightEntity[i])) continue;
+      if (scene.hidden?.[handleIndex(scene.lightEntity[i])] === 1) continue;
       const radius = lights[o + 3];
       this._eye[0] = lights[o]; this._eye[1] = lights[o + 1]; this._eye[2] = lights[o + 2];
       if (!(radius > 0) || !frustumTestSphere(this._frustum, this._eye, radius)) continue;
@@ -1451,12 +1453,12 @@ export class ShadowMaps {
       || this._gpuRevision !== gpu.buffersRevision
       || this._paletteRevision !== palette.revision
       || this._morphRevision !== morph.revision
-      || this._hasLod !== gpu.hasLod) {
-      this._hasLod = gpu.hasLod;
+      || this._selects !== gpu.selectsCasters) {
+      this._selects = gpu.selectsCasters;
       this._geometryRevision = this.geometry.revision;
       this.cascadeBindGroup = this._makeCascadeBindGroup(gpu, palette, morph);
       // The same, reading a batch's casters from the visible list: what a cascade's culled draws bind.
-      this.cascadeCulledBindGroup = gpu.hasLod ? this.cascadeBindGroup
+      this.cascadeCulledBindGroup = gpu.selectsCasters ? this.cascadeBindGroup
         : this._makeCascadeBindGroup(gpu, palette, morph, this.cascadeBuffer, gpu.visibleBuffer);
       this.localBindGroup = undefined;
       this._gpuRevision = gpu.buffersRevision;
@@ -1612,7 +1614,7 @@ export class ShadowMaps {
       // that reach the strip. Not skinned or morphed, whose vertices leave the
       // boxes; not with LOD, whose draws are indirect.
       if (!useMerged && cull !== null && primitive.chunks && gpu.batchSize[b] === 1 && !skinned
-        && primitive.morphCountStride === 0 && !gpu.hasLod) {
+        && primitive.morphCountStride === 0 && !gpu.selectsCasters) {
         this._drawChunks(pass, gpu, b, primitive, cull, at);
       } else {
         this._drawBatch(pass, gpu, b, primitive, culled(b));
@@ -1700,7 +1702,7 @@ export class ShadowMaps {
    * shows, on screen or off. A cascade's cull keeps to that level too.
    */
   _drawBatch(pass, gpu, b, primitive, phase = null) {
-    const from = phase ?? (gpu.hasLod ? CULL_SHADOW : null);
+    const from = phase ?? (gpu.selectsCasters ? CULL_SHADOW : null);
     this._useList?.(phase !== null);
     if (from !== null) {
       pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b, from)]);
@@ -1740,15 +1742,15 @@ export class ShadowMaps {
     if (casters.length === 0) return;
     this._useList?.(false);
     pass.setBindGroup(GROUP_DRAW, this._batchBindGroup,
-      [gpu.hasLod ? gpu.shadowTransparentBatchOffset() : gpu.transparentBatchOffset()]);
+      [gpu.selectsCasters ? gpu.shadowTransparentBatchOffset() : gpu.transparentBatchOffset()]);
     const selected = gpu.casterSelected;
     for (let k = 0; k < casters.length;) {
-      if (gpu.hasLod && selected[k] === 0) { k++; continue; }
+      if (gpu.selectsCasters && selected[k] === 0) { k++; continue; }
       const { primitive, material, skinned } = casters[k];
       let run = 1;
       while (k + run < casters.length && casters[k + run].primitive === primitive
         && casters[k + run].material === material && casters[k + run].skinned === skinned
-        && (!gpu.hasLod || selected[k + run] === 1)) run++;
+        && (!gpu.selectsCasters || selected[k + run] === 1)) run++;
       draw(true, skinned, material, primitive);
       pass.drawIndexed(primitive.indexCount, run, primitive.firstIndex, primitive.baseVertex, gpu.opaqueCount + k);
       k += run;

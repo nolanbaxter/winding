@@ -92,13 +92,13 @@ Every call, setting and entry, A to Z by its name.
 
 **R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.renderer.post.requestedLevels` (renamed)](#post-requestedlevels) · [`engine.renderer.resolution`](#renderer-resolution) · [`engine.rhi` (renamed)](#engine-rhi) · [`camera.rotation` (renamed)](#camera2d-rotation) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
 
-**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`engine.renderer.splatCull`](#renderer-splatcull) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`Winding.supported()`](#winding-supported) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
+**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`node.setVisible()`](#node-setvisible) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`engine.renderer.splatCull`](#renderer-splatcull) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`Winding.supported()`](#winding-supported) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
 
 **T** &nbsp; [`engine.renderer.taa`](#renderer-taa) · [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
 
 **U** &nbsp; [`engine.unload()`](#engine-unload) · [`scene.update()`](#scene-update) · [`camera.update()`](#camera2d-update) · [`camera.update()`](#camera-update) · [`orbit.update()`](#orbitcontroller-update) · [`overlay.update()`](#statsoverlay-update)
 
-**V** &nbsp; [`vec3`](#math-vec3) · [`camera.view`](#camera2d-matrices)
+**V** &nbsp; [`node.visible`](#node-visible) · [`vec3`](#math-vec3) · [`camera.view`](#camera2d-matrices)
 
 **W** &nbsp; [`node.weights`](#node-weights) · [`camera.width`](#camera2d-size) · [`node.worldPosition()`](#node-worldposition) · [`camera.worldToScreen()`](#camera2d-worldtoscreen)
 
@@ -1266,6 +1266,28 @@ Sets the rotation from angles in radians, applied in YXZ order: yaw about Y, pit
 Attaches the node to another. `null` moves it to the scene root. Its position, rotation and scale are kept as numbers, now in the new parent's space, so it moves in the world if the parents differ.
 
 Throws: `setParent: would create a cycle in the transform hierarchy`, if the new parent is the node itself or below it; `setParent: parent was removed`; `setParent: parent is a node of another scene`.
+
+<a id="node-setvisible"></a>
+### `node.setVisible(visible)` → `Node`
+
+Shows or hides the node and everything under it: meshes and the shadows they cast, sprites, text, shapes, paths, tilemaps, emitters, decals, splats and lights. A hidden node is not hit by [`scene.raycast`](#scene-raycast) or [`scene.pick`](#scene-pick) either, and its meshes are left out of the scene's extent, which shadow and light ranges are fitted to.
+
+Far cheaper than removing a node and adding it again, which is what a pool of bullets, debris or pickups wants: nothing is rebuilt. The work is done once in a frame where something was shown or hidden, in one pass over the scene's nodes.
+
+```js
+const bullets = Array.from({ length: 64 }, () => scene.add(bullet).setVisible(false));
+// Firing: take a hidden one, place it, show it.
+const shot = bullets.find((b) => !b.visible).setPosition(...muzzle).setVisible(true);
+```
+
+Notes: hiding is inherited, as a position is: a node is drawn only if it and every ancestor are shown, and a node added or moved under a hidden one is hidden with it. Its own setting is what [`node.visible`](#node-visible) reports. A hidden emitter makes no particles, and owes none for when it is shown again; those already alive run on unseen. A hidden light keeps its colour, brightness and reach, which [`scene.lightOf`](#scene-lightof) still reports. Animations play on while hidden. A reflection probe goes on lighting while hidden.
+
+Throws: `'setVisible: this node was removed'`.
+
+<a id="node-visible"></a>
+### `node.visible` → `boolean`
+
+Whether [`node.setVisible`](#node-setvisible) left this node shown, `true` until it is hidden. An ancestor hidden can still keep it from being drawn. Read only: change it with `setVisible`.
 
 <a id="node-worldposition"></a>
 ### `node.worldPosition(out)` → `out`

@@ -4008,6 +4008,70 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return `${unprepared} pipelines started by the first frames without prepare, none with it, and AO from the first frame`;
   });
 
+  await step('a hidden node draws as if it were not there, shadows and light included, and comes back shown', async () => {
+    // Under one parent: a mesh drawn merged, three instances of another drawn
+    // as a batch, a sprite, text, a point light and a decal. Hidden, the frame
+    // is the frame of a scene that never had them; shown again, the frame it
+    // had before.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 120);
+      const ground = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0 }));
+      const lone = await probe.load(buildFeatureGLB({ baseColorFactor: [0.9, 0.2, 0.2, 1], doubleSided: true }));
+      const many = await probe.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.3, 0.9, 1], doubleSided: true }));
+      const pin = await probe.loadTexture(twoToneImageURI('#ff2020', '#20ff20'));
+      const font = await probe.loadFont('48px sans-serif');
+      const base = () => {
+        const scene = probe.createScene();
+        scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
+        scene.addLight({ type: 'directional', direction: [-0.4, -0.8, -0.3], intensity: 3 });
+        return scene;
+      };
+      const full = base();
+      const group = full.createNode();
+      full.add(lone, { parent: group }).setPosition(-2, 1.2, 0);
+      for (let k = 0; k < 3; k++) full.add(many, { parent: group }).setPosition(k * 1.5 - 0.5, 1, -1.5);
+      full.addSprite({ texture: pin, position: [2.5, 1, 1], size: [0.6, 0.6], parent: group });
+      full.addText({ font, text: 'Hi', size: 0.5, position: [-1, 2.4, 0], parent: group });
+      full.addLight({ position: [1, 0.6, 1.5], color: [1, 0.4, 0.1], intensity: 20, radius: 4, parent: group });
+      full.addDecal({ texture: pin, size: [1.5, 1.5, 1], parent: group }).setAxisAngle([1, 0, 0], -Math.PI / 2).setPosition(-1, 0, 2);
+      const bare = base();
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 5, 7]);
+      cam.target.set([0, 0.5, 0]);
+      const frame = async (scene) => {
+        await probe.prepare(scene, cam);
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        return probe.gpu.readPixels();
+      };
+      const differ = (a, b) => {
+        let n = 0;
+        for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) n++;
+        return n;
+      };
+      const shown = await frame(full);
+      const without = await frame(bare);
+      if (differ(shown, without) < 200) throw new Error('the group barely shows: the check proves nothing');
+      group.setVisible(false);
+      const hidden = await frame(full);
+      group.setVisible(true);
+      const back = await frame(full);
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      const asIfGone = differ(hidden, without), asBefore = differ(back, shown);
+      if (asIfGone > 0 || asBefore > 0) throw new Error(`hidden: ${asIfGone} pixels differ from the scene without it; shown again: ${asBefore} from before`);
+      return `hidden draws the scene without it, shown again the scene with it, ${shown.length / 4} pixels (${differ(shown, without)} are the group's)`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a cascade culled caster by caster casts the shadows a batch at a time casts', async () => {
     // Sixty-four plates of one mesh, one batch, spread wider than the near
     // cascades reach: those draw only the plates the GPU kept for them. The
