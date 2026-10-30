@@ -140,7 +140,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.9.0/src/winding.js';
 </script>
 ```
 
@@ -165,8 +165,8 @@ completion and hover help.
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.9.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.9.0/src/"
   }
 }
 </script>
@@ -360,6 +360,15 @@ are per instance, and bounds follow both, so a character isn't culled with its a
 **Lights are nodes.** [`scene.addLight`](docs/API.md#scene-addlight) returns a node, so a light can
 have a parent: a headlamp on a car, a torch in an animated hand. A spot aims down its node's -Z, as
 glTF defines it. A new scene has no lights; its environment lights it until you add one.
+
+**Nodes for games.** A node keeps its name from the file, so a level's spawn points or a model's
+hand bone are found by it ([`node.find`](docs/API.md#node-find)). It can be placed in the world
+whatever its parents ([`setWorldPosition`](docs/API.md#node-setworldposition)) -- a ragdoll's bones
+straight from a physics engine -- and moved to another parent where it stands. It can be hidden
+([`setVisible`](docs/API.md#node-setvisible)) and tinted or lit up
+([`setTint`](docs/API.md#node-settint), [`setGlow`](docs/API.md#node-setglow)) without leaving its
+batch, so a pool of bullets or an army in two colours costs what one plain copy does. The clock
+slows or stops the world for a hit-stop or a pause ([`timeScale`](docs/API.md#engine-clock)).
 
 **Sprites, text, particles, decals and reflection probes**, each a node:
 [sprites](docs/API.md#scene-addsprite) that face the camera or stand upright;

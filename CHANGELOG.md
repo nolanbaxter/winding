@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-30
+
+**Ready for games.** A lost GPU device is recovered from instead of ending the session, and
+`prepare` builds a level's pipelines behind the loading screen. Meshes can be made from arrays,
+and nodes hidden, tinted, lit up, found by name and placed in the world whatever their parents,
+all without leaving their batches. The clock slows and stops for a hit-stop or a pause. Shadows
+cost less: cascades skip the casters that don't reach them and cast a level of detail their maps
+can show, and a point light redraws only the faces something moved in. And it starts faster,
+from 3.1 to 2.3 s on a first launch in Electron.
+
 ### Added
 
 - **[`engine.clock.timeScale`](docs/API.md#engine-clock)**: slow motion, hit-stop and pause.
@@ -2596,7 +2606,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/nolanbaxter/winding/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/nolanbaxter/winding/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/nolanbaxter/winding/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/nolanbaxter/winding/compare/v1.6.0...v1.6.1
