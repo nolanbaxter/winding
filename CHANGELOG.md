@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-30
+
+**Say so.** A misspelt option used to vanish without a word; now the console names it and the
+option it was close to. Adding or removing an object rewrites only what it changed, not the
+whole scene's draw data. The logo's sails are folded, and a new page shows the same small
+program in Winding, Three.js, Babylon.js and PlayCanvas, side by side.
+
 ### Added
 
 - **[Hello world, side by side](docs/SIDE-BY-SIDE.md)**: the same small program in Winding,
@@ -2510,7 +2517,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/nolanbaxter/winding/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/nolanbaxter/winding/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/nolanbaxter/winding/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/nolanbaxter/winding/compare/v1.5.0...v1.6.0
