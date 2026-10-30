@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Starting is faster.** `Winding.create` built its passes' pipelines one after another, and made
+  16 compute pipelines synchronously, each compiled on the GPU process's main thread while
+  everything else waited. They now compile side by side, off that thread. A 300-character scene
+  in Electron on Iris Xe, launch to first frame: 3.1 to 2.3 s on a first launch, with empty
+  shader caches (`create` 1.7 to 1.05 s); 1.2 to 1.0 s on every launch after.
+- **[`engine.prepare`](docs/API.md#engine-prepare) draws the shadow cascades both ways they draw.**
+  The first frame to cull a batch of casters for a cascade -- the first time a crowd straddles a
+  cascade's edge -- paid 0.1 s of the driver's recording, once, mid-play. That frame is now one of
+  `prepare`'s. The first frame of play after it went from 125-180 ms to 25 ms, and the first two
+  seconds from 7-19 missed frames to none.
 - **A shadow cascade casts a level of detail its map can show.** A group of levels (`MSFT_lod`)
   cast its shadow at the level the camera showed, into every cascade, however few texels the
   cascade had for it -- and at its finest from behind the camera, which the camera's test takes for

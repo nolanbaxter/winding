@@ -449,7 +449,7 @@ Notes: `run` already notices changes to the scene (assigning `scene.environment`
 
 Builds everything `scene` will draw with, before play starts, so its first frames don't draw without a feature while it is still being built. Call it behind a loading screen, after loading and adding what the level holds.
 
-Most pipelines are built when a model loads. Some are built the first time a frame needs them: reflection probes, decals, AO, OIT, TAA and FXAA. Until they are ready, frames draw without them, so they appear a few frames late. A frame only asks for what it shows, so `prepare` draws the scene through `camera` and, for a 3D scene, through a camera that sees all of it. It waits for what those frames started, then draws again for anything only a finished set reaches.
+Most pipelines are built when a model loads. Some are built the first time a frame needs them: reflection probes, decals, AO, OIT, TAA and FXAA. Until they are ready, frames draw without them, so they appear a few frames late. A frame only asks for what it shows, so `prepare` draws the scene through `camera` and, for a 3D scene, through a camera that sees all of it. It waits for what those frames started, then draws again for anything only a finished set reaches. The shadow cascades draw those frames both ways they can -- every caster, and only the ones a cascade's cull keeps -- since the first frame to draw a way pays for it once.
 
 | Argument | Default | Meaning |
 |---|---|---|

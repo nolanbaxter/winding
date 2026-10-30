@@ -3987,6 +3987,8 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         cam.position.set([0, 4, 6]);
         cam.target.set([0, 0, 0]);
         if (prepared) await probe.prepare(scene, cam);
+        // Its cascades drew every batch through their cull, and draw as they choose again after.
+        if (probe.renderer.shadows._cullEveryBatch) throw new Error('prepare left the cascades culling every batch');
         const before = probe.renderer.pipelines.created;
         probe.renderFrame(scene, cam);
         const firstWithAO = probe.renderer._frameAO;

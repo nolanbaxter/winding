@@ -1003,10 +1003,20 @@ export class Winding {
     const all = new Camera({ near: 0.01 });
     if (scene.renderableCount > 0 && scene.frame(all)) views.push(all);
     if (views.length === 0) return;
-    for (let round = 0; round < 2; round++) {
-      for (const view of views) this.renderer.render(scene, view, this.jobs);
-      await this.renderer._pipelinesBuilt();
-      this._assertAlive('prepare');
+    // The cascades draw every batch through their cull for these frames, and
+    // as they choose for the last: the first frame to draw a way pays for it
+    // once -- 0.1 s of the driver's recording on Iris Xe, for the culled one --
+    // and a crowd first straddling a cascade's edge mid-game would hitch.
+    const shadows = this.renderer.shadows;
+    try {
+      shadows._cullEveryBatch = true;
+      for (let round = 0; round < 2; round++) {
+        for (const view of views) this.renderer.render(scene, view, this.jobs);
+        await this.renderer._pipelinesBuilt();
+        this._assertAlive('prepare');
+      }
+    } finally {
+      shadows._cullEveryBatch = false;
     }
     for (const view of views) this.renderer.render(scene, view, this.jobs);
     await this.gpu.device.queue.onSubmittedWorkDone();
