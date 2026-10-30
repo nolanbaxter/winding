@@ -457,8 +457,8 @@ export class ParticleSystem {
       ],
     });
     const sortPipelineLayout = createPipelineLayout(device, { 0: sortLayout }, 'particles-sort');
-    const sorter = (entry) => pipelines.compute({ label: `particles-${entry}`, layout: sortPipelineLayout, shader: sortShader, entry });
-    const sort = { keys: sorter('makeKeys'), scan: sorter('scanCounts'), place: sorter('place') };
+    const sorter = (entry) => pipelines.computeAsync({ label: `particles-${entry}`, layout: sortPipelineLayout, shader: sortShader, entry });
+    const sorting = Promise.all([sorter('makeKeys'), sorter('scanCounts'), sorter('place')]);
     const imageLayout = device.createBindGroupLayout({
       label: 'particles-image',
       entries: [
@@ -466,7 +466,7 @@ export class ParticleSystem {
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
       ],
     });
-    const simulate = pipelines.compute({
+    const simulating = pipelines.computeAsync({
       label: 'particles-simulate',
       layout: createPipelineLayout(device, { 0: simulateLayout }, 'particles-simulate'),
       shader: simulateShader,
@@ -509,7 +509,8 @@ export class ParticleSystem {
         targets: [{ ...descriptors[blend].targets[0], format: rhi.surfaceFormat }], depth: null,
       };
     }
-    await pipelines.warm(Object.values(descriptors));
+    const [simulate, [keys, scan, place]] = await Promise.all([simulating, sorting, pipelines.warm(Object.values(descriptors))]);
+    const sort = { keys, scan, place };
     return new ParticleSystem(rhi, pipelines, { simulate, sort, sortLayout, descriptors, simulateLayout, frameLayout, emitterLayout, imageLayout, flatLayout }, frameBuffer);
   }
 

@@ -440,8 +440,10 @@ export class ClusteredLights {
     const shader = await compileShader(device, CLUSTER_SHADER, 'clustered.wgsl');
     const layout = createPipelineLayout(device, { 0: this.layout }, 'clusters');
     const pipelines = sharedPipelines(device);
-    this.buildPipeline = pipelines.compute({ label: 'cluster-bounds', layout, shader, entry: 'buildClusters' });
-    this.assignPipeline = pipelines.compute({ label: 'cluster-assign', layout, shader, entry: 'assignLights' });
+    [this.buildPipeline, this.assignPipeline] = await Promise.all([
+      pipelines.computeAsync({ label: 'cluster-bounds', layout, shader, entry: 'buildClusters' }),
+      pipelines.computeAsync({ label: 'cluster-assign', layout, shader, entry: 'assignLights' }),
+    ]);
   }
 
   /** Names lightBuffer, so it is rebuilt whenever that buffer is replaced. */

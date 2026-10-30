@@ -161,8 +161,8 @@ export class AutoExposure {
       ],
     });
     const pipelineLayout = createPipelineLayout(device, { 0: layout }, 'exposure');
-    const pipeline = (entry) => pipelines.compute({ label: `exposure-${entry}`, layout: pipelineLayout, shader, entry });
-    return new AutoExposure(rhi, layout, pipeline('histogram'), pipeline('adapt'));
+    const pipeline = (entry) => pipelines.computeAsync({ label: `exposure-${entry}`, layout: pipelineLayout, shader, entry });
+    return new AutoExposure(rhi, layout, ...await Promise.all([pipeline('histogram'), pipeline('adapt')]));
   }
 
   constructor(rhi, layout, histogram, adapt) {

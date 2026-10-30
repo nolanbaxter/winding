@@ -582,7 +582,7 @@ export class GpuDriven {
       ],
     });
 
-    this.pipeline = sharedPipelines(device).compute({
+    this.pipeline = await sharedPipelines(device).computeAsync({
       label: 'gpu-cull',
       layout: createPipelineLayout(device, { 0: this.layout }, 'gpu-cull'),
       shader,

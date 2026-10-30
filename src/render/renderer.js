@@ -507,27 +507,45 @@ export class Renderer {
       ...['rgba8unorm', 'rgba8unorm-srgb'].flatMap((format) => ['fsBox', 'fsHalve', 'fsBleed'].map((entry) => [format, entry])),
       [HDR_FORMAT, 'fs'], ['rgba8unorm-srgb', 'fs'],
     ]);
-    this.gpu = await GpuDriven.create(this.rhi, this.maxDraws, this.materials);
-    /** One draw per material for the one-object batches: see merged.js. */
-    this.merged = await MergedDraws.create(this.rhi, this.geometry);
-    this.gpu.merged = this.merged;
-    this._makeDrawBindGroup();
-    this.clusters = await ClusteredLights.create(this.rhi);
-    await mips;
-    // Two modules: the plain one declares no extension textures, so its
-    // pipelines take the core material layout.
-    [this.shader, this.extendedShader] = await Promise.all([
+    // Every pass at once: the GPU compiles their pipelines side by side, where
+    // one after another a cold start waited on each in turn.
+    const particles = ParticleSystem.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
+    [
+      this.gpu, this.merged, this.clusters, this.shader, this.extendedShader, this.shadows, this.skyboxPass,
+      this.post, this.upscaler, this.debug, this.sprites, this.particles, this.splats, this.dofPass,
+      this.view2d, this.overlay2d, this.hzb,
+    ] = await Promise.all([
+      GpuDriven.create(this.rhi, this.maxDraws, this.materials),
+      // One draw per material for the one-object batches: see merged.js.
+      MergedDraws.create(this.rhi, this.geometry),
+      ClusteredLights.create(this.rhi),
+      // Two modules: the plain one declares no extension textures, so its
+      // pipelines take the core material layout.
       compileShader(this.rhi.device, pbrShader(0), 'pbr.wgsl'),
       compileShader(this.rhi.device, pbrShader(this.materials.extensionSlots), 'pbr-extended.wgsl'),
+      ShadowMaps.create(this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout),
+      SkyboxPass.create(this.rhi, this.pipelines, null),
+      PostStack.create(this.rhi, this.pipelines, this.postOptions),
+      Upscaler.create(this.rhi, this.pipelines),
+      // Lines for one frame, drawn over the finished picture; see debug.js.
+      DebugLines.create(this.rhi, this.pipelines),
+      SpritePass.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT),
+      particles,
+      SplatPass.create(this.rhi, this.pipelines, HDR_FORMAT, this.frameBuffer),
+      DepthOfField.create(this.rhi, this.pipelines, HDR_FORMAT),
+      particles.then((system) => View2D.create(this.rhi, this.pipelines, system)),
+      // ponytail: a HUD's emitters aren't drawn -- the particle system follows one
+      // scene's at a time. A second system for the overlay, if a HUD needs sparks.
+      View2D.create(this.rhi, this.pipelines),
+      HierarchicalDepth.create(this.rhi, this.pipelines),
+      mips,
     ]);
-    this.shadows = await ShadowMaps.create(
-      this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout,
-    );
+    this.gpu.merged = this.merged;
+    this._makeDrawBindGroup();
     // The casters' geometry, which the shadow passes bind as the forward ones do,
     // and the merged groups (merged.js), which they draw as well.
     this.shadows.geometry = this.geometry;
     this.shadows.merged = this.merged;
-    this.skyboxPass = await SkyboxPass.create(this.rhi, this.pipelines, null);
     // Asked for at creation: ready for the first frame, as they always were.
     const asked = (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
     if (asked !== 0) await this._enableFeatures(asked);
@@ -549,24 +567,11 @@ export class Renderer {
      */
     this.fog = this._fogOption;
     this._fogData = new Float32Array(12);
-    this.post = await PostStack.create(this.rhi, this.pipelines, this.postOptions);
-    this.upscaler = await Upscaler.create(this.rhi, this.pipelines);
-    /** Lines for one frame, drawn over the finished picture; see debug.js. */
-    this.debug = await DebugLines.create(this.rhi, this.pipelines);
-    this.sprites = await SpritePass.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
-    this.particles = await ParticleSystem.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
-    this.splats = await SplatPass.create(this.rhi, this.pipelines, HDR_FORMAT, this.frameBuffer);
-    this.dofPass = await DepthOfField.create(this.rhi, this.pipelines, HDR_FORMAT);
-    this.view2d = await View2D.create(this.rhi, this.pipelines, this.particles);
-    // ponytail: a HUD's emitters aren't drawn -- the particle system follows one
-    // scene's at a time. A second system for the overlay, if a HUD needs sparks.
-    this.overlay2d = await View2D.create(this.rhi, this.pipelines);
     /**
      * Depth of field, or null for none: { focusDistance, fStop, sensorHeight }
      * -- see render/dof.js. A plain field, like fog.
      */
     this.dof = this._dofOption;
-    this.hzb = await HierarchicalDepth.create(this.rhi, this.pipelines);
     // The opaque, single-sided variant is what almost every asset uses; having
     // it ready means the first model added never waits on a compile.
     await this.ensureVariants([0]);

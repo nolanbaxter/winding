@@ -258,11 +258,10 @@ export class MergedDraws {
     this.dispatchLayout = device.createBindGroupLayout({ label: 'merged-dispatch', entries: [entry(0, { type: 'storage' })] });
     const layout = createPipelineLayout(device, { 0: this.layout }, 'merged');
     const sizeLayout = createPipelineLayout(device, { 0: this.layout, 1: this.dispatchLayout }, 'merged-size');
-    const make = (name, l) => sharedPipelines(device).compute({ label: `merged-${name}`, layout: l, shader, entry: name });
-    this.flipPipeline = make('flip', layout);
-    this.sizePipeline = make('size', sizeLayout);
-    this.copyPipeline = make('copy', layout);
-    this.copyAllPipeline = make('copyAll', layout);
+    const make = (name, l) => sharedPipelines(device).computeAsync({ label: `merged-${name}`, layout: l, shader, entry: name });
+    [this.flipPipeline, this.sizePipeline, this.copyPipeline, this.copyAllPipeline] = await Promise.all([
+      make('flip', layout), make('size', sizeLayout), make('copy', layout), make('copyAll', layout),
+    ]);
   }
 
   /** A buffer of at least `bytes`, replaced only when it has to grow. */
