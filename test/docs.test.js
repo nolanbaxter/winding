@@ -18,6 +18,7 @@ import { OrbitController } from '../src/app/controllers.js';
 import { StatsOverlay } from '../src/app/overlay.js';
 import * as winding from '../src/winding.js';
 import * as bench from '../src/bench.js';
+import { OPTIONS } from '../src/core/options.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -78,6 +79,63 @@ test('the index lists every entry', () => {
   const entries = [...API.matchAll(/<a id="([^"]+)"><\/a>\s*\n###/g)].map((m) => m[1]);
   const missing = entries.filter((id) => !listed.has(id));
   assert.deepEqual(missing, [], `not in the index: ${missing.join(', ')}`);
+});
+
+/** The option names of each table under an entry's anchor, to the next anchor: [[names], ...]. */
+function tablesUnder(id) {
+  // The anchor on the entry's own heading: a section can share its name.
+  const start = API.search(new RegExp(`<a id="${id}"></a>\\s*\\n###`));
+  assert.ok(start >= 0, `no entry ${id}`);
+  const next = API.indexOf('<a id="', start + 1);
+  const section = API.slice(start, next < 0 ? undefined : next);
+  const tables = [];
+  for (const block of section.split(/\n(?=\| *(?:Option|Field) *\|)/).slice(1)) {
+    const rows = block.split('\n').slice(2).filter((line) => line.startsWith('|'));
+    tables.push(rows.map((row) => /^\| *`([^`]+)`/.exec(row)?.[1]).filter(Boolean));
+    if (!rows.length) break;
+  }
+  return tables;
+}
+
+/**
+ * Where each call's names are documented: its entry, and which of the tables
+ * there. The calls not here are listed with why.
+ */
+const TABLES = {
+  create: ['winding-create', 0], 'create shadows': ['winding-create', 1],
+  createScene: ['engine-createscene', 0], load: ['engine-load', 0], loadTexture: ['engine-loadtexture', 0],
+  loadLUT: ['engine-loadlut', 0], loadEnvironment: ['engine-loadenvironment', 0], run: ['engine-run', 0],
+  renderFrame: ['engine-renderframe', 0], createTarget: ['engine-createtarget', 0], grading: ['engine-grading', 0],
+  autoExposure: ['renderer-autoexposure', 0], fog: ['renderer-fog', 0], dof: ['renderer-dof', 0],
+  Scene: ['scene-constructor', 0], createNode: ['scene-createnode', 0], add: ['scene-add', 0], frame: ['scene-frame', 0],
+  raycast: ['scene-raycast', 0], Camera: ['camera', 0], frameBounds: ['camera-framebounds', 0],
+  play: ['node-play', 0], stop: ['node-stop', 0], spriteSheet: ['spritesheet', 0],
+  addLight: ['scene-addlight', 0], addEmitter: ['scene-addemitter', 0], addDecal: ['scene-adddecal', 0],
+  addProbe: ['scene-addprobe', 0], addSprite: ['scene-addsprite', 0], addText: ['scene-addtext', 0],
+  addShape: ['scene-addshape', 0], addPath: ['scene-addpath', 0], addTilemap: ['scene-addtilemap', 0],
+  Camera2D: ['camera2d', 0], OrbitController: ['orbitcontroller', 0], StatsOverlay: ['statsoverlay', 0],
+  'benchmark.run': ['benchmark-run', 0], Environment: ['environment', 0], 'Environment sky': ['environment', 1],
+  parseHDR: ['parsehdr', 0],
+};
+const UNTABLED = new Map([
+  ['create post', "listed in the post option's row of Winding.create"],
+  ['loadSplats', 'one option, fetch, in its description'],
+  ['addSplats', 'its three names are in its heading'],
+]);
+
+test("every call's option names are the ones its entry documents", () => {
+  const wrong = [];
+  for (const [caller, names] of Object.entries(OPTIONS)) {
+    if (caller.startsWith('set') && caller !== 'setLight' && OPTIONS[`add${caller.slice(3)}`]) continue;
+    if (caller === 'setLight' || UNTABLED.has(caller)) continue;
+    const where = TABLES[caller];
+    if (!where) { wrong.push(`${caller}: no table named`); continue; }
+    const documented = tablesUnder(where[0])[where[1]] ?? [];
+    const extra = names.filter((n) => !documented.includes(n));
+    const missing = documented.filter((n) => !names.includes(n));
+    if (extra.length || missing.length) wrong.push(`${caller}: not documented ${extra}; not taken ${missing}`);
+  }
+  assert.deepEqual(wrong, []);
 });
 
 console.log('\nsrc/winding.d.ts');

@@ -11,6 +11,7 @@
 
 import { quatSlerp, quatNormalize, quatMultiply, quatConjugate } from '../core/math/quat.js';
 import { handleIndex } from '../core/handle.js';
+import { checkOptions } from '../core/options.js';
 
 const STEP = 'STEP';
 const CUBICSPLINE = 'CUBICSPLINE';
@@ -415,9 +416,9 @@ export class AnimationPlayer {
    * advance(), so a player left at speed 0 holds whatever pose the asset
    * loaded in.
    */
-  play(nameOrIndex, {
-    loop = true, speed = 1, time = 0, fade = 0, layer = 'base', weight = 1, join = false, sync = false, add,
-  } = {}) {
+  play(nameOrIndex, options = {}) {
+    checkOptions('play', options);
+    let { loop = true, speed = 1, time = 0, fade = 0, layer = 'base', weight = 1, join = false, sync = false, add } = options;
     if (add !== undefined) throw new Error('play: add is now join, with the same value');
     const clip = this._clip(nameOrIndex);
     if (!clip) return false;
@@ -484,7 +485,9 @@ export class AnimationPlayer {
    * with one, the clips fade out, and a layer above the base hands the nodes
    * back to the layers beneath.
    */
-  stop({ layer, fade = 0 } = {}) {
+  stop(options = {}) {
+    checkOptions('stop', options);
+    const { layer, fade = 0 } = options;
     for (const l of layer === undefined ? this.layers : [this._layer(layer)]) {
       if (fade > 0) for (const track of l.tracks) leave(track, fade);
       else l.tracks = [];

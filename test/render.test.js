@@ -25,7 +25,7 @@ import { quatCreate, quatSetAxisAngle } from '../src/core/math/quat.js';
 import { vec3Create } from '../src/core/math/vec3.js';
 import { Camera } from '../src/scene/camera.js';
 import { Scene } from '../src/scene/scene.js';
-import { GpuDriven, DRAW_DATA_BYTES, CULL_PHASES } from '../src/render/gpudriven.js';
+import { GpuDriven, DRAW_DATA_BYTES, CULL_PHASES, writeChanged } from '../src/render/gpudriven.js';
 import { SkinPalette } from '../src/render/skin.js';
 import { MorphStore } from '../src/render/morph.js';
 import { GeometryArena } from '../src/render/geometry.js';
@@ -604,6 +604,10 @@ function growableGpu(materials) {
   gpu.batchSize = new Uint32Array(gpu.batchCapacity);
   gpu.indirectData = new Uint32Array(gpu.batchCapacity * CULL_PHASES * 5);
   gpu.batchStaging = new ArrayBuffer(gpu.alignment * (gpu.batchCapacity * CULL_PHASES + 2));
+  gpu.batchStagingU32 = new Uint32Array(gpu.batchStaging);
+  gpu._held = { itemBatch: new Uint32Array(1024), batchOrder: new Uint32Array(1024), batchFirst: new Uint32Array(256), batchBase: new Uint32Array(256 * CULL_PHASES + 2) };
+  gpu._touchedMark = new Uint8Array(1024);
+  gpu._touched = [];
   gpu.batchPrimitive = [];
   gpu.blendedCasters = [];
   gpu.buffersRevision = 0;
@@ -615,6 +619,28 @@ function growableGpu(materials) {
   gpu.boundsData = new Float32Array(gpu.capacity * 12);
   return gpu;
 }
+
+test('a batch table uploads only the entries that changed, and every one when asked', () => {
+  const writes = [];
+  const queue = { writeBuffer: (buffer, offset, data, start, length) => writes.push([offset, start, length]) };
+  // Entries 64 words apart, as the per-batch uniforms are at a 256-byte alignment.
+  const next = new Uint32Array(64 * 6);
+  const held = new Uint32Array(6);
+  [5, 6, 7, 8, 9, 10].forEach((v, k) => { next[k * 64] = v; });
+  assert.equal(writeChanged(queue, {}, next, held, 6, 64, true), (5 * 64 + 1) * 4, 'all of it, first time');
+  writes.length = 0;
+  next[64] = 60;
+  next[5 * 64] = 90;
+  assert.equal(writeChanged(queue, {}, next, held, 6, 64), 8, 'two words');
+  assert.deepEqual(writes, [[256, 64, 1], [1280, 320, 1]], 'each at its own place: three entries between cost more than a second call');
+  writes.length = 0;
+  assert.equal(writeChanged(queue, {}, next, held, 6, 64), 0, 'and nothing once held');
+  // Packed entries a few apart go as one run, the gap included.
+  const packed = new Uint32Array(100), heldPacked = new Uint32Array(100);
+  packed[10] = 1; packed[14] = 1;
+  writeChanged(queue, {}, packed, heldPacked, 100);
+  assert.deepEqual(writes, [[40, 10, 5]]);
+});
 
 test('growing draw data replaces both views of it', () => {
   // The bug: _grow allocated a new drawData and left drawDataU32 viewing the
@@ -657,6 +683,11 @@ function batchesFor(scene) {
   gpu.transparentItems = new Uint32Array(16);
   gpu.alignment = 256;
   gpu.batchStaging = new ArrayBuffer(256 * 33);
+  gpu.batchStagingU32 = new Uint32Array(gpu.batchStaging);
+  gpu.batchCapacity = 16;
+  gpu._held = { itemBatch: new Uint32Array(16), batchOrder: new Uint32Array(16), batchFirst: new Uint32Array(16), batchBase: new Uint32Array(50) };
+  gpu._touched = [];
+  gpu._touchedMark = new Uint8Array(16);
   gpu._zeroFlags = new Uint32Array(16);
   gpu.stats = {};
   gpu.rhi = { queue: { writeBuffer() {} } };

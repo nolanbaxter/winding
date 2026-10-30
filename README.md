@@ -127,6 +127,10 @@ seven seconds, and holds still for anyone who asked for less motion; every numbe
 description. To rerun it, open <code>bench/compare.html</code> as a file in Chrome or Edge: it runs
 every scene twice and shows the results.</sub>
 
+**The code, side by side.** [Hello world, side by side](docs/SIDE-BY-SIDE.md) has the same small
+program written in all four engines: a model, a sun with shadows and an orbit camera. It also lists
+what each engine does for you and what you have to write.
+
 ## Install
 
 There is no build step and there are no dependencies, so a URL is the whole install. The files you
@@ -136,7 +140,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.7.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/winding.js';
 </script>
 ```
 
@@ -161,8 +165,8 @@ completion and hover help.
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.7.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.7.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/"
   }
 }
 </script>

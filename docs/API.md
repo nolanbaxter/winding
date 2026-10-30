@@ -40,6 +40,11 @@ These hold everywhere, so one learned is one learned for good.
   any screen.
 - **Errors are thrown, and name the call.** A bad option throws at the call that took it, with
   the option's name and what it should be, rather than drawing something quietly wrong.
+- **An option a call doesn't take is said once in the console**, with the nearest name it does
+  take: `addLight: unknown option 'castShadows' (did you mean 'castShadow'?); it is ignored`. The
+  rest of the call goes ahead as if the name weren't there. Each name is said once per call, so a
+  loop doesn't fill the console. For `setX`, `position` and `parent` are the node's, and the
+  warning says which node call sets them.
 - **Nothing needs setting up or tearing down in order.** There's no `init()`, and the engine grows
   what it needs as you add to a scene.
 

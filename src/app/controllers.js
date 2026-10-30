@@ -9,6 +9,7 @@
 
 import { vec3Create } from '../core/math/vec3.js';
 import { fitDistance, boundsRadius } from '../scene/camera.js';
+import { checkOptions } from '../core/options.js';
 
 const MIN_PITCH = -Math.PI / 2 + 0.01;   // never exactly straight down: at the
 const MAX_PITCH = Math.PI / 2 - 0.01;    // pole the up vector becomes ambiguous
@@ -23,12 +24,14 @@ const DRAG_SLOP = 3;
  * still works, it just snaps instead of easing.
  */
 export class OrbitController {
-  constructor(camera, element, {
-    distance = 6, yaw = 0, pitch = 0.3, target = [0, 0, 0],
-    minDistance = 0.1, maxDistance = 1000,
-    rotateSpeed = 0.005, zoomSpeed = 0.0015, panSpeed = 0.002,
-    damping = 12,
-  } = {}) {
+  constructor(camera, element, options = {}) {
+    checkOptions('OrbitController', options);
+    const {
+      distance = 6, yaw = 0, pitch = 0.3, target = [0, 0, 0],
+      minDistance = 0.1, maxDistance = 1000,
+      rotateSpeed = 0.005, zoomSpeed = 0.0015, panSpeed = 0.002,
+      damping = 12,
+    } = options;
     this.camera = camera;
     this.element = element;
 

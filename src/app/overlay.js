@@ -5,6 +5,8 @@
 // compiling shaders mid-frame, and if `visible` never drops below the total
 // then culling is not actually wired in.
 
+import { checkOptions } from '../core/options.js';
+
 const STYLE = `
   position: fixed; left: 12px; bottom: 12px; z-index: 9999;
   font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -13,7 +15,9 @@ const STYLE = `
 `;
 
 export class StatsOverlay {
-  constructor(engine, { interval = 0.5, parent = document.body } = {}) {
+  constructor(engine, options = {}) {
+    checkOptions('StatsOverlay', options);
+    const { interval = 0.5, parent = document.body } = options;
     this.engine = engine;
     this.interval = interval;
     this.element = document.createElement('div');

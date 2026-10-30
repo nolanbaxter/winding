@@ -3959,6 +3959,65 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return `batches per frame: ${counts.join(', ')}`;
   });
 
+  await step('a scene added to and removed from draws what a scene built fresh draws', async () => {
+    // Adding or removing rewrites only the renderable slots that changed --
+    // the one added, and the one a removal moved the last renderable into --
+    // and uploads only the batch-table entries that changed. A slot left
+    // stale draws the wrong tile or none, so the frame must match, pixel for
+    // pixel, a scene that holds the same tiles from the start.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '40px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 40);
+      const colours = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [0, 1, 1], [1, 0, 1], [1, 1, 1], [0.5, 0.2, 0.9]];
+      // Each its own asset, so each is its own batch, as distinct meshes are. 3.2 m
+      // tiles 4 m apart: tiles that overlapped would tie in depth, and draw order
+      // would pick the colour.
+      const tiles = await Promise.all(colours.map((c) => probe.load(buildFeatureGLB({ baseColorFactor: [...c, 1] }))));
+      const place = (scene, k) => scene.add(tiles[k]).setPosition(k * 4 - 14, 0, 0).setAxisAngle([1, 0, 0], -Math.PI / 2);
+      const cam = new Camera({ fovY: 0.8, orthographic: true });
+      cam.position.set([0, 20, 0]);
+      cam.target.set([0, 0, 0]);
+      cam.up.set([0, 0, -1]);
+      const frame = async (scene) => {
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        return probe.gpu.readPixels();
+      };
+      const changed = probe.createScene();
+      const nodes = [0, 1, 2, 3, 4, 5].map((k) => place(changed, k));
+      await frame(changed);
+      changed.remove(nodes[1]);   // the last renderable moves into its slot
+      place(changed, 6);
+      await frame(changed);
+      changed.remove(nodes[3]);
+      place(changed, 7);
+      const after = await frame(changed);
+
+      const fresh = probe.createScene();
+      for (const k of [0, 2, 4, 5, 6, 7]) place(fresh, k);
+      const expected = await frame(fresh);
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      let differ = 0;
+      for (let i = 0; i < after.length; i += 4) {
+        if (after[i] !== expected[i] || after[i + 1] !== expected[i + 1] || after[i + 2] !== expected[i + 2]) differ++;
+      }
+      // The comparison means something only if the tiles are in the frame.
+      const shades = new Set();
+      for (let i = 0; i < expected.length; i += 4) shades.add(`${expected[i] >> 4},${expected[i + 1] >> 4},${expected[i + 2] >> 4}`);
+      if (shades.size < 7) throw new Error(`only ${shades.size} shades in the frame: the tiles are not all in view`);
+      if (differ > 0) throw new Error(`${differ} pixels differ from a scene built fresh`);
+      return `identical to a scene built fresh, ${after.length / 4} pixels, ${shades.size} shades`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a load that fails part way gives back what it had built', async () => {
     const realEnsure = engine.renderer.ensureVariants;
     engine.renderer.ensureVariants = () => Promise.reject(new Error('forced'));

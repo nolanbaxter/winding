@@ -589,6 +589,46 @@ test('adding under a parent node inherits its transform', () => {
 
 // ------------------------------------------------------------------- node
 
+console.log('\noptions');
+
+test('a misspelt option is warned about once, with the name it was close to', () => {
+  const said = [];
+  const warn = console.warn;
+  console.warn = (message) => said.push(message);
+  try {
+    const scene = new Scene();
+    scene.addLight({ castShadows: false });
+    scene.addLight({ castShadows: false });
+    scene.addLight({ position: [0, 0, 0], sparkle: 1 });
+    const lamp = scene.addLight({});
+    scene.setLight(lamp, { colour: [1, 0, 0] });
+    scene.setSprite(scene.addSprite({ texture: { view: {}, width: 1, height: 1 } }), { position: [1, 2, 3] });
+    new Camera({ fov: 1 });
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(said, [
+    "addLight: unknown option 'castShadows' (did you mean 'castShadow'?); it is ignored",
+    "addLight: unknown option 'sparkle'; it is ignored",
+    "setLight: unknown option 'colour' (did you mean 'color'?); it is ignored",
+    "setSprite: unknown option 'position' (that is the node's: use node.setPosition); it is ignored",
+    "Camera: unknown option 'fov' (did you mean 'fovY'?); it is ignored",
+  ]);
+});
+
+test('the names a call throws about itself are left to it', () => {
+  const said = [];
+  const warn = console.warn;
+  console.warn = (message) => said.push(message);
+  try {
+    assert.throws(() => new Camera2D({ rotation: 1 }), /rotation is now angle/);
+    assert.throws(() => new Scene().addProbe({ blend: 1, size: [1, 1, 1] }), /blend is now fade/);
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(said, []);
+});
+
 console.log('\nnode');
 
 test('setters mark the transform dirty, so the world matrix follows', () => {
@@ -739,6 +779,21 @@ test('removal swap-removes, so renderable indices are not stable', () => {
   first.destroy();
   assert.equal(scene.renderableCount, 1);
   assert.equal(scene.renderableEntity[0], second.entity, 'the last one moved down');
+});
+
+test('the slots an add or a removal changes are listed for the renderer, until there are more than slots', () => {
+  const scene = new Scene({ capacity: 64 });
+  const nodes = [0, 1, 2].map(() => scene.add(fakeAsset()));
+  scene.renderablesTouched = [];                     // as the renderer leaves it after a rebuild
+  nodes[0].destroy();
+  assert.deepEqual(scene.renderablesTouched, [0], 'the last renderable moved into slot 0');
+  const added = scene.add(fakeAsset());
+  assert.deepEqual(scene.renderablesTouched, [0, 2], 'and the new one went to the end');
+  added.destroy();
+  assert.deepEqual(scene.renderablesTouched, [0, 2], 'the last one removed moves nothing');
+  // More entries than slots says "all of them" as well, and stops the list growing.
+  for (let i = 0; i < 4; i++) scene.add(fakeAsset()).destroy();
+  assert.equal(scene.renderablesTouched, null);
 });
 
 test('a stale node reports itself dead rather than acting on a reused slot', () => {
