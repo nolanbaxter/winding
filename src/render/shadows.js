@@ -1560,7 +1560,10 @@ export class ShadowMaps {
     // With a cascade's cull phase, a batch that reaches past the cascade draws
     // the casters the GPU kept; one wholly inside it draws them all, directly,
     // since culling would keep every one and an indirect draw costs more.
-    const culled = (b) => phase !== null && gpu.batchSize[b] > 1 && !boxWithinOrtho(this._batchBoxes, b * 6, cull, at) ? phase : null;
+    // With LOD every batch goes through the cascade's cull, whose choice of
+    // level differs from the camera's: drawn some one way and some the other,
+    // a group's levels could each be left out by the other choice.
+    const culled = (b) => phase !== null && (gpu.hasLod || (gpu.batchSize[b] > 1 && !boxWithinOrtho(this._batchBoxes, b * 6, cull, at))) ? phase : null;
     // Which list the frame group points the shader at: the static order, or the
     // visible list a culled draw needs. Switched only when a draw needs the other.
     const lists = phase !== null && bindGroup === this.cascadeBindGroup && this.cascadeCulledBindGroup !== bindGroup

@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A shadow cascade casts a level of detail its map can show.** A group of levels (`MSFT_lod`)
+  cast its shadow at the level the camera showed, into every cascade, however few texels the
+  cascade had for it -- and at its finest from behind the camera, which the camera's test takes for
+  infinitely close. Each cascade now casts the coarser of the camera's level and the one its own
+  resolution calls for, never finer than the mesh on screen. Nine hundred spheres in three levels,
+  every cascade redrawn: shadows from 5.2 to 3.7 ms of GPU time.
 - **A shadow cascade draws only the casters that reach it.** A cascade used to skip a batch of
   instances only when the box around all of them missed it, so a crowd spread across a map drew
   every member into every cascade. Each cascade drawn whole is now culled caster by caster on the

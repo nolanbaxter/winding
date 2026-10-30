@@ -344,7 +344,8 @@ transforms, unlit, IOR, specular, clear coat, sheen, anisotropy, iridescence, tr
 volume, quantized attributes, `KHR_animation_pointer`, and meshopt compression (both the EXT and KHR
 forms, decoded by a decoder written from the specs — no library, no WebAssembly). Meshes made in
 code, from arrays ([`engine.createMesh`](docs/API.md#engine-createmesh)), come in the same way. Levels of detail
-(`MSFT_lod`) are switched on the GPU. Any other extension a file *requires* is refused rather than
+(`MSFT_lod`) are switched on the GPU, and each shadow cascade casts the coarser of the camera's
+level and the one its own map's resolution calls for. Any other extension a file *requires* is refused rather than
 loaded into geometry that is quietly wrong. A file you didn't write can't ask for more than the
 device can hold: counts, strides, offsets, sparse data, NaNs and image sizes are checked before
 anything is allocated.

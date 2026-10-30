@@ -160,6 +160,10 @@ struct CullParams {
   // A cascade phase's cascade: its orthographic view-projection, light space
   // to the unit box the shadow map covers.
   cascade       : mat4x4<f32>,
+  // And what a radius covers of it, in the screen's terms: 1 / its half-height
+  // (the orthographic projectionScale), times its texels over the screen's
+  // pixels -- so a level of detail is chosen by what the map can show.
+  cascadeScale  : f32,
 };
 
 /**
@@ -268,12 +272,23 @@ fn occluded(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
  * counts as filling the screen, so its finest level stands.
  */
 fn lodSelected(item : u32) -> bool {
+  return lodSelectedBelow(item, 3.0e38);
+}
+
+/**
+ * lodSelected, at no more than "most" coverage: the camera's level, or a
+ * coarser one if "most" is less. A cascade passes what its own resolution
+ * shows of the group, so its shadow is never finer than the mesh the camera
+ * sees -- and a group behind the camera, which the camera's test calls
+ * infinitely close, casts at the level its cascade shows rather than its finest.
+ */
+fn lodSelectedBelow(item : u32, most : f32) -> bool {
   let sphere = bounds[item].lod;
   // A negative radius is a hidden item (node.setVisible): selected by no view.
   if (sphere.w < 0.0) { return false; }
   if (sphere.w == 0.0) { return true; }
   let w = (params.viewProj * vec4<f32>(sphere.xyz, 1.0)).w;
-  let coverage = select(3.0e38, sphere.w * params.projectionScale / w, w > 0.0);
+  let coverage = min(select(3.0e38, sphere.w * params.projectionScale / w, w > 0.0), most);
   return coverage >= bounds[item].minPoint.w && coverage < bounds[item].maxPoint.w;
 }
 
@@ -348,7 +363,8 @@ fn cull(@builtin(global_invocation_id) id : vec3<u32>) {
     // A CASCADE: the casters that reach it, at the level the camera chose. A
     // horde spread across a map reaches every cascade as a batch, and only a
     // corner of each as casters.
-    if (batched && lodSelected(item) && inCascade(boxMin, boxMax)) { emit(batch, item); }
+    let sphere = bounds[item].lod;
+    if (batched && lodSelectedBelow(item, sphere.w * params.cascadeScale) && inCascade(boxMin, boxMax)) { emit(batch, item); }
     return;
   }
 
@@ -444,7 +460,8 @@ export class GpuDriven {
     this.indirectBuffer = createBuffer(rhi, {
       label: 'indirect-args',
       size: this.batchCapacity * CULL_PHASES * INDIRECT_BYTES,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      // COPY_SRC: what each phase drew can be read back, as the GPU suite does.
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
 
     // One slice per cull phase, which write disjoint slices of it. Phase p's
@@ -490,8 +507,11 @@ export class GpuDriven {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // planes(5 * 16) + viewProj(64) + 4 u32 + (phase, indirectBase, visibleBase, projectionScale) + cascade(64)
-    this.cullParams = new ArrayBuffer(FRUSTUM_PLANE_COUNT * 16 + 64 + 16 + 16 + 64);
+    // planes(5 * 16) + viewProj(64) + 4 u32 + (phase, indirectBase, visibleBase, projectionScale)
+    // + cascade(64) + cascadeScale, the struct rounded up to 16 bytes.
+    this.cullParams = new ArrayBuffer(FRUSTUM_PLANE_COUNT * 16 + 64 + 16 + 16 + 64 + 16);
+    /** A cascade's matrix and coverage scale, as setCascades writes them into its params slot. */
+    this._cascadeParams = new Float32Array(20);
     this.cullParamsF32 = new Float32Array(this.cullParams);
     this.cullParamsU32 = new Uint32Array(this.cullParams);
     // One buffer, one slot per phase, so a single dispatch pair needs no
@@ -712,7 +732,7 @@ export class GpuDriven {
     });
     this.indirectBuffer = createBuffer(this.rhi, {
       label: 'indirect-args', size: capacity * CULL_PHASES * INDIRECT_BYTES,
-      usage: GPUBufferUsage.INDIRECT | STORAGE,
+      usage: GPUBufferUsage.INDIRECT | STORAGE | GPUBufferUsage.COPY_SRC,
     });
     this.batchBuffer = createBuffer(this.rhi, {
       label: 'batch-info', size: this.batchStaging.byteLength,
@@ -1091,16 +1111,23 @@ export class GpuDriven {
    * counts are reset and their matrices written after update()'s writes, in
    * queue order, before the dispatches that read them.
    */
-  setCascades(layers, matrices) {
+  setCascades(layers, matrices, texelsPerPixel = 1) {
     const queue = this.rhi.queue;
     const words = INDIRECT_BYTES / 4;
-    // Where the cascade matrix sits in a params slot: after everything else.
-    const at = this.cullParams.byteLength - 64;
+    // Where the cascade matrix sits in a params slot: after the camera's fields.
+    const at = FRUSTUM_PLANE_COUNT * 16 + 64 + 32;
+    const out = this._cascadeParams;
     for (const layer of layers) {
       const phase = CULL_CASCADE + layer;
       queue.writeBuffer(this.indirectBuffer, phase * this.batchCapacity * INDIRECT_BYTES,
         this.indirectData, phase * this.batchCapacity * words, Math.max(this.batchCount, 1) * words);
-      queue.writeBuffer(this.cullParamsBuffer, phase * this.cullParamsStride + at, matrices, layer * 16, 16);
+      out.set(matrices.subarray(layer * 16, layer * 16 + 16), 0);
+      // An orthographic matrix's y scale is 1 / its half-height: what a radius
+      // covers of it, which the map's texels over the screen's pixels turns
+      // into the coverage a camera would have to see for as much detail.
+      // _cascadeLod false: the camera's level, for an A/B and nothing else.
+      out[16] = this._cascadeLod === false ? 3.0e38 : Math.abs(matrices[layer * 16 + 5]) * texelsPerPixel;
+      queue.writeBuffer(this.cullParamsBuffer, phase * this.cullParamsStride + at, out);
     }
   }
 

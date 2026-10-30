@@ -1290,7 +1290,8 @@ export class Renderer {
       this._hasSceneBounds ? this._sceneMin : null, this._hasSceneBounds ? this._sceneMax : null);
     this.shadows.updateLocal(scene, camera, changes);
     // The cascades drawn whole this frame, their matrices and counts for the cull.
-    this.gpu.setCascades(this.shadows.cascadesToCull(), this.shadows.matrices);
+    // With the map's texels over the view's pixels, for the level of detail each cascade can show.
+    this.gpu.setCascades(this.shadows.cascadesToCull(), this.shadows.matrices, this.shadows.size / height);
     this._shadowCacheScene = scene;
     this._shadowCacheRevision = target !== null ? -1 : scene.revision;
     this.stats.shadowViews = this.shadows.localCount;

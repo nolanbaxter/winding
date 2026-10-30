@@ -4008,6 +4008,70 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return `${unprepared} pipelines started by the first frames without prepare, none with it, and AO from the first frame`;
   });
 
+  await step('a cascade casts a level of detail no finer than the camera shows, and coarser where its map has fewer texels', async () => {
+    // Small shadow maps under a tall view: a cascade has fewer texels on a
+    // group than the screen has pixels, so it may cast a coarser level. Read
+    // back from the cull: every cascade that reaches the group draws exactly
+    // one of its levels, never one finer than the camera's, and one draws coarser.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '120px';
+    canvas.style.height = '480px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 }, shadows: { size: 128 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(120, 480);
+      const lod = await probe.load(buildLodGLB([0.5, 0.2, 0.01]));
+      const ground = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] }));
+      const scene = probe.createScene();
+      scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(20, 20, 1);
+      scene.add(lod).setPosition(0, 1.6, 0);
+      scene.addLight({ type: 'directional', direction: [-0.3, -0.9, -0.3], intensity: 3 });
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 2, 5]);
+      cam.target.set([0, 1.6, 0]);
+      await probe.prepare(scene, cam);
+      probe.renderFrame(scene, cam);
+      const gpu = probe.renderer.gpu;
+      const levels = lod.meshes.map((mesh) => {
+        for (let b = 0; b < gpu.batchCount; b++) if (gpu.batchPrimitive[b] === mesh.primitives[0]) return b;
+        return -1;
+      });
+      const layers = [...probe.renderer.shadows._toCull];
+      const staging = probe.gpu.device.createBuffer({ size: gpu.indirectBuffer.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = probe.gpu.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(gpu.indirectBuffer, 0, staging, 0, gpu.indirectBuffer.size);
+      probe.gpu.device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      staging.destroy();
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      const count = (phase, b) => words[(phase * gpu.batchCapacity + b) * 5 + 1];
+      // The camera's level: drawn early or late.
+      const camera = levels.findIndex((b) => count(0, b) + count(1, b) > 0);
+      if (camera < 0 || layers.length === 0) throw new Error(`camera level ${camera}, ${layers.length} cascades culled: nothing to compare`);
+      const report = [];
+      let coarser = false;
+      for (const layer of layers) {
+        const drawn = levels.map((b) => count(3 + layer, b));
+        const total = drawn.reduce((x, y) => x + y, 0);
+        report.push(`cascade ${layer}: ${drawn.join('/')}`);
+        if (total === 0) continue;   // the group is outside this cascade
+        const level = drawn.findIndex((n) => n > 0);
+        if (total !== 1) throw new Error(`a cascade drew ${total} of the group's levels: ${report.join(', ')}`);
+        if (level < camera) throw new Error(`a cascade cast level ${level}, finer than the camera's ${camera}: ${report.join(', ')}`);
+        coarser ||= level > camera;
+      }
+      if (!coarser) throw new Error(`no cascade cast coarser than the camera's level ${camera}: ${report.join(', ')}`);
+      return `camera level ${camera}; ${report.join(', ')} (finest to coarsest)`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a mesh made from arrays draws its vertex colours, flat-shaded, as a loaded one does', async () => {
     // A 9 x 9 grid, red down its left edge and blue down its right, bumped
     // into hills, with no normals: drawn from above, red on the left of the
