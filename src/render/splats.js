@@ -459,7 +459,7 @@ export class SplatPass {
       ],
     });
     const sort = createPipelineLayout(device, { 0: sortLayout }, 'splats-sort');
-    const compute = (entry) => pipelines.compute({ label: `splats-${entry}`, layout: sort, shader: sortShader, entry });
+    const compute = (entry) => pipelines.computeAsync({ label: `splats-${entry}`, layout: sort, shader: sortShader, entry });
     const drawDescriptor = {
       label: 'splats',
       layout: createPipelineLayout(device, { 0: drawLayout, 1: frameLayout }, 'splats'),
@@ -477,14 +477,16 @@ export class SplatPass {
     };
     // Plain now; the one that reads shaded colours when a capture with harmonics loads.
     const shadedDescriptor = { ...drawDescriptor, label: 'splats-shaded', constants: { SHADED: 1 } };
-    await pipelines.warm([drawDescriptor]);
+    const [keys, scan, scatter] = await Promise.all([
+      compute('makeKeys'), compute('scanCounts'), compute('place'), pipelines.warm([drawDescriptor]),
+    ]);
     const shadeLayoutGPU = createPipelineLayout(device, { 0: shadeLayout }, 'splats-shade');
     return new SplatPass(rhi, frameBuffer, {
       sortLayout, drawLayout, frameLayout, shadeLayout, pipelines, shadedDescriptor,
       shadeFor: (degree) => pipelines.compute({
         label: `splats-shade${degree}`, layout: shadeLayoutGPU, shader: shadeShader, entry: 'shade', constants: { SH_DEGREE: degree },
       }),
-      keys: compute('makeKeys'), scan: compute('scanCounts'), scatter: compute('place'),
+      keys, scan, scatter,
       draw: pipelines.get(drawDescriptor),
       shades: [],
     });
@@ -549,6 +551,7 @@ export class SplatPass {
     this.count = 0;
     this.sorted = 0;
     for (const [entity, record] of scene.splats) {
+      if (scene.hidden?.[handleIndex(entity)] === 1) continue;
       const splats = record.splats;
       if (splats.unloaded) throw new Error('addSplats: these splats were unloaded; remove the node first');
       const state = this._stateFor(record, splats, scene, entity);

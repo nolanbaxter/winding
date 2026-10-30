@@ -56,6 +56,23 @@ export function boxInOrtho(data, k, m, o) {
   return x1 >= -1 && x0 <= 1 && y1 >= -1 && y0 <= 1 && z1 >= 0 && z0 <= 1;
 }
 
+/**
+ * Is the box wholly inside the orthographic view at m[o]? boxInOrtho's
+ * extent, against the same unit box, from within: every caster of a batch
+ * whose box passes this is in the view, so culling them one by one keeps all.
+ */
+export function boxWithinOrtho(data, k, m, o) {
+  const d = data;
+  for (let corner = 0; corner < 8; corner++) {
+    const x = d[k + (corner & 1 ? 3 : 0)], y = d[k + 1 + (corner & 2 ? 3 : 0)], z = d[k + 2 + (corner & 4 ? 3 : 0)];
+    const cx = m[o] * x + m[o + 4] * y + m[o + 8] * z + m[o + 12];
+    const cy = m[o + 1] * x + m[o + 5] * y + m[o + 9] * z + m[o + 13];
+    const cz = m[o + 2] * x + m[o + 6] * y + m[o + 10] * z + m[o + 14];
+    if (!(cx >= -1 && cx <= 1 && cy >= -1 && cy <= 1 && cz >= 0 && cz <= 1)) return false;
+  }
+  return true;
+}
+
 export class BoxList {
   constructor() {
     this.data = new Float32Array(6 * 64);
@@ -84,6 +101,35 @@ export class BoxList {
   touchesOrtho(matrix, offset = 0) {
     for (let k = 0; k < this.count * 6; k += 6) if (boxInOrtho(this.data, k, matrix, offset)) return true;
     return false;
+  }
+
+  /**
+   * Which faces of a cube around (x, y, z) any box reaches into, within
+   * `radius`: a bit a face, in CUBE_AXES' order (+x, -x, +y, -y, +z, -z).
+   * Each face sees out to `tanHalf` across per unit along its axis, a
+   * little past 45 degrees. A box is taken to reach a face when its far
+   * side along the face's axis is past it and, that far out, its nearest
+   * point across is in view: never a face it misses, sometimes one it only
+   * nearly reaches.
+   */
+  facesTouched(x, y, z, radius, tanHalf) {
+    const d = this.data, r2 = radius * radius, eye = [x, y, z];
+    let faces = 0;
+    for (let k = 0; k < this.count * 6 && faces !== 63; k += 6) {
+      const dx = Math.max(d[k] - x, 0, x - d[k + 3]);
+      const dy = Math.max(d[k + 1] - y, 0, y - d[k + 4]);
+      const dz = Math.max(d[k + 2] - z, 0, z - d[k + 5]);
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      const across = [dx, dy, dz];
+      for (let axis = 0; axis < 3; axis++) {
+        const b = (axis + 1) % 3, c = (axis + 2) % 3;
+        // How far the box reaches each way along the axis, from the eye.
+        const ahead = d[k + 3 + axis] - eye[axis], behind = eye[axis] - d[k + axis];
+        if (ahead > 0 && ahead * tanHalf >= across[b] && ahead * tanHalf >= across[c]) faces |= 1 << (axis * 2);
+        if (behind > 0 && behind * tanHalf >= across[b] && behind * tanHalf >= across[c]) faces |= 1 << (axis * 2 + 1);
+      }
+    }
+    return faces;
   }
 
   /** Does any box come within `radius` of (x, y, z)? */
@@ -146,13 +192,19 @@ export function updateWorldBounds(
  * is no box that means "nothing" which a caller would not have to special-case
  * anyway.
  */
-export function unionWorldBounds(count, worldMin, worldMax, outMin, outMax) {
-  if (count === 0) return false;
+export function unionWorldBounds(count, worldMin, worldMax, outMin, outMax, hidden = null) {
+  // Hidden ones (node.setVisible) are left out: a pool parked out of sight
+  // would otherwise stretch every range derived from this.
+  let first = 0;
+  while (first < count && hidden?.[first] === 1) first++;
+  if (first === count) return false;
 
-  outMin[0] = worldMin[0]; outMin[1] = worldMin[1]; outMin[2] = worldMin[2];
-  outMax[0] = worldMax[0]; outMax[1] = worldMax[1]; outMax[2] = worldMax[2];
+  const f = first * 3;
+  outMin[0] = worldMin[f]; outMin[1] = worldMin[f + 1]; outMin[2] = worldMin[f + 2];
+  outMax[0] = worldMax[f]; outMax[1] = worldMax[f + 1]; outMax[2] = worldMax[f + 2];
 
-  for (let i = 1; i < count; i++) {
+  for (let i = first + 1; i < count; i++) {
+    if (hidden?.[i] === 1) continue;
     const o = i * 3;
     if (worldMin[o] < outMin[0]) outMin[0] = worldMin[o];
     if (worldMin[o + 1] < outMin[1]) outMin[1] = worldMin[o + 1];

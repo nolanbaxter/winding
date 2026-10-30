@@ -43,6 +43,12 @@ const SCALING_LIMITS = [
 ];
 
 export async function createDevice(canvas, options = {}) {
+  const { adapter, device } = await requestDevice(options);
+  return new Device(adapter, device, canvas, options);
+}
+
+/** An adapter and a device on it, with what the engine asks of every device. Also what replace() asks for. */
+async function requestDevice(options) {
   if (!navigator.gpu) {
     throw new Error(
       'WebGPU is not available. Needs Chrome/Edge 113+, Safari 18+, or Firefox 141+ ' +
@@ -71,12 +77,12 @@ export async function createDevice(canvas, options = {}) {
     requiredFeatures,
     requiredLimits,
   });
-
-  return new Device(adapter, device, canvas, options);
+  return { adapter, device };
 }
 
 export class Device {
   constructor(adapter, device, canvas, options) {
+    this._options = options;
     this.adapter = adapter;
     /** The raw GPUDevice. Public: dropping to tier 0 must never require a fork. */
     this.device = device;
@@ -90,6 +96,17 @@ export class Device {
     this.depthTexture = null;
     this._depthView = null;
     this.destroyed = false;
+    /**
+     * True from the moment the GPU went away until replace() has a new
+     * device in: nothing should be drawn, and resizes are only noted.
+     */
+    this.lost = false;
+    /**
+     * Called instead of onUnusable when the device is lost underneath us and
+     * a new one may work: the engine sets it, and recovers (engine.js). A
+     * tier-0 user who sets nothing keeps the old answer, which is to stop.
+     */
+    this.onLost = null;
 
     this.onDeviceLost = options.onDeviceLost ?? null;
     this.onError = options.onError ?? null;
@@ -100,64 +117,8 @@ export class Device {
      */
     this.onUnusable = null;
 
-    // WebGPU errors do NOT throw. They surface here, and without a listener
-    // they vanish into the console at best.
-    // Removed again by destroy(), with the rest of what it listens to: a
-    // canvas left in the page keeps its context, the context its device, and
-    // a listener on the device everything this object reaches -- the engine.
     this._listening = new AbortController();
-    device.addEventListener('uncapturederror', (event) => {
-      const message = `WebGPU: ${event.error.message}`;
-      if (this.onError) this.onError(event.error);
-      else console.error(message);
-    }, { signal: this._listening.signal });
-
-    // Every resource created from this device dies with it: a driver reset, a
-    // GPU hang, an out-of-memory, or the browser reclaiming a backgrounded
-    // tab. This engine deliberately does NOT rebuild them.
-    //
-    // Rebuilding would mean keeping a CPU-side description of every GPU object
-    // alive for the process lifetime, and the hard part is not the buffers or
-    // the pipelines -- those are cheap to re-derive. It is the textures, with
-    // their contents: either every decoded image stays resident forever, which
-    // is the gigabyte load() explicitly releases, or every asset is fetched
-    // and decoded again, which is load() itself. A permanent cost on every
-    // module that creates a resource, for a path that fires on a driver reset.
-    //
-    // So the honest answer is to say so clearly and let the app reload, which
-    // is what the user expects from all four causes anyway. What that needs is
-    // a callback with enough in it to act on, which is what this builds.
-    //
-    // Not awaited -- it is a notification, not a step.
-    device.lost.then((info) => {
-      if (this.destroyed && info.reason === 'destroyed') return;   // we did that
-      this.destroyed = true;
-      // It kept resizing the canvas and allocating depth textures on a dead
-      // device, for as long as the canvas lived.
-      this._observer?.disconnect();
-      this.onUnusable?.();
-
-      // 'destroyed' here means someone else destroyed it, since our own case
-      // returned above. Everything else is the GPU going away underneath us,
-      // and reloading is the only route back.
-      const detail = {
-        reason: info.reason,
-        message: info.message,
-        /** True when creating a fresh device is likely to work. */
-        recoverable: info.reason !== 'destroyed',
-        /** What an application should do about it. There is one answer. */
-        action: 'reload',
-      };
-
-      if (this.onDeviceLost) this.onDeviceLost(detail);
-      else {
-        console.error(
-          `WebGPU device lost (${info.reason}): ${info.message || 'no message'}\n` +
-          'Winding does not rebuild GPU state. Reload the page, or pass ' +
-          'onDeviceLost to Winding.create to handle it yourself.',
-        );
-      }
-    });
+    this._listen(device);
 
     this.context = canvas.getContext('webgpu');
     if (!this.context) throw new Error('Could not get a webgpu context from the canvas.');
@@ -175,9 +136,109 @@ export class Device {
     /** The canvas's own format: written through, values land as they are, already encoded. */
     this.surfaceFormat = storageFormat;
 
+    this._configure();
+
+    this._observeResize();
+  }
+
+  /**
+   * What a device says when something goes wrong: errors, and its loss.
+   * Again for each new device replace() brings in; what the old one says
+   * after that is ignored.
+   */
+  _listen(device) {
+    // WebGPU errors do NOT throw. They surface here, and without a listener
+    // they vanish into the console at best. Removed again by destroy(), with
+    // the rest of what it listens to: a canvas left in the page keeps its
+    // context, the context its device, and a listener on the device
+    // everything this object reaches -- the engine.
+    this._deviceListening?.abort();
+    this._deviceListening = new AbortController();
+    device.addEventListener('uncapturederror', (event) => {
+      const message = `WebGPU: ${event.error.message}`;
+      if (this.onError) this.onError(event.error);
+      else console.error(message);
+    }, { signal: this._deviceListening.signal });
+
+    // Every resource made on a device dies with it: a driver reset, a GPU
+    // hang, the GPU process crashing, a laptop or a Steam Deck waking from
+    // sleep, the browser reclaiming a backgrounded tab. The engine recovers:
+    // a new device, and what it had loaded rebuilt on it (engine.js,
+    // _recover). Without an engine listening (onLost), this says so and stops.
+    //
+    // Not awaited -- it is a notification, not a step.
+    device.lost.then((info) => {
+      if (device !== this.device) return;   // a device replace() already let go of
+      if (this.destroyed && info.reason === 'destroyed') return;   // we did that
+      // 'destroyed' here means someone else destroyed it -- unless a test did,
+      // standing in for a real loss (loseForTest).
+      const simulated = this._simulatedLoss === true;
+      this._simulatedLoss = false;
+      const recoverable = info.reason !== 'destroyed' || simulated;
+      const detail = {
+        reason: simulated ? 'unknown' : info.reason,
+        message: info.message,
+        /** True when creating a fresh device is likely to work. */
+        recoverable,
+        /** What an application should do about it: nothing, while the engine recovers. */
+        action: recoverable && this.onLost ? 'recover' : 'reload',
+      };
+      if (recoverable && this.onLost) {
+        this.lost = true;
+        this.onLost(detail);
+        return;
+      }
+      this.destroyed = true;
+      // It kept resizing the canvas and allocating depth textures on a dead
+      // device, for as long as the canvas lived.
+      this._observer?.disconnect();
+      this.onUnusable?.();
+      if (this.onDeviceLost) this.onDeviceLost(detail);
+      else {
+        console.error(
+          `WebGPU device lost (${info.reason}): ${info.message || 'no message'}
+` +
+          'Reload the page, or pass onDeviceLost to handle it yourself.',
+        );
+      }
+    });
+  }
+
+  /**
+   * A new adapter and device in place of a lost one, on the same canvas.
+   * This object stays the same one, so everything that holds it -- the
+   * engine, its scenes' environments, every loaded asset -- holds the new
+   * device. The per-device caches are keyed by device, so they start fresh.
+   */
+  async replace() {
+    const { adapter, device } = await requestDevice(this._options);
+    this.adapter = adapter;
+    this.device = device;
+    this.queue = device.queue;
+    this.limits = device.limits;
+    this.features = device.features;
+    this._listen(device);
+    this._configure();
+    // The depth buffer, at the size the canvas is now: resize() only noted it while lost.
+    const [width, height] = [this.width, this.height];
+    this.width = 0;
+    this.height = 0;
+    this.depthTexture = null;
+    this._depthView = null;
+    this.lost = false;
+    this.resize(width, height);
+  }
+
+  /** Lose the device on purpose, as the GPU going away would, for tests of recovery. */
+  loseForTest() {
+    this._simulatedLoss = true;
+    this.device.destroy();
+  }
+
+  _configure() {
     this.context.configure({
-      device,
-      format: storageFormat,
+      device: this.device,
+      format: this.surfaceFormat,
       viewFormats: [this.viewFormat],
       alphaMode: 'opaque',
       // COPY_SRC as well as RENDER_ATTACHMENT, so what was drawn can be read
@@ -192,8 +253,6 @@ export class Device {
       // texture produces.
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
-
-    this._observeResize();
   }
 
   _observeResize() {
@@ -274,6 +333,7 @@ export class Device {
     this.height = h;
     this.canvas.width = w;
     this.canvas.height = h;
+    if (this.lost) return;
 
     // The depth buffer must match the color target exactly, so it is recreated
     // rather than resized -- GPU textures are immutable in size.
@@ -386,7 +446,9 @@ export class Device {
     this.destroyed = true;
     this._observer?.disconnect();
     this._listening.abort();
+    this._deviceListening.abort();
     this.onUnusable = null;
+    this.onLost = null;
     this.onError = null;
     this.depthTexture?.destroy();
     this._depthView = null;

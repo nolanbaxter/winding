@@ -1391,10 +1391,15 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     blocker.setPosition(1.2, 1, 0);
     const moved = await frame();
     const keptAgain = await frame();
-    const report = `drawn ${first.drawn}, ${kept.drawn}, ${farMoved.drawn} (far caster moved), ${moved.drawn} (blocker moved), ${keptAgain.drawn}; `
+    // Every face drawn afresh: the frame the one face redrawn must already have given.
+    engine.renderer.shadows._cache = [];
+    const fresh = await frame();
+    const report = `drawn ${first.drawn}, ${kept.drawn}, ${farMoved.drawn} (far caster moved), ${moved.drawn} (blocker moved, below the light), ${keptAgain.drawn}; `
       + `centre ${lum(first.pixels, 0.5).toFixed(0)} -> ${lum(moved.pixels, 0.5).toFixed(0)}`;
-    if (first.drawn !== 6 || kept.drawn !== 0 || farMoved.drawn !== 0 || moved.drawn !== 6 || keptAgain.drawn !== 0) throw new Error(report);
+    // The blocker moved under the light, so only the face looking down is drawn again.
+    if (first.drawn !== 6 || kept.drawn !== 0 || farMoved.drawn !== 0 || moved.drawn !== 1 || keptAgain.drawn !== 0 || fresh.drawn !== 6) throw new Error(report);
     if (!same(first.pixels, kept.pixels) || !same(moved.pixels, keptAgain.pixels)) throw new Error(`${report}; a kept map drew a different frame`);
+    if (!same(moved.pixels, fresh.pixels)) throw new Error(`${report}; one face redrawn is not the frame every face redrawn gives`);
     if (!(lum(moved.pixels, 0.5) > lum(first.pixels, 0.5) + 20)) throw new Error(`${report}; the shadow did not leave the centre`);
     return report;
   });
@@ -3957,6 +3962,413 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
     await engine.gpu.device.queue.onSubmittedWorkDone();
     return `batches per frame: ${counts.join(', ')}`;
+  });
+
+  await step('after prepare, the first frames of play build no pipeline', async () => {
+    // Each feature here is built the first time a frame asks for it: decals
+    // and AO as a background set, TAA beside them. Until those are ready a
+    // frame draws without them, so they pop in late. Counted once whatever
+    // the first frames started has finished: an engine that prepared must
+    // build none of it, and draw its first frame with AO; one that did not
+    // must build some, or the check proves nothing.
+    const built = async (prepared) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '96px';
+      canvas.style.height = '96px';
+      document.body.appendChild(canvas);
+      const probe = await Winding.create(canvas, { ao: true, taa: true });
+      probe.gpu.device.pushErrorScope('validation');
+      try {
+        probe.gpu.resize(96, 96);
+        const scene = probe.createScene();
+        scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] })))
+          .setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(3, 3, 1);
+        scene.add(await probe.load(buildFeatureGLB({ alphaMode: 'MASK', alphaCutoff: 0.5 }))).setPosition(0, 1, 0);
+        scene.addLight({ type: 'directional', direction: [-0.3, -1, -0.2], intensity: 3 });
+        scene.addDecal({ texture: await probe.loadTexture(twoToneImageURI('#ff0000', 'rgba(255,0,0,0)')), size: [2, 2, 1] })
+          .setAxisAngle([1, 0, 0], -Math.PI / 2);
+        scene.addEmitter({ position: [0, 0.5, 0], lifetime: 10, size: 0.3, color: [1, 1, 1, 1], blend: 'alpha' });
+        const cam = new Camera({ fovY: 1, near: 0.1 });
+        cam.position.set([0, 4, 6]);
+        cam.target.set([0, 0, 0]);
+        if (prepared) await probe.prepare(scene, cam);
+        // Its cascades drew every batch through their cull, and draw as they choose again after.
+        if (probe.renderer.shadows._cullEveryBatch) throw new Error('prepare left the cascades culling every batch');
+        const before = probe.renderer.pipelines.created;
+        probe.renderFrame(scene, cam);
+        const firstWithAO = probe.renderer._frameAO;
+        for (let i = 0; i < 4; i++) probe.renderFrame(scene, cam);
+        await probe.renderer._pipelinesBuilt();
+        await probe.gpu.device.queue.onSubmittedWorkDone();
+        if (prepared && !firstWithAO) throw new Error('the first frame after prepare drew without AO');
+        const error = await probe.gpu.device.popErrorScope();
+        if (error) throw error;
+        return probe.renderer.pipelines.created - before;
+      } finally {
+        probe.destroy();
+        canvas.remove();
+      }
+    };
+    const [unprepared, prepared] = [await built(false), await built(true)];
+    if (unprepared === 0) throw new Error('an unprepared engine built nothing in its first frames: the check proves nothing');
+    if (prepared !== 0) throw new Error(`${prepared} pipelines built after prepare (${unprepared} without it)`);
+    return `${unprepared} pipelines started by the first frames without prepare, none with it, and AO from the first frame`;
+  });
+
+  await step('a cascade casts a level of detail no finer than the camera shows, and coarser where its map has fewer texels', async () => {
+    // Small shadow maps under a tall view: a cascade has fewer texels on a
+    // group than the screen has pixels, so it may cast a coarser level. Read
+    // back from the cull: every cascade that reaches the group draws exactly
+    // one of its levels, never one finer than the camera's, and one draws coarser.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '120px';
+    canvas.style.height = '480px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 }, shadows: { size: 128 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(120, 480);
+      const lod = await probe.load(buildLodGLB([0.5, 0.2, 0.01]));
+      const ground = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] }));
+      const scene = probe.createScene();
+      scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(20, 20, 1);
+      scene.add(lod).setPosition(0, 1.6, 0);
+      scene.addLight({ type: 'directional', direction: [-0.3, -0.9, -0.3], intensity: 3 });
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 2, 5]);
+      cam.target.set([0, 1.6, 0]);
+      await probe.prepare(scene, cam);
+      probe.renderFrame(scene, cam);
+      const gpu = probe.renderer.gpu;
+      const levels = lod.meshes.map((mesh) => {
+        for (let b = 0; b < gpu.batchCount; b++) if (gpu.batchPrimitive[b] === mesh.primitives[0]) return b;
+        return -1;
+      });
+      const layers = [...probe.renderer.shadows._toCull];
+      const staging = probe.gpu.device.createBuffer({ size: gpu.indirectBuffer.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = probe.gpu.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(gpu.indirectBuffer, 0, staging, 0, gpu.indirectBuffer.size);
+      probe.gpu.device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      staging.destroy();
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      const count = (phase, b) => words[(phase * gpu.batchCapacity + b) * 5 + 1];
+      // The camera's level: drawn early or late.
+      const camera = levels.findIndex((b) => count(0, b) + count(1, b) > 0);
+      if (camera < 0 || layers.length === 0) throw new Error(`camera level ${camera}, ${layers.length} cascades culled: nothing to compare`);
+      const report = [];
+      let coarser = false;
+      for (const layer of layers) {
+        const drawn = levels.map((b) => count(3 + layer, b));
+        const total = drawn.reduce((x, y) => x + y, 0);
+        report.push(`cascade ${layer}: ${drawn.join('/')}`);
+        if (total === 0) continue;   // the group is outside this cascade
+        const level = drawn.findIndex((n) => n > 0);
+        if (total !== 1) throw new Error(`a cascade drew ${total} of the group's levels: ${report.join(', ')}`);
+        if (level < camera) throw new Error(`a cascade cast level ${level}, finer than the camera's ${camera}: ${report.join(', ')}`);
+        coarser ||= level > camera;
+      }
+      if (!coarser) throw new Error(`no cascade cast coarser than the camera's level ${camera}: ${report.join(', ')}`);
+      return `camera level ${camera}; ${report.join(', ')} (finest to coarsest)`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('a mesh made from arrays draws its vertex colours, flat-shaded, as a loaded one does', async () => {
+    // A 9 x 9 grid, red down its left edge and blue down its right, bumped
+    // into hills, with no normals: drawn from above, red on the left of the
+    // frame and blue on the right.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 120);
+      const N = 9, positions = [], colors = [], indices = [];
+      for (let z = 0; z < N; z++) {
+        for (let x = 0; x < N; x++) {
+          const u = x / (N - 1);
+          positions.push(x - 4, 0.3 * Math.sin(x) * Math.cos(z), z - 4);
+          colors.push(1 - u, 0.1, u);
+        }
+      }
+      for (let z = 0; z < N - 1; z++) {
+        for (let x = 0; x < N - 1; x++) {
+          const a = z * N + x;
+          indices.push(a, a + N, a + 1, a + 1, a + N, a + N + 1);
+        }
+      }
+      const terrain = await probe.createMesh({ positions, colors, indices });
+      const scene = probe.createScene();
+      scene.add(terrain);
+      scene.addLight({ type: 'directional', direction: [0, -1, -0.2], intensity: 3 });
+      const cam = new Camera({ fovY: 1.2, near: 0.1 });
+      cam.position.set([0, 8, 0.01]);
+      cam.target.set([0, 0, 0]);
+      await probe.prepare(scene, cam);
+      for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+      const pixels = await probe.gpu.readPixels();
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      const at = (x, y) => { const i = (y * 160 + x) * 4; return [pixels[i], pixels[i + 1], pixels[i + 2]]; };
+      const left = at(50, 60), right = at(110, 60);
+      if (!(left[0] > left[2] + 40 && right[2] > right[0] + 40)) throw new Error(`left ${left}, right ${right}: not red then blue`);
+      return `left ${left}, right ${right}`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('a tint and a glow colour a node in its batch, batched or merged, at the same draw count', async () => {
+    // Two instances of one quad, drawn as a batch, and a quad of its own, drawn
+    // merged: tinted red, glowing, and tinted green. The others stay as they were.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 120);
+      const quad = { positions: [-1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1], indices: [0, 2, 1, 0, 3, 2], material: { color: [0.8, 0.8, 0.8, 1], doubleSided: true } };
+      const [shared, own] = await Promise.all([probe.createMesh(quad), probe.createMesh(quad)]);
+      const scene = probe.createScene();
+      const a = scene.add(shared).setPosition(-3, 0, 0);
+      const b = scene.add(shared).setPosition(0, 0, 0);
+      const c = scene.add(own).setPosition(3, 0, 0);
+      scene.addLight({ type: 'directional', direction: [0, -1, -0.2], intensity: 0.5, castShadow: false });
+      const cam = new Camera({ fovY: 1.2, near: 0.1 });
+      cam.position.set([0, 8, 0.01]);
+      cam.target.set([0, 0, 0]);
+      await probe.prepare(scene, cam);
+      const frame = async () => {
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        const pixels = await probe.gpu.readPixels();
+        return [47, 80, 113].map((x) => { const i = (60 * 160 + x) * 4; return [pixels[i], pixels[i + 1], pixels[i + 2]]; });
+      };
+      const before = await frame();
+      const batches = probe.renderer.gpu.batchCount;
+      a.setTint([1, 0, 0]);
+      b.setGlow([2, 2, 2]);
+      c.setTint([0, 1, 0]);
+      const after = await frame();
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      const [[ar, ag, ab], [br], [cr, cg, cb]] = after;
+      // Not to 0: the specular reflection is the light's colour, which a base colour's tint leaves be.
+      if (!(ar > 40 && ag < 40 && ab < 40 && Math.abs(ar - before[0][0]) < 8)) throw new Error(`tinted red: ${after[0]} from ${before[0]}`);
+      if (!(br > before[1][0] + 40)) throw new Error(`glowing: ${after[1]} from ${before[1]}`);
+      if (!(cg > 40 && cr < 40 && cb < 40)) throw new Error(`merged, tinted green: ${after[2]} from ${before[2]}`);
+      if (probe.renderer.gpu.batchCount !== batches) throw new Error(`${probe.renderer.gpu.batchCount} batches from ${batches}`);
+      a.setTint([1, 1, 1]);
+      const back = await frame();
+      if (back[0].some((v, k) => Math.abs(v - before[0][k]) > 2)) throw new Error(`untinted: ${back[0]}, was ${before[0]}`);
+      return `red ${after[0]}, glow ${after[1]} (from ${before[1]}), merged green ${after[2]}, ${batches} batches either way`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('a hidden node draws as if it were not there, shadows and light included, and comes back shown', async () => {
+    // Under one parent: a mesh drawn merged, three instances of another drawn
+    // as a batch, a sprite, text, a point light and a decal. Hidden, the frame
+    // is the frame of a scene that never had them; shown again, the frame it
+    // had before.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 120);
+      const ground = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0 }));
+      const lone = await probe.load(buildFeatureGLB({ baseColorFactor: [0.9, 0.2, 0.2, 1], doubleSided: true }));
+      const many = await probe.load(buildFeatureGLB({ baseColorFactor: [0.2, 0.3, 0.9, 1], doubleSided: true }));
+      const pin = await probe.loadTexture(twoToneImageURI('#ff2020', '#20ff20'));
+      const font = await probe.loadFont('48px sans-serif');
+      const base = () => {
+        const scene = probe.createScene();
+        scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(4, 4, 1);
+        scene.addLight({ type: 'directional', direction: [-0.4, -0.8, -0.3], intensity: 3 });
+        return scene;
+      };
+      const full = base();
+      const group = full.createNode();
+      full.add(lone, { parent: group }).setPosition(-2, 1.2, 0);
+      for (let k = 0; k < 3; k++) full.add(many, { parent: group }).setPosition(k * 1.5 - 0.5, 1, -1.5);
+      full.addSprite({ texture: pin, position: [2.5, 1, 1], size: [0.6, 0.6], parent: group });
+      full.addText({ font, text: 'Hi', size: 0.5, position: [-1, 2.4, 0], parent: group });
+      full.addLight({ position: [1, 0.6, 1.5], color: [1, 0.4, 0.1], intensity: 20, radius: 4, parent: group });
+      full.addDecal({ texture: pin, size: [1.5, 1.5, 1], parent: group }).setAxisAngle([1, 0, 0], -Math.PI / 2).setPosition(-1, 0, 2);
+      const bare = base();
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 5, 7]);
+      cam.target.set([0, 0.5, 0]);
+      const frame = async (scene) => {
+        await probe.prepare(scene, cam);
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        return probe.gpu.readPixels();
+      };
+      const differ = (a, b) => {
+        let n = 0;
+        for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) n++;
+        return n;
+      };
+      const shown = await frame(full);
+      const without = await frame(bare);
+      if (differ(shown, without) < 200) throw new Error('the group barely shows: the check proves nothing');
+      group.setVisible(false);
+      const hidden = await frame(full);
+      group.setVisible(true);
+      const back = await frame(full);
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      const asIfGone = differ(hidden, without), asBefore = differ(back, shown);
+      if (asIfGone > 0 || asBefore > 0) throw new Error(`hidden: ${asIfGone} pixels differ from the scene without it; shown again: ${asBefore} from before`);
+      return `hidden draws the scene without it, shown again the scene with it, ${shown.length / 4} pixels (${differ(shown, without)} are the group's)`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('a cascade culled caster by caster casts the shadows a batch at a time casts', async () => {
+    // Sixty-four plates of one mesh, one batch, spread wider than the near
+    // cascades reach: those draw only the plates the GPU kept for them. The
+    // frame must be the frame drawn without culling, pixel for pixel -- the
+    // same scene twice, since a scene's first frame draws every cascade.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 120);
+      const ground = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0 }));
+      const plate = await probe.load(buildFeatureGLB({ baseColorFactor: [0.3, 0.3, 0.3, 1], doubleSided: true }));
+      const build = () => {
+        const scene = probe.createScene();
+        scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(40, 40, 1);
+        for (let i = 0; i < 64; i++) scene.add(plate).setPosition((i % 8) * 8 - 28, 1.6, Math.floor(i / 8) * 8 - 28);
+        scene.addLight({ type: 'directional', direction: [-0.5, -0.7, -0.3], intensity: 3 });
+        return scene;
+      };
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([-26, 3, 26]);
+      cam.target.set([0, 0, 0]);
+      const draw = async (culling) => {
+        probe.renderer.shadows._cullCasters = culling;
+        const scene = build();
+        await probe.prepare(scene, cam);
+        probe.renderFrame(scene, cam);
+        const culled = probe.renderer.shadows._toCull.length;
+        return { pixels: await probe.gpu.readPixels(), culled };
+      };
+      const on = await draw(true);
+      const off = await draw(false);
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      if (on.culled === 0) throw new Error('no cascade was culled caster by caster: the check proves nothing');
+      let differ = 0;
+      for (let i = 0; i < on.pixels.length; i += 4) {
+        if (on.pixels[i] !== off.pixels[i] || on.pixels[i + 1] !== off.pixels[i + 1] || on.pixels[i + 2] !== off.pixels[i + 2]) differ++;
+      }
+      if (differ > 0) throw new Error(`${differ} pixels differ between culled cascades and cascades culled a batch at a time`);
+      return `${on.culled} cascades culled caster by caster; the frame is the one drawn without, ${on.pixels.length / 4} pixels`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
+  await step('after the GPU device is lost, the engine recovers and draws the same frame', async () => {
+    // Everything a load hands out is rebuilt in place on the new device: a
+    // textured model and a skinned one, a sprite's texture, a font, a LUT,
+    // the default sky and a render target, which the app draws into again.
+    // The same objects, ids and offsets, so the frame after recovery is the
+    // frame before it, pixel for pixel.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    let lost = null;
+    const probe = await Winding.create(canvas, { onDeviceLost: (detail) => { lost = detail; } });
+    try {
+      probe.gpu.resize(160, 120);
+      const scene = probe.createScene();
+      const floor = await probe.load(buildFeatureGLB({ imageURI: twoToneImageURI('#3060ff', '#ffd040'), baseColorFactor: [1, 1, 1, 1] }));
+      scene.add(floor).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(2, 2, 1);
+      scene.add(await probe.load(buildRiggedGLB())).setPosition(1.2, 0, 0.5);
+      scene.addLight({ type: 'directional', direction: [-0.3, -1, -0.4], intensity: 3 });
+      const pin = await probe.loadTexture(twoToneImageURI('#ff2020', '#20ff20'));
+      scene.addSprite({ texture: pin, position: [-1.4, 1, 0], size: [0.6, 0.6] });
+      const font = await probe.loadFont('48px sans-serif');
+      scene.addText({ font, text: 'Ok', size: 0.5, position: [0, 1.4, 0] });
+      const minimap = await probe.createTarget({ size: [32, 32] });
+      scene.addSprite({ texture: minimap, position: [1.4, 1.2, 0], size: [0.5, 0.5] });
+      const cube = `LUT_3D_SIZE 2\n${[0, 1].flatMap((b) => [0, 1].flatMap((g) => [0, 1].map((r) => [r * 0.9, g, b].join(' ')))).join('\n')}`;
+      probe.grading = { lut: await probe.loadLUT(cube) };
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([0, 2.5, 4]);
+      cam.target.set([0, 0.5, 0]);
+      const top = new Camera({ fovY: 1, near: 0.1 });
+      top.position.set([0, 6, 0.01]);
+      const frame = async () => {
+        probe.renderFrame(scene, top, { target: minimap });
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        return probe.gpu.readPixels();
+      };
+      await probe.prepare(scene, cam);
+      const before = await frame();
+
+      // The skinned model is held by the scene alone, through its primitives,
+      // as an asset added straight from load() is. Collected first, an asset
+      // recovery holds only weakly was simply not rebuilt: this made that
+      // happen every run rather than one in three.
+      globalThis.gc?.();
+      probe.gpu.loseForTest();
+      for (let i = 0; i < 100 && lost === null; i++) await new Promise((r) => setTimeout(r, 10));
+      if (lost === null) throw new Error('onDeviceLost was not called');
+      if (lost.action !== 'recover' || !lost.recoverable) throw new Error(`told to ${lost.action}, recoverable ${lost.recoverable}`);
+      await lost.recovered;
+      probe.gpu.device.pushErrorScope('validation');
+      // The target's picture went with the device, as the API says: drawn again by frame().
+      await probe.prepare(scene, cam);
+      const after = await frame();
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      let differ = 0;
+      for (let i = 0; i < before.length; i += 4) {
+        if (before[i] !== after[i] || before[i + 1] !== after[i + 1] || before[i + 2] !== after[i + 2]) differ++;
+      }
+      if (differ > 0) {
+        let x0 = 999, y0 = 999, x1 = -1, y1 = -1, most = 0;
+        for (let i = 0; i < before.length; i += 4) {
+          const d = Math.max(Math.abs(before[i] - after[i]), Math.abs(before[i + 1] - after[i + 1]), Math.abs(before[i + 2] - after[i + 2]));
+          if (d === 0) continue;
+          const p = i / 4, x = p % 160, y = Math.floor(p / 160);
+          x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); most = Math.max(most, d);
+        }
+        const at = (x, y) => { const i = (y * 160 + x) * 4; return [before[i], before[i + 1], before[i + 2]] + ' -> ' + [after[i], after[i + 1], after[i + 2]]; };
+        throw new Error(`${differ} of ${before.length / 4} pixels differ after recovery, in x ${x0}-${x1} y ${y0}-${y1}, `
+          + `by up to ${most}; centre ${at(80, 60)}, middle of them ${at((x0 + x1) >> 1, (y0 + y1) >> 1)}`);
+      }
+      return `recovered (${lost.reason}); the frame after is the frame before, ${before.length / 4} pixels`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
   });
 
   await step('a scene added to and removed from draws what a scene built fresh draws', async () => {

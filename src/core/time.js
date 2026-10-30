@@ -35,7 +35,24 @@ export class Clock {
     this.frame = 0;
     /** Real seconds since the previous begin(), after clamping. */
     this.realDelta = 0;
+    /** Simulated seconds this frame added: realDelta times timeScale. */
+    this.delta = 0;
+    this._timeScale = 1;
     this._last = -1;
+  }
+
+  /**
+   * How fast simulated time runs against real time: 1 real time, 0.25 a
+   * quarter speed, 0 stopped. Steps stay fixedDt long and come less often, so
+   * a simulation slowed down still runs as it would at full speed.
+   */
+  get timeScale() {
+    return this._timeScale;
+  }
+
+  set timeScale(scale) {
+    if (!(scale >= 0) || !Number.isFinite(scale)) throw new Error('clock.timeScale must be a finite number, 0 or more');
+    this._timeScale = scale;
   }
 
   /** Call once per rendered frame, before stepping. `now` is in seconds. */
@@ -50,7 +67,8 @@ export class Clock {
     else if (delta > MAX_FRAME_TIME) delta = MAX_FRAME_TIME;
 
     this.realDelta = delta;
-    this.accumulator += delta;
+    this.delta = delta * this._timeScale;
+    this.accumulator += this.delta;
     this.frame++;
   }
 

@@ -119,11 +119,28 @@ export interface PostOptions {
   grading?: Grading | null;
 }
 
+/** engine.createMesh's arrays, a number each component, and its surface. */
+export interface MeshOptions {
+  /** x, y, z for each vertex, in metres. */
+  positions: ArrayLike<number>;
+  /** Three a triangle, counter-clockwise from its front. Without them, every three positions are one. */
+  indices?: ArrayLike<number>;
+  /** x, y, z for each vertex. Without them, each triangle is shaded flat. */
+  normals?: ArrayLike<number>;
+  uvs?: ArrayLike<number>;
+  /** r, g, b or r, g, b, a for each vertex, linear, 0 to 1. */
+  colors?: ArrayLike<number>;
+  material?: { color?: Vec4; metallic?: number; roughness?: number; emissive?: Vec3; doubleSided?: boolean };
+}
+
 export interface DeviceLost {
   reason: string;
   message: string;
   recoverable: boolean;
-  action: 'reload';
+  /** 'recover' while the engine rebuilds itself on a new device; 'reload' when it cannot. */
+  action: 'recover' | 'reload';
+  /** With 'recover': settles once the engine is drawing again, or rejects if no GPU came back. */
+  recovered?: Promise<void>;
 }
 
 /** Auto exposure's settings. Ranges in stops, speeds in stops a second. */
@@ -187,8 +204,10 @@ export interface Hud {
 
 export interface Clock {
   fixedDt: number;
+  timeScale: number;
   readonly elapsed: number;
   readonly realDelta: number;
+  readonly delta: number;
   readonly alpha: number;
   readonly frame: number;
 }
@@ -227,6 +246,8 @@ export interface Device {
   readonly height: number;
   readonly pixelRatio: number;
   readPixels(region?: { x?: number; y?: number; width?: number; height?: number }): Promise<Uint8Array>;
+  /** Lose the device on purpose, as a driver reset would, to test recovery. */
+  loseForTest(): void;
 }
 
 export interface ShadowMaps {
@@ -313,6 +334,8 @@ export class Winding {
 
   createScene(options?: CreateSceneOptions): Scene;
   load(source: string | ArrayBuffer | Uint8Array, options?: { retainGeometry?: boolean; baseURL?: string; fetch?: Fetch }): Promise<Model>;
+  /** A mesh made from arrays: terrain, a generated map, a prop built in code. */
+  createMesh(options: MeshOptions): Promise<Model>;
   loadTexture(source: string | ImageBitmapSource, options?: { srgb?: boolean; pixelated?: boolean; label?: string; fetch?: Fetch }): Promise<Texture>;
   loadFont(css: string): Promise<Font>;
   loadLUT(source: string, options?: { fetch?: Fetch }): Promise<LUT>;
@@ -325,6 +348,8 @@ export class Winding {
   run(scene: Scene, camera: Camera | Camera2D, options?: RunOptions): void;
   stop(): void;
   invalidate(): void;
+  /** Build everything `scene` will draw with, behind a loading screen, so its first frames don't draw without a feature still being built. */
+  prepare(scene: Scene, camera?: Camera | Camera2D | null): Promise<void>;
   renderFrame(scene: Scene, camera: Camera | Camera2D, options?: { hud?: Hud | null; target?: Target | null }): void;
   createTarget(options: { size: Vec2; pixelated?: boolean; label?: string }): Promise<Target>;
   captureProbes(scene: Scene, probeNodes?: Node[]): Promise<void>;
@@ -504,7 +529,7 @@ export class Scene {
   readonly cameras: Camera[];
   get particlesActive(): boolean;
 
-  createNode(options?: { parent?: Node | null }): Node;
+  createNode(options?: { parent?: Node | null; name?: string }): Node;
   node(entity: number): Node;
   childrenOf(node: Node): Node[];
   add(asset: Model, options?: { parent?: Node | null }): Node;
@@ -610,9 +635,23 @@ export class Node {
   setDirection(x: number, y: number, z?: number): this;
   setAxisAngle(axis: Vec3, radians: number): this;
   setEuler(yaw: number, pitch: number, roll?: number): this;
-  setParent(node: Node | null): this;
+  setParent(node: Node | null, options?: { keepWorld?: boolean }): this;
+  setWorldPosition(x: number, y: number, z?: number): this;
+  setWorldRotation(q: Quat): this;
+  worldRotation<T extends Quat>(out: T): T;
+  /** Show or hide this node and everything under it; cheaper than removing it. */
+  setVisible(visible: boolean): this;
+  /** Whether setVisible left this node shown. An ancestor may still hide it. */
+  readonly visible: boolean;
+  readonly name: string;
+  setTint(color: ArrayLike<number>): this;
+  setGlow(color: ArrayLike<number>): this;
+  readonly tint: [number, number, number];
+  readonly glow: [number, number, number];
   worldPosition<T extends Vec3>(out: T): T;
   children(): Node[];
+  find(name: string | RegExp): Node | null;
+  findAll(name: string | RegExp): Node[];
   play(nameOrIndex: string | number, options?: PlayOptions): this;
   stop(options?: StopOptions): this;
   destroy(): void;

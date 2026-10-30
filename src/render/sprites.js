@@ -229,6 +229,7 @@ export function packSprites(scene, camera, out = null) {
   // rest, so each texture is one run.
   let n = 0;
   for (const [entity, sprite] of scene.sprites) {
+    if (scene.hidden?.[handleIndex(entity)] === 1) continue;
     const m = handleIndex(entity) * 16;
     sources[n] = sprite;
     boxes[n] = null;
@@ -238,6 +239,7 @@ export function packSprites(scene, camera, out = null) {
     order[n] = n++;
   }
   for (const [entity, text] of scene.texts) {
+    if (scene.hidden?.[handleIndex(entity)] === 1) continue;
     const m = handleIndex(entity) * 16;
     const far = farness(m);
     for (const box of text.boxes) {

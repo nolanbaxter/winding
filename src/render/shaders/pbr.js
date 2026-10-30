@@ -142,7 +142,18 @@ struct LocalView {
  */
 struct DrawData {
   model         : mat4x4<f32>,    //   0
-  normalMatrix  : mat3x3<f32>,    //  64   occupies 48 bytes
+  // The normal matrix, a column at a time, each with a word in what would be
+  // a mat3x3's padding: the node's tint and glow (node.setTint, setGlow), as
+  // six 16-bit floats -- tint less 1, then glow, so all zero is neither.
+  // Words, not floats: two halves read as one f32 can be a denormal, which
+  // a GPU may flush to zero on the way in. The same 48 bytes as a mat3x3, which
+  // is how the shadow and merged passes still declare them.
+  normal0       : vec3<f32>,      //  64
+  tint0         : u32,            //  76
+  normal1       : vec3<f32>,      //  80
+  tint1         : u32,            //  92
+  normal2       : vec3<f32>,      //  96
+  tint2         : u32,            // 108
   // Where this instance's joint matrices begin. Zero and unread for anything
   // not skinned.
   paletteOffset : u32,            // 112
@@ -237,7 +248,21 @@ struct VertexOut {
   // How much the model matrix stretches each axis, for KHR_materials_volume,
   // whose thickness is in the mesh's own units.
   @location(7) @interpolate(flat) modelScale : vec3<f32>,
+  // The node's glow, added to its emission. Its tint rides in color.
+  @location(8) @interpolate(flat) glow : vec3<f32>,
 };
+
+/** A draw's tint (node.setTint), from its words: 1 where none was set. */
+fn tintOf(draw : DrawData) -> vec3<f32> {
+  let a = unpack2x16float(draw.tint0);
+  return vec3<f32>(a.x, a.y, unpack2x16float(draw.tint1).x) + 1.0;
+}
+
+/** A draw's glow (node.setGlow): 0 where none was set. */
+fn glowOf(draw : DrawData) -> vec3<f32> {
+  let b = unpack2x16float(draw.tint2);
+  return vec3<f32>(unpack2x16float(draw.tint1).y, b.x, b.y);
+}
 
 
 /**
@@ -386,7 +411,7 @@ fn shadeVertex(
   // Normals use the inverse-transpose; tangents do NOT. A tangent is a
   // direction along the surface, so it transforms like a position delta and
   // the model matrix is correct for it.
-  out.normal = normalize(draw.normalMatrix * m.normal);
+  out.normal = normalize(mat3x3<f32>(draw.normal0, draw.normal1, draw.normal2) * m.normal);
   out.tangent = normalize((draw.model * vec4<f32>(m.tangent, 0.0)).xyz);
 
   // tangent.w is the handedness the importer computed per vertex, which is
@@ -394,7 +419,9 @@ fn shadeVertex(
   out.bitangent = cross(out.normal, out.tangent) * tangent.w;
   out.uv = uv;
   out.uv1 = uv1;
-  out.color = color;
+  // COLOR_0 multiplies the base colour, so the tint does it here, once a vertex.
+  out.color = color * vec4<f32>(tintOf(draw), 1.0);
+  out.glow = glowOf(draw);
   return out;
 }
 
@@ -1246,7 +1273,8 @@ fn vsSkinned(
 
   out.uv = uv;
   out.uv1 = uv1;
-  out.color = color;
+  out.color = color * vec4<f32>(tintOf(draw), 1.0);
+  out.glow = glowOf(draw);
   return out;
 }
 
@@ -1294,7 +1322,7 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   // environment, no emission. No ambient either, so occlusion leaves it be.
   if (material.unlit > 0.5) {
     ambientOut = vec3<f32>(0.0);
-    return vec4<f32>(min(sampled.rgb, vec3<f32>(65504.0)), sampled.a);
+    return vec4<f32>(min(sampled.rgb + v.glow, vec3<f32>(65504.0)), sampled.a);
   }
 
   // The geometric normal is flipped for a back face. A double-sided material
@@ -1596,6 +1624,7 @@ fn shadeSurface(v : VertexOut, frontFacing : bool) -> vec4<f32> {
   var emissive = material.emissive.rgb;
   if ((uvSets & 256u) != 0u) { emissive = emissive * textureSampleBias(emissiveMap, surfSampler, transformUV(4u, select(v.uv, v.uv1, (uvSets & 16u) != 0u)), frame.probeInfo.z).rgb; }
   if (EXTENSIONS) { emissive = emissive * (1.0 - s.coat * s.coatFresnel); }
+  emissive = emissive + v.glow;
 
   // Linear HDR, deliberately not clamped to 1. Bloom needs to know a highlight
   // was at 60x white, not that it was clipped; the post stack tonemaps once at

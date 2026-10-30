@@ -11,6 +11,7 @@
 //
 //   const pipe = cache.get(desc);          // cached, or built now
 //   await cache.warm([descA, descB]);      // built off-thread during loading
+//   await cache.computeAsync(desc);        // a compute pipeline, the same way
 //
 // The cache key is a string rather than a hash. A 64-bit hash would be
 // FNV-1a here, but a Map already hashes string keys internally, and a real hash
@@ -78,23 +79,43 @@ export class PipelineCache {
    * { label, layout, shader, entry, constants }.
    */
   compute(desc) {
-    const constants = desc.constants
-      ? Object.keys(desc.constants).sort().map((k) => `${k}=${desc.constants[k]}`).join(',')
-      : '';
-    const key = `compute|${desc.layout.id}|${desc.shader.id}|${desc.entry}|${constants}`;
+    const key = computeKey(desc);
     const existing = this.pipelines.get(key);
     if (existing) {
       this.hits++;
       return existing;
     }
-    const pipeline = this.device.createComputePipeline({
-      label: desc.label,
-      layout: desc.layout.gpu,
-      compute: { module: desc.shader.module, entryPoint: desc.entry, constants: desc.constants },
-    });
+    const pipeline = this.device.createComputePipeline(computeDescriptor(desc));
     this.pipelines.set(key, pipeline);
     this.created++;
     return pipeline;
+  }
+
+  /**
+   * compute(), compiled off the main thread, for creation and loading. Made
+   * synchronously, a compute pipeline compiles on the GPU process's main
+   * thread, holding up every other compile's result and every command behind
+   * it: 0.5 s of a cold start, before these were made this way.
+   */
+  computeAsync(desc) {
+    const key = computeKey(desc);
+    const existing = this.pipelines.get(key);
+    if (existing) {
+      this.hits++;
+      return Promise.resolve(existing);
+    }
+    let compiling = this._compiling.get(key);
+    if (!compiling) {
+      compiling = this.device.createComputePipelineAsync(computeDescriptor(desc))
+        .then((pipeline) => {
+          this.pipelines.set(key, pipeline);
+          this.created++;
+          return pipeline;
+        })
+        .finally(() => this._compiling.delete(key));
+      this._compiling.set(key, compiling);
+    }
+    return compiling;
   }
 
   /**
@@ -123,6 +144,22 @@ export class PipelineCache {
       return compiling;
     }));
   }
+}
+
+/** What makes one compute pipeline differ from another. */
+function computeKey(desc) {
+  const constants = desc.constants
+    ? Object.keys(desc.constants).sort().map((k) => `${k}=${desc.constants[k]}`).join(',')
+    : '';
+  return `compute|${desc.layout.id}|${desc.shader.id}|${desc.entry}|${constants}`;
+}
+
+function computeDescriptor(desc) {
+  return {
+    label: desc.label,
+    layout: desc.layout.gpu,
+    compute: { module: desc.shader.module, entryPoint: desc.entry, constants: desc.constants },
+  };
 }
 
 /**

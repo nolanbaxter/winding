@@ -140,7 +140,7 @@ import are the files in this repository.
 
 ```html
 <script type="module">
-  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/winding.js';
+  import { Winding, Camera } from 'https://cdn.jsdelivr.net/npm/winding-engine@1.9.0/src/winding.js';
 </script>
 ```
 
@@ -165,8 +165,8 @@ completion and hover help.
 <script type="importmap">
 {
   "imports": {
-    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/winding.js",
-    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.8.0/src/"
+    "winding-engine": "https://cdn.jsdelivr.net/npm/winding-engine@1.9.0/src/winding.js",
+    "winding-engine/": "https://cdn.jsdelivr.net/npm/winding-engine@1.9.0/src/"
   }
 }
 </script>
@@ -301,7 +301,8 @@ shimmer as the camera turns), one view down a spot's cone, six for a point light
 shadow: a cutout casts its texture's shape, a half-transparent pane a shadow half as dark. Where one
 cascade hands over to the next there is no seam: each cascade's filter widens across its slice
 until, at the split, it already matches the next one's texels. Shadow maps are kept while nothing
-near a light moves, so a still scene redraws none. Give a light a `size` and its shadows are soft
+near a light moves, so a still scene redraws none, and a cascade that is redrawn draws only the
+casters that reach it, culled one by one on the GPU. Give a light a `size` and its shadows are soft
 as a real light's are (PCSS): sharp where an object meets the floor, wider the farther they fall.
 
 **Two transparency paths.** Blended geometry is sorted back-to-front on the CPU and drawn after
@@ -341,8 +342,10 @@ tangents, both UV sets and vertex colours. Point and spot lights (`KHR_lights_pu
 come in on their nodes. These extensions are shaded as their specs say: emissive strength, texture
 transforms, unlit, IOR, specular, clear coat, sheen, anisotropy, iridescence, transmission and
 volume, quantized attributes, `KHR_animation_pointer`, and meshopt compression (both the EXT and KHR
-forms, decoded by a decoder written from the specs — no library, no WebAssembly). Levels of detail
-(`MSFT_lod`) are switched on the GPU. Any other extension a file *requires* is refused rather than
+forms, decoded by a decoder written from the specs — no library, no WebAssembly). Meshes made in
+code, from arrays ([`engine.createMesh`](docs/API.md#engine-createmesh)), come in the same way. Levels of detail
+(`MSFT_lod`) are switched on the GPU, and each shadow cascade casts the coarser of the camera's
+level and the one its own map's resolution calls for. Any other extension a file *requires* is refused rather than
 loaded into geometry that is quietly wrong. A file you didn't write can't ask for more than the
 device can hold: counts, strides, offsets, sparse data, NaNs and image sizes are checked before
 anything is allocated.
@@ -357,6 +360,15 @@ are per instance, and bounds follow both, so a character isn't culled with its a
 **Lights are nodes.** [`scene.addLight`](docs/API.md#scene-addlight) returns a node, so a light can
 have a parent: a headlamp on a car, a torch in an animated hand. A spot aims down its node's -Z, as
 glTF defines it. A new scene has no lights; its environment lights it until you add one.
+
+**Nodes for games.** A node keeps its name from the file, so a level's spawn points or a model's
+hand bone are found by it ([`node.find`](docs/API.md#node-find)). It can be placed in the world
+whatever its parents ([`setWorldPosition`](docs/API.md#node-setworldposition)) -- a ragdoll's bones
+straight from a physics engine -- and moved to another parent where it stands. It can be hidden
+([`setVisible`](docs/API.md#node-setvisible)) and tinted or lit up
+([`setTint`](docs/API.md#node-settint), [`setGlow`](docs/API.md#node-setglow)) without leaving its
+batch, so a pool of bullets or an army in two colours costs what one plain copy does. The clock
+slows or stops the world for a hit-stop or a pause ([`timeScale`](docs/API.md#engine-clock)).
 
 **Sprites, text, particles, decals and reflection probes**, each a node:
 [sprites](docs/API.md#scene-addsprite) that face the camera or stand upright;
@@ -447,10 +459,11 @@ These are real and currently unaddressed.
   inside them stay in place as words, and Latin ligatures are not formed.
 - **A 2D sprite is picked by its quad**, clear pixels included: knowing which pixels are clear
   would mean keeping a CPU copy of every texture.
-- **Device loss ends the session.** `onDeviceLost` fires with enough to act on and the engine
-  destroys itself, but nothing is rebuilt — recovering would mean holding a CPU copy of every GPU
-  resource, textures' contents included, for the whole process lifetime. Create a new engine, or
-  reload.
+- **A lost GPU device is recovered from, mostly.** The engine gets a new device and rebuilds what
+  it loaded in place, reading models again from where they came from, so a scene carries on
+  untouched. What existed only on the GPU is gone: a render target's picture (draw it again),
+  particles in flight, and TAA's history. A model loaded from bytes keeps them for as long as it
+  is loaded. See [When the GPU is lost](docs/API.md#device-lost).
 
 ## Contributing
 

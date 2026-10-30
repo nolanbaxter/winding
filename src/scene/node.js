@@ -17,12 +17,19 @@
 // every frame, and both give back what the propagation design just bought.
 
 import {
-  quatCreate, quatSetAxisAngle, quatFromEuler, quatNormalize, quatLookAlong,
+  quatCreate, quatSetAxisAngle, quatFromEuler, quatNormalize, quatLookAlong, quatConjugate, quatMultiply,
 } from '../core/math/quat.js';
+import { mat4Create, mat4Invert, mat4Decompose, mat4MultiplyAffine } from '../core/math/mat4.js';
+import { handleIndex, NULL_HANDLE } from '../core/handle.js';
+import { NO_PARENT } from './transform.js';
+import { checkOptions } from '../core/options.js';
 
 // Shared scratch. Node methods are called from user code, never concurrently,
 // and a fresh quaternion per setRotation call would allocate in someone's loop.
 const scratchQuat = quatCreate();
+const parentQuat = quatCreate();
+const [own, parentMatrix, inverse, composing] = [mat4Create(), mat4Create(), mat4Create(), mat4Create()];
+const [position, scale] = [[0, 0, 0], [1, 1, 1]];
 const Z_AXIS = [0, 0, 1];
 
 export class Node {
@@ -95,9 +102,109 @@ export class Node {
     return this;
   }
 
-  /** Pass null to detach to the scene root. */
-  setParent(node) {
-    this.scene.transforms.setParent(this.entity, this.scene._parentOf('setParent', node));
+  /**
+   * Whether this node, and everything under it, is drawn: meshes and their
+   * shadows, sprites, text, shapes, paths, tilemaps, emitters, decals, splats
+   * and lights. Far cheaper than removing and adding again, which is what a
+   * pool of bullets or debris wants. A hidden node is not picked or hit by a
+   * ray either. Returns the node.
+   */
+  setVisible(visible) {
+    this.scene._setVisible(this, visible !== false);
+    return this;
+  }
+
+  /**
+   * Multiply the base colour of every mesh under this node by `color`, linear
+   * RGB: a faction's colour, a class's, a hit's flash of red. Tints multiply
+   * down the hierarchy, and [1, 1, 1] is none. Stays in its batch: the draw
+   * calls are the same.
+   */
+  setTint(color) {
+    this.scene._setTint(this, color, 0, 'setTint');
+    return this;
+  }
+
+  /** Add light to every mesh under this node, linear RGB, as its own emission does: a hit's flash. Glows add down the hierarchy. */
+  setGlow(color) {
+    this.scene._setTint(this, color, 3, 'setGlow');
+    return this;
+  }
+
+  /** The tint setTint gave this node, [1, 1, 1] for none: its own, not its ancestors'. */
+  get tint() {
+    return this.scene._tintOf(this, 0);
+  }
+
+  /** The glow setGlow gave this node, [0, 0, 0] for none. */
+  get glow() {
+    return this.scene._tintOf(this, 3);
+  }
+
+  /** Whether setVisible left this node shown. Its ancestors may still hide it. */
+  get visible() {
+    return this.alive && this.scene._hiddenSelf[handleIndex(this.entity)] !== 1;
+  }
+
+  /**
+   * Pass null to detach to the scene root. Its position, rotation and scale
+   * are kept as numbers, now in the new parent's space; with `keepWorld`,
+   * they are changed so it stays where it is in the world -- a part breaking
+   * off, a weapon picked up where it lay.
+   */
+  setParent(node, options = {}) {
+    checkOptions('setParent', options);
+    const t = this.scene.transforms;
+    const parent = this.scene._parentOf('setParent', node);
+    // Both worked out first, so a throw leaves everything as it was.
+    if (options.keepWorld === true) {
+      t.composeNow(own, handleIndex(this.entity), composing);
+      if (parent !== NULL_HANDLE) {
+        if (!mat4Invert(inverse, t.composeNow(parentMatrix, handleIndex(parent), composing))) {
+          throw new Error('setParent: the new parent is scaled to zero, so nothing under it has a place in the world');
+        }
+        mat4MultiplyAffine(own, inverse, own);
+      }
+    }
+    t.setParent(this.entity, parent);
+    if (options.keepWorld === true && mat4Decompose(position, scratchQuat, scale, own)) {
+      t.setPosition(this.entity, position[0], position[1], position[2]);
+      t.setRotation(this.entity, scratchQuat);
+      t.setScale(this.entity, scale[0], scale[1], scale[2]);
+    }
+    return this;
+  }
+
+  /**
+   * Put the node at a point in the world, whatever its parents: setPosition
+   * with the position under its parent that lands it there, from where its
+   * parents are now. A physics body's position, on a ragdoll's bone.
+   */
+  setWorldPosition(x, y, z = 0) {
+    const t = this.scene.transforms;
+    const parent = t.parent[handleIndex(this.entity)];
+    if (parent === NO_PARENT) return this.setPosition(x, y, z);
+    if (!mat4Invert(inverse, t.composeNow(parentMatrix, parent, composing))) {
+      throw new Error('setWorldPosition: a parent is scaled to zero, so no position under it lands anywhere else');
+    }
+    const m = inverse;
+    return this.setPosition(
+      m[0] * x + m[4] * y + m[8] * z + m[12],
+      m[1] * x + m[5] * y + m[9] * z + m[13],
+      m[2] * x + m[6] * y + m[10] * z + m[14],
+    );
+  }
+
+  /** Turn the node to a rotation in the world, whatever its parents': setWorldPosition's turning twin. */
+  setWorldRotation(q) {
+    const t = this.scene.transforms;
+    const parent = t.parent[handleIndex(this.entity)];
+    if (parent === NO_PARENT) return this.setRotation(q);
+    if (!mat4Decompose(position, parentQuat, scale, t.composeNow(parentMatrix, parent, composing))) {
+      throw new Error('setWorldRotation: a parent is scaled to zero, so no rotation under it shows');
+    }
+    quatMultiply(scratchQuat, quatConjugate(parentQuat, parentQuat), q);
+    t.setRotation(this.entity, quatNormalize(scratchQuat, scratchQuat));
     return this;
   }
 
@@ -137,6 +244,14 @@ export class Node {
     return out;
   }
 
+  /** World-space rotation, as a quaternion, as of the last Scene.update(): as worldPosition. */
+  worldRotation(out) {
+    if (!mat4Decompose(position, out, scale, this.scene.transforms.world, this.scene.transforms.worldOffset(this.entity))) {
+      out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1;
+    }
+    return out;
+  }
+
   /**
    * This node's morph target weights, or null if its mesh has none.
    *
@@ -153,6 +268,21 @@ export class Node {
   /** Nodes for this node's children, in the order they were made. */
   children() {
     return this.scene.childrenOf(this);
+  }
+
+  /** Its name in the file it came from, or createNode's; '' for none, or once removed. */
+  get name() {
+    return this.alive ? this.scene._names[handleIndex(this.entity)] ?? '' : '';
+  }
+
+  /** The first node below this one named `name` (a string, or a RegExp to test), depth first; null if none. */
+  find(name) {
+    return this.scene._find(this, name, true)[0] ?? null;
+  }
+
+  /** Every node below this one named `name` (a string, or a RegExp to test), depth first. */
+  findAll(name) {
+    return this.scene._find(this, name, false);
   }
 
   destroy() {

@@ -57,7 +57,7 @@ import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { Upscaler, MIN_RESOLUTION } from './upscale.js';
 import { SplatPass, SPLAT_CULL } from './splats.js';
-import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW } from './gpudriven.js';
+import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW, CULL_CASCADE } from './gpudriven.js';
 import {
   updateWorldBounds, unionWorldBounds, saveBoxes, moveUnion, farthestViewDepth, farthestDistance,
   updateSkinBounds, applySkinBounds, BoxList,
@@ -169,10 +169,10 @@ export class Renderer {
   static async create(rhi, {
     maxDraws = DEFAULT_MAX_DRAWS, exposure = 1.0, shadows, lightDistance = null,
     shadowDistance = null, post, gpuTiming = false, oit = false, ao = false, fog = null, dof = null, autoExposure = null, taa = false,
-  } = {}) {
+  } = {}, adopt = null) {
     const renderer = new Renderer(rhi, {
       maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming, oit, ao, fog, dof, autoExposure, taa,
-    });
+    }, adopt);
     await renderer._init();
     return renderer;
   }
@@ -180,7 +180,14 @@ export class Renderer {
   constructor(rhi, {
     maxDraws, exposure, shadows, lightDistance, shadowDistance, post, gpuTiming = false,
     oit = false, ao = false, fog = null, dof = null, autoExposure = null, taa = false,
-  }) {
+  }, adopt = null) {
+    /**
+     * The stores that hold what was loaded -- materials by id, geometry and
+     * morph deltas by place -- taken over from a renderer whose device was
+     * lost, after each restore()d itself onto the new one: every id and
+     * offset a scene or an asset holds stays right. null makes new ones.
+     */
+    this._adopt = adopt;
     this.shadowOptions = shadows ?? {};
     this._fogOption = fog;
     this._dofOption = dof;
@@ -260,7 +267,7 @@ export class Renderer {
       { binding: 24, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
     ];
     checkStorageStages(rhi, frameEntries);
-    this.materials = new MaterialRegistry(rhi, {
+    this.materials = adopt?.materials ?? new MaterialRegistry(rhi, {
       capacity: 1024,
       frameTextures: frameEntries.filter((e) => e.texture && (e.visibility & GPUShaderStage.FRAGMENT)).length,
     });
@@ -420,9 +427,9 @@ export class Renderer {
     /** Joint matrices for every skinned instance, rebuilt each frame. */
     this.skinPalette = new SkinPalette(rhi);
     /** Morph deltas (static, per primitive) and weights (per frame, per instance). */
-    this.morph = new MorphStore(rhi);
+    this.morph = this._adopt?.morph ?? new MorphStore(rhi);
     /** Every primitive's vertices and indices, in two buffers: see geometry.js. */
-    this.geometry = new GeometryArena(rhi);
+    this.geometry = this._adopt?.geometry ?? new GeometryArena(rhi);
     this._paletteRevision = 0;
 
     /**
@@ -500,27 +507,45 @@ export class Renderer {
       ...['rgba8unorm', 'rgba8unorm-srgb'].flatMap((format) => ['fsBox', 'fsHalve', 'fsBleed'].map((entry) => [format, entry])),
       [HDR_FORMAT, 'fs'], ['rgba8unorm-srgb', 'fs'],
     ]);
-    this.gpu = await GpuDriven.create(this.rhi, this.maxDraws, this.materials);
-    /** One draw per material for the one-object batches: see merged.js. */
-    this.merged = await MergedDraws.create(this.rhi, this.geometry);
-    this.gpu.merged = this.merged;
-    this._makeDrawBindGroup();
-    this.clusters = await ClusteredLights.create(this.rhi);
-    await mips;
-    // Two modules: the plain one declares no extension textures, so its
-    // pipelines take the core material layout.
-    [this.shader, this.extendedShader] = await Promise.all([
+    // Every pass at once: the GPU compiles their pipelines side by side, where
+    // one after another a cold start waited on each in turn.
+    const particles = ParticleSystem.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
+    [
+      this.gpu, this.merged, this.clusters, this.shader, this.extendedShader, this.shadows, this.skyboxPass,
+      this.post, this.upscaler, this.debug, this.sprites, this.particles, this.splats, this.dofPass,
+      this.view2d, this.overlay2d, this.hzb,
+    ] = await Promise.all([
+      GpuDriven.create(this.rhi, this.maxDraws, this.materials),
+      // One draw per material for the one-object batches: see merged.js.
+      MergedDraws.create(this.rhi, this.geometry),
+      ClusteredLights.create(this.rhi),
+      // Two modules: the plain one declares no extension textures, so its
+      // pipelines take the core material layout.
       compileShader(this.rhi.device, pbrShader(0), 'pbr.wgsl'),
       compileShader(this.rhi.device, pbrShader(this.materials.extensionSlots), 'pbr-extended.wgsl'),
+      ShadowMaps.create(this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout),
+      SkyboxPass.create(this.rhi, this.pipelines, null),
+      PostStack.create(this.rhi, this.pipelines, this.postOptions),
+      Upscaler.create(this.rhi, this.pipelines),
+      // Lines for one frame, drawn over the finished picture; see debug.js.
+      DebugLines.create(this.rhi, this.pipelines),
+      SpritePass.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT),
+      particles,
+      SplatPass.create(this.rhi, this.pipelines, HDR_FORMAT, this.frameBuffer),
+      DepthOfField.create(this.rhi, this.pipelines, HDR_FORMAT),
+      particles.then((system) => View2D.create(this.rhi, this.pipelines, system)),
+      // ponytail: a HUD's emitters aren't drawn -- the particle system follows one
+      // scene's at a time. A second system for the overlay, if a HUD needs sparks.
+      View2D.create(this.rhi, this.pipelines),
+      HierarchicalDepth.create(this.rhi, this.pipelines),
+      mips,
     ]);
-    this.shadows = await ShadowMaps.create(
-      this.rhi, this.pipelines, this.drawLayout, this.shadowOptions, this.materials.layout,
-    );
+    this.gpu.merged = this.merged;
+    this._makeDrawBindGroup();
     // The casters' geometry, which the shadow passes bind as the forward ones do,
     // and the merged groups (merged.js), which they draw as well.
     this.shadows.geometry = this.geometry;
     this.shadows.merged = this.merged;
-    this.skyboxPass = await SkyboxPass.create(this.rhi, this.pipelines, null);
     // Asked for at creation: ready for the first frame, as they always were.
     const asked = (this.ao ? FEATURE_AO : 0) | (this.oit ? FEATURE_OIT : 0);
     if (asked !== 0) await this._enableFeatures(asked);
@@ -542,24 +567,11 @@ export class Renderer {
      */
     this.fog = this._fogOption;
     this._fogData = new Float32Array(12);
-    this.post = await PostStack.create(this.rhi, this.pipelines, this.postOptions);
-    this.upscaler = await Upscaler.create(this.rhi, this.pipelines);
-    /** Lines for one frame, drawn over the finished picture; see debug.js. */
-    this.debug = await DebugLines.create(this.rhi, this.pipelines);
-    this.sprites = await SpritePass.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
-    this.particles = await ParticleSystem.create(this.rhi, this.pipelines, this.frameBuffer, HDR_FORMAT);
-    this.splats = await SplatPass.create(this.rhi, this.pipelines, HDR_FORMAT, this.frameBuffer);
-    this.dofPass = await DepthOfField.create(this.rhi, this.pipelines, HDR_FORMAT);
-    this.view2d = await View2D.create(this.rhi, this.pipelines, this.particles);
-    // ponytail: a HUD's emitters aren't drawn -- the particle system follows one
-    // scene's at a time. A second system for the overlay, if a HUD needs sparks.
-    this.overlay2d = await View2D.create(this.rhi, this.pipelines);
     /**
      * Depth of field, or null for none: { focusDistance, fStop, sensorHeight }
      * -- see render/dof.js. A plain field, like fog.
      */
     this.dof = this._dofOption;
-    this.hzb = await HierarchicalDepth.create(this.rhi, this.pipelines);
     // The opaque, single-sided variant is what almost every asset uses; having
     // it ready means the first model added never waits on a compile.
     await this.ensureVariants([0]);
@@ -650,6 +662,10 @@ export class Renderer {
    */
   async _pipelinesBuilt() {
     for (const set of [...this._variantSets.values()]) await set.building;
+    // And the passes a frame starts building beside them: TAA and FXAA, which
+    // draw without themselves until ready, as a feature set does.
+    await this._taaBuilding;
+    await this.post._fxaaBuilding;
   }
 
   /**
@@ -1129,13 +1145,15 @@ export class Renderer {
     // changed -- a renderable that moves can shrink the union as easily as
     // grow it, so it is recomputed whole, unless the few that moved can only
     // have grown it (see moveUnion).
-    const changed = moved > 0 || morphed > 0 || skinned > 0 || this._boundsRevision !== scene.revision;
-    const kept = changed && before !== null && this._hasSceneBounds && morphed === 0 && skinned === 0
+    // Something shown or hidden changes the extent as surely as something moving does.
+    const shownOrHidden = scene.visibilityChanged.length > 0;
+    const changed = moved > 0 || morphed > 0 || skinned > 0 || shownOrHidden || this._boundsRevision !== scene.revision;
+    const kept = changed && before !== null && this._hasSceneBounds && morphed === 0 && skinned === 0 && !shownOrHidden
       && this._boundsRevision === scene.revision
       && moveUnion(items, before, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax);
     if (changed && !kept) {
       this._hasSceneBounds = unionWorldBounds(
-        count, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax,
+        count, scene.worldMin, scene.worldMax, this._sceneMin, this._sceneMax, scene.hiddenRenderables > 0 ? scene.renderableHidden : null,
       );
       this._boundsRevision = scene.revision;
     }
@@ -1276,6 +1294,9 @@ export class Renderer {
     this.shadows.update(camera, scene, changes,
       this._hasSceneBounds ? this._sceneMin : null, this._hasSceneBounds ? this._sceneMax : null);
     this.shadows.updateLocal(scene, camera, changes);
+    // The cascades drawn whole this frame, their matrices and counts for the cull.
+    // With the map's texels over the view's pixels, for the level of detail each cascade can show.
+    this.gpu.setCascades(this.shadows.cascadesToCull(), this.shadows.matrices, this.shadows.size / height);
     this._shadowCacheScene = scene;
     this._shadowCacheRevision = target !== null ? -1 : scene.revision;
     this.stats.shadowViews = this.shadows.localCount;
@@ -1402,12 +1423,13 @@ export class Renderer {
       visibleResource: visibleEarly,
     });
     // The merged groups' lists brought up to this frame's view.
-    const mergedLists = this.merged.addPass(graph, this.gpu, this.geometry, drawDataBuffer);
-
-    // Shadows draw the level of detail the camera chose. Only when there is
-    // any, and a shadow map to draw: otherwise this pass is not run.
+    // What the shadow passes read beside the map: the cull slices they draw from.
     const shadowReads = [];
-    if (this.gpu.hasLod && this.shadows.drawsAny()) {
+    const mergedLists = this.merged.addPass(graph, this.gpu, this.geometry, drawDataBuffer, shadowReads);
+
+    // Shadows draw the level of detail the camera chose, and nothing hidden.
+    // Only when there is any, and a shadow map to draw: otherwise this pass is not run.
+    if (this.gpu.selectsCasters && this.shadows.drawsAny()) {
       const indirectShadow = graph.importBuffer('indirect:shadow', this.gpu.indirectBuffer);
       const visibleShadow = graph.importBuffer('visible:shadow', this.gpu.visibleBuffer);
       this.gpu.addCullPass(graph, {
@@ -1417,6 +1439,15 @@ export class Renderer {
         visibleResource: visibleShadow,
       });
       shadowReads.push(indirectShadow, visibleShadow);
+    }
+    // Each cascade drawn whole, culled caster by caster first (gpudriven.js).
+    for (const layer of this.shadows.cascadesToCull()) {
+      const indirect = graph.importBuffer(`indirect:cascade${layer}`, this.gpu.indirectBuffer);
+      const visible = graph.importBuffer(`visible:cascade${layer}`, this.gpu.visibleBuffer);
+      this.gpu.addCullPass(graph, {
+        phase: CULL_CASCADE + layer, boundsResource: drawDataBuffer, indirectResource: indirect, visibleResource: visible,
+      });
+      shadowReads.push(indirect, visible);
     }
     this.shadows.addPasses(
       graph, shadowMap, this.gpu, this.drawBindGroup, this.skinPalette, this.morph, localShadowMap, shadowReads,
@@ -1919,7 +1950,7 @@ export class Renderer {
       const i = gpu.transparentItems[t];
       const o = i * 3;
       // The level the camera shows is the level that casts, on screen or not.
-      const selected = !gpu.hasLod || gpu.lodSelected(i, camera.viewProjection, projectionScale);
+      const selected = !gpu.selectsCasters || gpu.lodSelected(i, camera.viewProjection, projectionScale);
       gpu.casterSelected[t] = selected ? 1 : 0;
       if (!selected || !frustumTestAABB(this.frustum, scene.worldMin, scene.worldMax, o)) continue;
 

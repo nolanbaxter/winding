@@ -263,6 +263,16 @@ test('compute pipelines are cached by what makes them different', () => {
   assert.equal(created, 3);
 });
 
+await atest('an async compute pipeline is compiled once and shared with compute()', async () => {
+  let created = 0;
+  const cache = new PipelineCache({ createComputePipelineAsync: async () => ({ n: ++created }) });
+  const desc = { label: 'a', layout: { id: 1, gpu: {} }, shader: { id: 7, module: {} }, entry: 'main' };
+  const [a, b] = await Promise.all([cache.computeAsync(desc), cache.computeAsync({ ...desc, label: 'again' })]);
+  assert.equal(a, b, 'two asks in flight wait on one compile');
+  assert.equal(cache.compute(desc), a, 'and compute() finds it');
+  assert.equal(created, 1);
+});
+
 
 test('growth keeps every material: its values, its pipeline and its bind group', () => {
   const rhi = fakeRhi();

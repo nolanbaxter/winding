@@ -23,6 +23,8 @@ const FORMAT = 'rgba8unorm-srgb';
  * it paints must face. `spheres` gets each box's centre and the radius of
  * its farthest corner, for clustering.
  */
+const CLEAR = [0, 0, 0, 0];
+
 export function packDecals(scene, out, layers, spheres) {
   const world = scene.transforms.world;
   const inverse = mat4Create();
@@ -37,7 +39,9 @@ export function packDecals(scene, out, layers, spheres) {
       }
       out[o + column * 4 + 3] = inverse[column * 4 + 3];
     }
-    out.set(decal.color, o + 16);
+    // Hidden (node.setVisible): clear, and reaching no cluster -- kept in place, so nothing after it moves.
+    const hidden = scene.hidden?.[handleIndex(entity)] === 1;
+    out.set(hidden ? CLEAR : decal.color, o + 16);
     const zx = world[m + 8];
     const zy = world[m + 9];
     const zz = world[m + 10];
@@ -63,7 +67,7 @@ export function packDecals(scene, out, layers, spheres) {
     spheres[k * 4] = world[m + 12];
     spheres[k * 4 + 1] = world[m + 13];
     spheres[k * 4 + 2] = world[m + 14];
-    spheres[k * 4 + 3] = Math.sqrt(radiusSq);
+    spheres[k * 4 + 3] = hidden ? 0 : Math.sqrt(radiusSq);
     k++;
   }
   return k;

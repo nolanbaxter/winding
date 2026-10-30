@@ -781,6 +781,48 @@ test('removal swap-removes, so renderable indices are not stable', () => {
   assert.equal(scene.renderableEntity[0], second.entity, 'the last one moved down');
 });
 
+test('a hidden node hides what hangs under it, is passed over by a ray, and comes back shown', () => {
+  const scene = new Scene({ capacity: 64 });
+  const parent = scene.createNode();
+  const a = scene.add(fakeAsset(), { parent }).setPosition(0, 0, 0);
+  const b = scene.add(fakeAsset()).setPosition(5, 0, 0);
+  scene.update();
+  assert.equal(scene.raycast([0, 0, 10], [0, 0, -1])?.node.entity, a.entity, 'shown, it is hit');
+
+  parent.setVisible(false);
+  assert.equal(parent.visible, false);
+  assert.equal(a.visible, true, 'a node reports its own setting; its parent hides it');
+  scene.update();
+  assert.equal(scene.hidden[handleIndex(a.entity)], 1, 'hidden by its parent');
+  assert.equal(scene.hiddenRenderables, 1);
+  assert.deepEqual(scene.visibilityChanged, [0], 'its renderable listed for the renderer');
+  assert.equal(scene.raycast([0, 0, 10], [0, 0, -1]), null, 'hidden, a ray goes through it');
+  scene.visibilityChanged.length = 0;
+
+  // Placed under a hidden node, hidden with it.
+  b.setParent(parent);
+  scene.update();
+  assert.equal(scene.hiddenRenderables, 2);
+  assert.equal(scene.raycast([5, 0, 10], [0, 0, -1]), null);
+
+  parent.setVisible(true);
+  scene.update();
+  assert.equal(scene.hiddenRenderables, 0, 'shown again, everything under it');
+  assert.equal(scene.raycast([0, 0, 10], [0, 0, -1])?.node.entity, a.entity);
+
+  // Removed while hidden, it is counted no longer, and its slot is not left hidden.
+  a.setVisible(false);
+  scene.update();
+  assert.equal(scene.hiddenRenderables, 1);
+  scene.remove(a);
+  scene.update();
+  assert.equal(scene.hiddenRenderables, 0);
+  assert.equal(scene._hiddenSelfCount, 0);
+  const reused = scene.add(fakeAsset());
+  scene.update();
+  assert.equal(scene.hidden[handleIndex(reused.entity)], 0, 'a reused slot starts shown');
+});
+
 test('the slots an add or a removal changes are listed for the renderer, until there are more than slots', () => {
   const scene = new Scene({ capacity: 64 });
   const nodes = [0, 1, 2].map(() => scene.add(fakeAsset()));
@@ -2236,6 +2278,37 @@ test('1.0.1: run sees a frame drawn by hand, and a restart is no jump', () => {
   }
 });
 
+test('run moves the scene on at the time scale and the HUD in real time', () => {
+  const engine = Object.create(Winding.prototype);
+  engine.gpu = { width: 320, height: 240, destroyed: false, canvas: { isConnected: true } };
+  engine.renderer = { render() {} };
+  engine.onDemand = false; engine.skippedFrames = 0; engine._running = false;
+  engine.clock = new Clock();
+  engine._fpsAccum = 0; engine._fpsFrames = 0;
+  engine._remember = () => {};
+  let raf = null;
+  const [request, cancel] = [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame];
+  globalThis.requestAnimationFrame = (f) => { raf = f; return 1; };
+  globalThis.cancelAnimationFrame = () => {};
+  try {
+    const world = new Scene({ capacity: 8 }), hud = new Scene({ capacity: 8 });
+    const moved = { world: 0, hud: 0 };
+    world.advance = (dt) => { moved.world += dt; };
+    hud.advance = (dt) => { moved.hud += dt; };
+    let steps = 0;
+    engine.clock.timeScale = 0.5;
+    engine.run(world, new Camera(), { hud: { scene: hud }, update: () => { steps++; } });
+    for (let ms = 0; ms <= 1000; ms += 10) raf(ms);
+    engine.stop();
+    close(moved.world, 0.5, 1e-9, 'the scene at half speed');
+    close(moved.hud, 1, 1e-9, 'the HUD in real time');
+    assert.ok(Math.abs(steps - 30) <= 1, `half a second of steps in a second: ${steps}`);
+  } finally {
+    globalThis.requestAnimationFrame = request;
+    globalThis.cancelAnimationFrame = cancel;
+  }
+});
+
 test('1.0.1: a removed parent, a morph back at rest, levels of detail, renamed names, and a clamped orbit', () => {
   // A removed node's slot is the next one's: hanging something off it is an error.
   const scene = new Scene({ capacity: 16 });
@@ -2316,6 +2389,71 @@ await atest('Winding.supported says whether create can work, and never throws', 
     if (real) Object.defineProperty(globalThis, 'navigator', real);
     else delete globalThis.navigator;
   }
+});
+
+test('a tint multiplies and a glow adds down the hierarchy, in three words a renderable, zero for none', () => {
+  // Reads a renderable's words back as WGSL's unpack2x16float would, plus 1 on the tint.
+  const half = (h) => {
+    const e = (h >> 10) & 31, m = h & 1023, s = h & 0x8000 ? -1 : 1;
+    return s * (e === 0 ? m * 2 ** -24 : (1 + m / 1024) * 2 ** (e - 15));
+  };
+  const read = (scene, i) => {
+    const w = scene.renderableTint.subarray(i * 3, i * 3 + 3);
+    const h = [w[0] & 0xffff, w[0] >>> 16, w[1] & 0xffff, w[1] >>> 16, w[2] & 0xffff, w[2] >>> 16].map(half);
+    return { tint: [h[0] + 1, h[1] + 1, h[2] + 1], glow: [h[3], h[4], h[5]] };
+  };
+  const near = (got, want, what) => want.forEach((v, k) => assert.ok(Math.abs(got[k] - v) <= Math.abs(v) * 1e-3 + 1e-3, `${what}: ${got} for ${want}`));
+
+  const scene = new Scene({ capacity: 64 });
+  const army = scene.createNode();
+  const unit = scene.add(fakeAsset(), { parent: army });
+  const other = scene.add(fakeAsset());
+  scene.update();
+  assert.deepEqual([...scene.renderableTint.subarray(0, 6)], [0, 0, 0, 0, 0, 0], 'none: all zero');
+  assert.deepEqual(scene.tintChanged, []);
+
+  army.setTint([0.8, 0.1, 0.1]);
+  unit.setTint([0.5, 1, 2]).setGlow([3, 0, 0.25]);
+  assert.deepEqual(unit.tint, [0.5, 1, 2]);
+  assert.deepEqual(unit.glow, [3, 0, 0.25]);
+  assert.deepEqual(other.tint, [1, 1, 1]);
+  scene.update();
+  near(read(scene, 0).tint, [0.4, 0.1, 0.2], 'multiplied by the army');
+  near(read(scene, 0).glow, [3, 0, 0.25], 'glow');
+  assert.deepEqual(scene.tintChanged, [0], 'only it, listed for the renderer');
+
+  // Moved out from under the army: its own tint alone.
+  scene.tintChanged.length = 0;
+  unit.setParent(null);
+  scene.update();
+  near(read(scene, 0).tint, [0.5, 1, 2], 'its own');
+  // Back to none, and forgotten.
+  unit.setTint([1, 1, 1]).setGlow([0, 0, 0, 1]);
+  army.setTint([1, 1, 1]);
+  scene.update();
+  assert.equal(scene._tints.size, 0, 'nothing kept for nodes back to none');
+  assert.deepEqual([...scene.renderableTint.subarray(0, 3)], [0, 0, 0]);
+
+  // A removal moves the last renderable down, its words with it.
+  other.setTint([0, 0.5, 0]);
+  scene.update();
+  unit.destroy();
+  near(read(scene, 0).tint, [0, 0.5, 0], 'carried down by the swap');
+  assert.deepEqual([...scene.renderableTint.subarray(3, 6)], [0, 0, 0], 'the old place cleared');
+
+  assert.throws(() => other.setTint([1, 0, 0, 0.5]), /^Error: setTint: a tint has no alpha; a see-through mesh is a blended material's$/);
+  assert.throws(() => other.setTint([1, -1, 0]), /^Error: setTint: color must be 3 numbers, 0 to 65504$/);
+  assert.throws(() => other.setGlow([NaN, 0, 0]), /^Error: setGlow: color must be 3 numbers, 0 to 65504$/);
+  assert.throws(() => other.setGlow(1), /^Error: setGlow: color must be 3 numbers/);
+  other.destroy();
+  assert.throws(() => other.setTint([1, 1, 1]), /^Error: setTint: this node was removed$/);
+  assert.deepEqual(other.tint, [1, 1, 1], 'removed: none');
+  const reused = scene.add(fakeAsset());
+  scene.update();
+  assert.deepEqual([...scene.renderableTint.subarray(0, 3)], [0, 0, 0], 'a reused slot starts with none');
+  reused.setGlow([1, 0, 0]);
+  scene.update();
+  near(read(scene, 0).glow, [1, 0, 0], 'and takes one');
 });
 
 console.log(`\n${passed} checks passed\n`);

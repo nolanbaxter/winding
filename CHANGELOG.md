@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-30
+
+**Ready for games.** A lost GPU device is recovered from instead of ending the session, and
+`prepare` builds a level's pipelines behind the loading screen. Meshes can be made from arrays,
+and nodes hidden, tinted, lit up, found by name and placed in the world whatever their parents,
+all without leaving their batches. The clock slows and stops for a hit-stop or a pause. Shadows
+cost less: cascades skip the casters that don't reach them and cast a level of detail their maps
+can show, and a point light redraws only the faces something moved in. And it starts faster,
+from 3.1 to 2.3 s on a first launch in Electron.
+
+### Added
+
+- **[`engine.clock.timeScale`](docs/API.md#engine-clock)**: slow motion, hit-stop and pause.
+  `0.25` runs the world at a quarter speed and `0` stops it: `update` steps keep their length and
+  come less often, and animations and particles slow with them, while a HUD scene keeps real time
+  so a pause menu still moves. `clock.delta` is the frame's simulated seconds.
+- **[`node.name`](docs/API.md#node-name), [`node.find(name)`](docs/API.md#node-find) and
+  [`node.findAll(name)`](docs/API.md#node-findall)**: a node keeps its name from the glTF file, and
+  a model's or a level's nodes can be found by it -- spawn points and drop zones marked in Blender,
+  the hand bone a weapon goes in, the door to take off. A RegExp finds a family (`/^spawn/`).
+  `createNode` takes a `name` too.
+- **[`node.setWorldPosition`](docs/API.md#node-setworldposition),
+  [`node.setWorldRotation`](docs/API.md#node-setworldrotation),
+  [`node.worldRotation`](docs/API.md#node-worldrotation) and
+  [`setParent(node, { keepWorld })`](docs/API.md#node-setparent)**: a node placed in the world
+  whatever its parents, from where they are now -- a physics body's pose on a ragdoll's bone, set
+  root to tip in one step -- and moved to a new parent without moving: a wall piece or a car door
+  breaking off, a weapon picked up where it lay.
+- **[`node.setTint(color)`](docs/API.md#node-settint) and [`node.setGlow(color)`](docs/API.md#node-setglow)**:
+  colour a mesh and everything under it at runtime -- factions, classes, players, a hit's flash --
+  without a copy of the model per colour. Tints multiply and glows add down the hierarchy, and
+  the meshes stay in their batches: tinting every unit differently draws with the same calls as
+  tinting none. They ride in padding the per-object data already had, so nothing grew, and a
+  frame where tints change spends 0.1 ms on 9,000 nodes.
+- **[`engine.prepare(scene, camera)`](docs/API.md#engine-prepare)**: builds everything a scene will
+  draw with, behind a loading screen. Probes, decals, AO, OIT, TAA and FXAA are built the first
+  time a frame asks for them, and until then frames draw without them, so they appeared a few
+  frames into play. A scene with decals, AO, TAA and particles started 17 pipeline builds in its
+  first frames; after `prepare`, none, and AO draws from the first frame.
+- **[`engine.createMesh(options)`](docs/API.md#engine-createmesh)** makes a mesh from arrays --
+  positions, and optionally indices, normals, UVs and vertex colours, with a colour, metalness and
+  roughness -- for terrain, generated maps and props built in code. Without normals it is shaded
+  flat, the low-poly look. It comes back as a model, as `load` does: culled, merged, shadowed and
+  rebuilt after a lost GPU device like any loaded file.
+- **[`node.setVisible(visible)`](docs/API.md#node-setvisible)** shows or hides a node and everything
+  under it -- meshes and their shadows, sprites, text, shapes, paths, tilemaps, emitters, decals,
+  splats and lights -- and [`node.visible`](docs/API.md#node-visible) reads it back. A hidden node
+  is not hit by a ray or a pick. Nothing is rebuilt to hide or show, so a pool of bullets or debris
+  is far cheaper than removing and adding: the work is one pass over the nodes in a frame where
+  something changed.
+- **[A lost GPU device is recovered from](docs/API.md#device-lost).** A driver reset, the GPU
+  process crashing, or a Steam Deck waking from sleep used to end the session: the engine destroyed
+  itself and the page had to reload. Now it gets a new device on the same canvas and rebuilds what
+  it loaded in place -- models read again from where they came from, under the same material ids
+  and geometry offsets -- so scenes, nodes and loaded objects carry on untouched. A crashed GPU
+  process in Electron took 1.7 s to come back from. `onDeviceLost` is told `action: 'recover'`
+  and `recovered`, a promise for when it is drawing again. [`engine.gpu.loseForTest()`](docs/API.md#engine-gpu-losefortest)
+  loses the device on purpose, to test it.
+
+### Changed
+
+- **A point light's shadow redraws only the faces something moved in.** Its six cube faces were
+  all drawn again whenever anything moved inside its reach; now only the faces the moved box
+  reaches into are, and the frame is the same to the pixel. A walker beside a torch redraws two or
+  three faces, not six. A dungeon of 36 shadowed torches and 40 walkers: 21.9 to 13.8 ms of GPU
+  time on Iris Xe.
+- **Starting is faster.** `Winding.create` built its passes' pipelines one after another, and made
+  16 compute pipelines synchronously, each compiled on the GPU process's main thread while
+  everything else waited. They now compile side by side, off that thread. A 300-character scene
+  in Electron on Iris Xe, launch to first frame: 3.1 to 2.3 s on a first launch, with empty
+  shader caches (`create` 1.7 to 1.05 s); 1.2 to 1.0 s on every launch after.
+- **[`engine.prepare`](docs/API.md#engine-prepare) draws the shadow cascades both ways they draw.**
+  The first frame to cull a batch of casters for a cascade -- the first time a crowd straddles a
+  cascade's edge -- paid 0.1 s of the driver's recording, once, mid-play. That frame is now one of
+  `prepare`'s. The first frame of play after it went from 125-180 ms to 25 ms, and the first two
+  seconds from 7-19 missed frames to none.
+- **A shadow cascade casts a level of detail its map can show.** A group of levels (`MSFT_lod`)
+  cast its shadow at the level the camera showed, into every cascade, however few texels the
+  cascade had for it -- and at its finest from behind the camera, which the camera's test takes for
+  infinitely close. Each cascade now casts the coarser of the camera's level and the one its own
+  resolution calls for, never finer than the mesh on screen. Nine hundred spheres in three levels,
+  every cascade redrawn: shadows from 5.2 to 3.7 ms of GPU time.
+- **A shadow cascade draws only the casters that reach it.** A cascade used to skip a batch of
+  instances only when the box around all of them missed it, so a crowd spread across a map drew
+  every member into every cascade. Each cascade drawn whole is now culled caster by caster on the
+  GPU first. Three hundred walkers, 9,000 parts, moving under a sun: shadows from 12.9 to 9.5 ms
+  of GPU time on Iris Xe, the near cascade from 3.0 to 0.6 ms. The far cascades, which hold the
+  whole crowd, cost what they did.
+
 ## [1.8.0] - 2026-10-30
 
 **Say so.** A misspelt option used to vanish without a word; now the console names it and the
@@ -2517,7 +2606,8 @@ First public release.
 - 261 checks under Node, plus a browser suite that boots the engine on a real
   device and verifies what WGSL cannot be verified without one.
 
-[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/nolanbaxter/winding/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/nolanbaxter/winding/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/nolanbaxter/winding/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/nolanbaxter/winding/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/nolanbaxter/winding/compare/v1.6.0...v1.6.1

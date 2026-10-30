@@ -123,6 +123,18 @@ struct Merged {
 @group(0) @binding(4) var<storage, read_write> work    : array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read>       arena   : array<u32>;
 @group(0) @binding(6) var<storage, read_write> indices : array<u32>;
+/** gpudriven.js's bounds: only the LOD sphere's radius is read, negative for a hidden object. */
+struct Bounds {
+  minPoint : vec4<f32>,
+  maxPoint : vec4<f32>,
+  lod      : vec4<f32>,
+};
+@group(0) @binding(7) var<storage, read>       bounds  : array<Bounds>;
+
+/** Hidden (node.setVisible): out of every view, and its shadow list holds its tag alone. */
+fn hidden(item : u32) -> bool {
+  return bounds[item].lod.w < 0.0;
+}
 // The copy's dispatch size, bound only for the step that writes it: a buffer
 // a dispatch reads its size from may not also be writable in that dispatch.
 @group(1) @binding(0) var<storage, read_write> dispatch : array<u32>;
@@ -133,6 +145,7 @@ struct Merged {
  * values -- the world box round the moved one, as aabbTransform makes it.
  */
 fn inView(m : Merged) -> bool {
+  if (hidden(m.item)) { return false; }
   let model = draws[m.item].model;
   let centre = (model * vec4<f32>((m.lo.xyz + m.hi.xyz) * 0.5, 1.0)).xyz;
   let half = (m.hi.xyz - m.lo.xyz) * 0.5;
@@ -184,7 +197,7 @@ fn writeSpan(s : u32, shownIfAny : bool, t : u32) {
     if (merged[mid].spanFirst <= s) { lo = mid; } else { hi = mid; }
   }
   let m = merged[lo];
-  let shown = shownIfAny || atomicLoad(&work[params.stateBase + lo]) == 1u;
+  let shown = (shownIfAny || atomicLoad(&work[params.stateBase + lo]) == 1u) && !hidden(m.item);
   let start = (s - m.spanFirst) * ${SPAN}u;
   let end = min(start + ${SPAN}u, m.indexCount);
   for (var k = start + t; k < end; k = k + ${WORKGROUP_SIZE}u) {
@@ -239,16 +252,16 @@ export class MergedDraws {
         entry(0, { type: 'uniform' }), entry(1, { type: 'uniform' }),
         entry(2, { type: 'read-only-storage' }), entry(3, { type: 'read-only-storage' }),
         entry(4, { type: 'storage' }), entry(5, { type: 'read-only-storage' }), entry(6, { type: 'storage' }),
+        entry(7, { type: 'read-only-storage' }),
       ],
     });
     this.dispatchLayout = device.createBindGroupLayout({ label: 'merged-dispatch', entries: [entry(0, { type: 'storage' })] });
     const layout = createPipelineLayout(device, { 0: this.layout }, 'merged');
     const sizeLayout = createPipelineLayout(device, { 0: this.layout, 1: this.dispatchLayout }, 'merged-size');
-    const make = (name, l) => sharedPipelines(device).compute({ label: `merged-${name}`, layout: l, shader, entry: name });
-    this.flipPipeline = make('flip', layout);
-    this.sizePipeline = make('size', sizeLayout);
-    this.copyPipeline = make('copy', layout);
-    this.copyAllPipeline = make('copyAll', layout);
+    const make = (name, l) => sharedPipelines(device).computeAsync({ label: `merged-${name}`, layout: l, shader, entry: name });
+    [this.flipPipeline, this.sizePipeline, this.copyPipeline, this.copyAllPipeline] = await Promise.all([
+      make('flip', layout), make('size', sizeLayout), make('copy', layout), make('copyAll', layout),
+    ]);
   }
 
   /** A buffer of at least `bytes`, replaced only when it has to grow. */
@@ -381,14 +394,14 @@ export class MergedDraws {
     encoder.clearBuffer(work, 0, this._listBase * 4);
     const pass = encoder.beginComputePass({ label: 'merged-shadow-lists' });
     pass.setPipeline(this.copyAllPipeline);
-    pass.setBindGroup(0, this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.drawDataBuffer, this._arena.indexBuffer, shadowIndices));
+    pass.setBindGroup(0, this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.drawDataBuffer, this._arena.indexBuffer, shadowIndices, gpu.boundsBuffer));
     pass.dispatchWorkgroups(Math.min(spans, 65535), Math.ceil(spans / 65535));
     pass.end();
     queue.submit([encoder.finish()]);
   }
 
   /** The bind group every step uses, writing into `indices`: the camera's lists, or the shadows'. */
-  _makeBindGroup(cullParams, cullBytes, draws, arenaIndices, indices) {
+  _makeBindGroup(cullParams, cullBytes, draws, arenaIndices, indices, bounds) {
     const b = this._buffers;
     return this.rhi.device.createBindGroup({
       label: 'merged',
@@ -401,6 +414,7 @@ export class MergedDraws {
         { binding: 4, resource: { buffer: b.work } },
         { binding: 5, resource: { buffer: arenaIndices } },
         { binding: 6, resource: { buffer: indices } },
+        { binding: 7, resource: { buffer: bounds } },
       ],
     });
   }
@@ -428,20 +442,29 @@ export class MergedDraws {
    * reading `gpu`'s draw data (`drawsResource`) and its cull parameters.
    * Returns the resource the forward pass reads, or null with nothing merged.
    */
-  addPass(graph, gpu, arena, drawsResource) {
+  addPass(graph, gpu, arena, drawsResource, shadowReads = []) {
     if (this.groupCount === 0) return null;
+    // Something shown or hidden this frame: the shadow lists are written again.
+    this._shadowsStale = this._shadowsStale || gpu.shownOrHidden === true;
     const key = `${this.revision}:${gpu.buffersRevision}:${arena.revision}`;
     if (this._bindKey !== key) {
       this._bindKey = key;
       const b = this._buffers;
-      this._bindGroup = this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.drawDataBuffer, arena.indexBuffer, b.indices);
+      this._bindGroup = this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.drawDataBuffer, arena.indexBuffer, b.indices, gpu.boundsBuffer);
+      this._shadowGroup = this._makeBindGroup(gpu.cullParamsBuffer, gpu.cullParams.byteLength, gpu.drawDataBuffer, arena.indexBuffer, b.shadowIndices, gpu.boundsBuffer);
       this._dispatchGroup = this.rhi.device.createBindGroup({
         label: 'merged-dispatch', layout: this.dispatchLayout, entries: [{ binding: 0, resource: { buffer: b.dispatch } }],
       });
       this.drawBindGroup = undefined;
     }
     const lists = graph.importBuffer('merged', this._buffers.indices);
-    graph.addPass({ name: 'merge', type: 'compute', reads: [drawsResource], writes: [lists], execute: this._execute });
+    const writes = [lists];
+    if (this._shadowsStale) {
+      const shadowLists = graph.importBuffer('merged-shadows', this._buffers.shadowIndices);
+      writes.push(shadowLists);
+      shadowReads.push(shadowLists);
+    }
+    graph.addPass({ name: 'merge', type: 'compute', reads: [drawsResource], writes, execute: this._execute });
     return lists;
   }
 
@@ -457,6 +480,14 @@ export class MergedDraws {
     // The copy's layout has no group 1, so the size it reads is not bound writable here.
     pass.setPipeline(this.copyPipeline);
     pass.dispatchWorkgroupsIndirect(this._buffers.dispatch, 0);
+    // The shadow lists, every object again, its tag alone if hidden: only in a
+    // frame that showed or hid something.
+    if (this._shadowsStale) {
+      this._shadowsStale = false;
+      pass.setBindGroup(0, this._shadowGroup);
+      pass.setPipeline(this.copyAllPipeline);
+      pass.dispatchWorkgroups(Math.min(this.spanCount, 65535), Math.ceil(this.spanCount / 65535));
+    }
   }
 
   /**

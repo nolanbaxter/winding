@@ -1052,8 +1052,9 @@ test('every shader that reads DrawData agrees on its layout', () => {
     'the shadow pass reads the same buffer, so it must see the same struct');
 
   // And the struct the two agree on must be the stride the CPU writes.
-  // WGSL: mat4x4 is 64 with align 16; mat3x3 is 48 with align 16; u32 is 4.
-  const SIZES = { 'mat4x4<f32>': [64, 16], 'mat3x3<f32>': [48, 16], u32: [4, 4] };
+  // WGSL: mat4x4 is 64 with align 16; mat3x3 is 48 with align 16; vec3 is 12
+  // with align 16, so a u32 after it fills its fourth word; u32 is 4.
+  const SIZES = { 'mat4x4<f32>': [64, 16], 'mat3x3<f32>': [48, 16], 'vec3<f32>': [12, 16], u32: [4, 4] };
   let end = 0;
   let structAlign = 1;
   for (const member of forward) {

@@ -19,7 +19,7 @@
 // how many of its ancestors moved.
 
 import { DEBUG, assert, assertFinite } from '../core/assert.js';
-import { mat4Copy } from '../core/math/mat4.js';
+import { mat4Copy, mat4FromQuatPosScale, mat4MultiplyAffine } from '../core/math/mat4.js';
 import { handleIndex, NULL_HANDLE } from '../core/handle.js';
 import {
   sharedFloat32Array, sharedInt32Array, sharedUint32Array, sharedUint8Array,
@@ -304,6 +304,20 @@ export class TransformStore {
 
   worldMatrixInto(out, entity) {
     return mat4Copy(out, this.world, 0, handleIndex(entity) * 16);
+  }
+
+  /**
+   * Slot i's world matrix from its own and its ancestors' position, rotation
+   * and scale as they are now: what update() will compose, without waiting
+   * for it. A walk up the parents, so for the odd call, not every node a frame.
+   */
+  composeNow(out, i, scratch) {
+    mat4FromQuatPosScale(out, this.rotation, this.position, this.scale, 0, i * 4, i * 3, i * 3);
+    for (let p = this.parent[i]; p !== NO_PARENT; p = this.parent[p]) {
+      mat4FromQuatPosScale(scratch, this.rotation, this.position, this.scale, 0, p * 4, p * 3, p * 3);
+      mat4MultiplyAffine(out, scratch, out);
+    }
+    return out;
   }
 
   /**

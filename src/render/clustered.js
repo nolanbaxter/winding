@@ -297,6 +297,8 @@ fn assignLights(
   let indexAt = select(0u, ${DECAL_INDEX_BASE}u, decal);
 
   let light = lights[li];
+  // A hidden light (node.setVisible) has its radius negated: it lights no cluster.
+  if (!decal && light.positionRadius.w < 0.0) { return; }
   // Lights arrive in world space; the cluster grid is view space.
   let centre = (params.view * vec4<f32>(light.positionRadius.xyz, 1.0)).xyz;
   let radius = light.positionRadius.w;
@@ -438,8 +440,10 @@ export class ClusteredLights {
     const shader = await compileShader(device, CLUSTER_SHADER, 'clustered.wgsl');
     const layout = createPipelineLayout(device, { 0: this.layout }, 'clusters');
     const pipelines = sharedPipelines(device);
-    this.buildPipeline = pipelines.compute({ label: 'cluster-bounds', layout, shader, entry: 'buildClusters' });
-    this.assignPipeline = pipelines.compute({ label: 'cluster-assign', layout, shader, entry: 'assignLights' });
+    [this.buildPipeline, this.assignPipeline] = await Promise.all([
+      pipelines.computeAsync({ label: 'cluster-bounds', layout, shader, entry: 'buildClusters' }),
+      pipelines.computeAsync({ label: 'cluster-assign', layout, shader, entry: 'assignLights' }),
+    ]);
   }
 
   /** Names lightBuffer, so it is rebuilt whenever that buffer is replaced. */

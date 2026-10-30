@@ -11,7 +11,7 @@
 
 import { assertFinite } from '../core/assert.js';
 import { HandleAllocator, handleIndex, NULL_HANDLE } from '../core/handle.js';
-import { TransformStore } from './transform.js';
+import { TransformStore, NO_PARENT } from './transform.js';
 import { Node } from './node.js';
 import { Camera } from './camera.js';
 import {
@@ -30,6 +30,30 @@ import { grownCapacity, growArray } from '../core/grow.js';
 import { checkOptions } from '../core/options.js';
 
 const DEFAULT_CAPACITY = 4096;
+
+const HALF_F32 = new Float32Array(1);
+const HALF_BITS = new Uint32Array(HALF_F32.buffer);
+/** A number as a 16-bit float's bits, rounded to nearest: what WGSL's unpack2x16float reads. */
+function half(x) {
+  HALF_F32[0] = x;
+  const b = HALF_BITS[0];
+  const sign = (b >>> 16) & 0x8000;
+  const exp = ((b >>> 23) & 0xff) - 112;
+  const mantissa = b & 0x7fffff;
+  if (exp >= 31) return sign | 0x7bff;
+  if (exp <= 0) return exp < -10 ? sign : sign | ((((mantissa | 0x800000) >> (13 - exp)) + 1) >> 1);
+  return Math.min(sign | ((exp << 10) | (mantissa >> 13)) + ((mantissa >> 12) & 1), sign | 0x7bff);
+}
+
+const TINT_WORDS = new Uint32Array(3);
+const TINT_ONES = new Float32Array(6);
+
+/** A tint and a glow as the three words a renderable's draw data carries: tint - 1 and glow, so all zero is neither. */
+function tintWords(out, at, t, o) {
+  out[at] = half(t[o] - 1) | half(t[o + 1] - 1) << 16;
+  out[at + 1] = half(t[o + 2] - 1) | half(t[o + 3]) << 16;
+  out[at + 2] = half(t[o + 4]) | half(t[o + 5]) << 16;
+}
 
 /**
  * Identity for a scene, so anything caching work derived from one can tell
@@ -609,6 +633,38 @@ export class Scene {
      * well and keeps a scene that is changed but never drawn from growing it.
      */
     this.renderablesTouched = [];
+    /**
+     * Visibility, by entity slot: `_hiddenSelf` for a node hidden itself
+     * (node.setVisible), `hidden` for one hidden at all, itself or by an
+     * ancestor -- what everything drawn reads. Worked out at update(), once a
+     * frame and only after a change (_refreshVisibility).
+     */
+    this._hiddenSelf = new Uint8Array(capacity);
+    this.hidden = new Uint8Array(capacity);
+    /** Each node's name, by entity slot: the file's, or createNode's. A hole is no name. */
+    this._names = [];
+    /**
+     * Tints and glows (node.setTint, node.setGlow): each node's own, by entity
+     * slot, as [r, g, b, glow r, g, b], for the nodes that set one (flagged in
+     * _tintHas). Worked out down the hierarchy at update() after a change
+     * (_refreshTints): each node's in _tintAt, as tint less 1 and glow so
+     * zero is none, and each renderable's in renderableTint, three words, all
+     * zero for none. The renderables that changed are listed in tintChanged
+     * for the renderer.
+     */
+    this._tints = new Map();
+    this._tintHas = new Uint8Array(0);
+    this._tintAt = new Float32Array(0);
+    this._tintMoved = new Uint8Array(0);
+    this._tintDirty = false;
+    this.renderableTint = new Uint32Array(renderableCapacity * 3);
+    this.tintChanged = [];
+    this._hiddenSelfCount = 0;
+    this._visibilityDirty = false;
+    /** Per renderable: hidden, as last worked out; how many are; and which changed this frame, for the renderer. */
+    this.renderableHidden = new Uint8Array(renderableCapacity);
+    this.hiddenRenderables = 0;
+    this.visibilityChanged = [];
     this.renderableEntity = new Uint32Array(renderableCapacity);
     /** Which transform slot each renderable reads its world matrix from. */
     this.renderableMatrixSlot = new Uint32Array(renderableCapacity);
@@ -836,6 +892,7 @@ export class Scene {
 
       const entity = this.entities.alloc();
       created[nodeIndex] = entity;
+      if (node.name) this._names[handleIndex(entity)] = node.name;
       this.transforms.add(entity, {
         position: trs?.position ?? node.position,
         rotation: trs?.rotation ?? node.rotation,
@@ -1053,6 +1110,8 @@ export class Scene {
     this.renderableMorphExtent.length = capacity;
     this.renderableMorphPad = growArray(this.renderableMorphPad, capacity);
     this.renderableLodSlot = growArray(this.renderableLodSlot, capacity);
+    this.renderableHidden = growArray(this.renderableHidden, capacity);
+    this.renderableTint = growArray(this.renderableTint, capacity, 3);
     this.renderableLodSphere = growArray(this.renderableLodSphere, capacity, 4);
     this.renderableCoverage = growArray(this.renderableCoverage, capacity, 2);
     this.localMin = growArray(this.localMin, capacity, 3);
@@ -1100,9 +1159,11 @@ export class Scene {
   /** An empty node, for grouping things you position together. */
   createNode(options = {}, caller = 'createNode') {
     if (caller === 'createNode') checkOptions('createNode', options);
-    const { parent = null } = options;
+    const { parent = null, name = '' } = options;
+    if (typeof name !== 'string') throw new Error(`${caller}: name must be a string`);
     const parentEntity = this._parentOf(caller, parent);
     const entity = this.entities.alloc();
+    if (name) this._names[handleIndex(entity)] = name;
     this.transforms.add(entity, { parent: parentEntity });
     return new Node(this, entity);
   }
@@ -1113,6 +1174,10 @@ export class Scene {
    * a stranger -- and removing the stranger took it too.
    */
   _parentOf(caller, parent) {
+    // A node placed under one that may be hidden is hidden with it: worked out at update().
+    if (this._hiddenSelfCount > 0) this._visibilityDirty = true;
+    // And tinted with it.
+    if (this._tints.size > 0) this._tintDirty = true;
     if (parent === null || parent === undefined) return NULL_HANDLE;
     if (parent.scene !== this) throw new Error(`${caller}: parent is a node of another scene`);
     if (!parent.alive) throw new Error(`${caller}: parent was removed`);
@@ -1121,6 +1186,175 @@ export class Scene {
 
   node(entity) {
     return new Node(this, entity);
+  }
+
+  /** node.setVisible: whether a node is drawn, with everything under it. */
+  _setVisible(node, visible) {
+    if (!node.alive) throw new Error('setVisible: this node was removed');
+    const slot = handleIndex(node.entity);
+    this._visibilityRoom();
+    const hide = visible ? 0 : 1;
+    if (this._hiddenSelf[slot] === hide) return;
+    this._hiddenSelf[slot] = hide;
+    this._hiddenSelfCount += hide === 1 ? 1 : -1;
+    this._visibilityDirty = true;
+    this.changes++;
+  }
+
+  /** node.setTint and node.setGlow: `at` 0 for the tint, 3 for the glow. */
+  _setTint(node, color, at, caller) {
+    if (!node.alive) throw new Error(`${caller}: this node was removed`);
+    const n = color?.length;
+    if ((n !== 3 && n !== 4) || ![0, 1, 2].every((k) => color[k] >= 0 && color[k] <= 65504)) {
+      throw new Error(`${caller}: color must be 3 numbers, 0 to 65504`);
+    }
+    if (n === 4 && color[3] !== 1) {
+      throw new Error(`${caller}: a tint has no alpha; a see-through mesh is a blended material's`);
+    }
+    const slot = handleIndex(node.entity);
+    this._tintRoom();
+    let own = this._tints.get(slot);
+    if (!own) this._tints.set(slot, own = Float32Array.of(1, 1, 1, 0, 0, 0));
+    own[at] = color[0]; own[at + 1] = color[1]; own[at + 2] = color[2];
+    this._tintHas[slot] = 1;
+    // Back to neither: forgotten, so a scene that stops tinting stops paying for it.
+    if (own[0] === 1 && own[1] === 1 && own[2] === 1 && own[3] === 0 && own[4] === 0 && own[5] === 0) {
+      this._tints.delete(slot);
+      this._tintHas[slot] = 0;
+    }
+    this._tintDirty = true;
+    this.changes++;
+  }
+
+  /** A node's own tint (at 0) or glow (at 3), as setTint left it. */
+  _tintOf(node, at) {
+    const own = node.alive ? this._tints.get(handleIndex(node.entity)) : undefined;
+    return own ? [own[at], own[at + 1], own[at + 2]] : (at === 0 ? [1, 1, 1] : [0, 0, 0]);
+  }
+
+  /**
+   * Each renderable's tint and glow, from its node's and every ancestor's:
+   * tints multiply down the hierarchy, glows add. One pass in depth order
+   * after a change, as _refreshVisibility; the renderables whose words
+   * changed are listed for the renderer. Only the renderables of nodes whose
+   * tint changed are encoded again: 300 walkers of 30 parts, one flashing,
+   * 0.10 ms where encoding all of them was 0.43.
+   * ponytail: still a pass over every node a frame that changed; the changed
+   * subtrees alone, with child lists, if a bigger scene shows it.
+   */
+  _refreshTints() {
+    this._tintDirty = false;
+    this._tintRoom();
+    const t = this.transforms, order = t.order, parent = t.parent;
+    const at = this._tintAt, moved = this._tintMoved, has = this._tintHas;
+    for (let k = 0; k < t.orderCount; k++) {
+      const e = order[k], o = e * 6, p = parent[e];
+      const own = has[e] === 1 ? this._tints.get(e) : null;
+      const q = p === NO_PARENT ? -1 : p * 6;
+      // Neither its own nor its parent's: none, which is most nodes, and cheap.
+      if (own === null && (q < 0 || moved[p] === 0) && (q < 0 || (at[q] === 0 && at[q + 1] === 0 && at[q + 2] === 0 && at[q + 3] === 0 && at[q + 4] === 0 && at[q + 5] === 0))) {
+        moved[e] = at[o] !== 0 || at[o + 1] !== 0 || at[o + 2] !== 0 || at[o + 3] !== 0 || at[o + 4] !== 0 || at[o + 5] !== 0 ? 1 : 0;
+        if (moved[e] === 1) at.fill(0, o, o + 6);
+        continue;
+      }
+      let changed = 0;
+      for (let c = 0; c < 3; c++) {
+        const tint = Math.fround((q < 0 ? 1 : at[q + c] + 1) * (own ? own[c] : 1) - 1);
+        const glow = Math.fround((q < 0 ? 0 : at[q + 3 + c]) + (own ? own[3 + c] : 0));
+        if (tint !== at[o + c] || glow !== at[o + 3 + c]) changed = 1;
+        at[o + c] = tint;
+        at[o + 3 + c] = glow;
+      }
+      moved[e] = changed;
+    }
+    // Only the renderables of nodes whose tint changed are worked out again.
+    const words = this.renderableTint, fresh = TINT_WORDS, ones = TINT_ONES;
+    for (let i = 0; i < this.renderableCount; i++) {
+      const slot = this.renderableMatrixSlot[i];
+      if (moved[slot] === 0) continue;
+      for (let c = 0; c < 6; c++) ones[c] = at[slot * 6 + c] + (c < 3 ? 1 : 0);
+      tintWords(fresh, 0, ones, 0);
+      const w = i * 3;
+      if (fresh[0] === words[w] && fresh[1] === words[w + 1] && fresh[2] === words[w + 2]) continue;
+      words[w] = fresh[0]; words[w + 1] = fresh[1]; words[w + 2] = fresh[2];
+      this.tintChanged.push(i);
+    }
+  }
+
+  /** The per-node tint arrays, as long as the transforms are. */
+  _tintRoom() {
+    const capacity = this.transforms.capacity;
+    if (this._tintHas.length >= capacity) return;
+    this._tintHas = growArray(this._tintHas, capacity);
+    this._tintAt = growArray(this._tintAt, capacity, 6);
+    this._tintMoved = growArray(this._tintMoved, capacity);
+  }
+
+  _visibilityRoom() {
+    const capacity = this.transforms.capacity;
+    if (this.hidden.length >= capacity) return;
+    this.hidden = growArray(this.hidden, capacity);
+    this._hiddenSelf = growArray(this._hiddenSelf, capacity);
+  }
+
+  /**
+   * What is hidden, itself or by an ancestor: one pass in depth order, which
+   * puts every parent before its children, after any setVisible or reparent.
+   * ponytail: O(nodes) a frame that changed, not O(subtree); a walk of the
+   * subtrees changed (transforms._children) if a frame of many toggles shows it.
+   */
+  _refreshVisibility() {
+    this._visibilityDirty = false;
+    this._visibilityRoom();
+    const t = this.transforms, order = t.order, parent = t.parent, hidden = this.hidden, self = this._hiddenSelf;
+    let changed = false;
+    for (let k = 0; k < t.orderCount; k++) {
+      const e = order[k];
+      const p = parent[e];
+      const h = self[e] | (p !== NO_PARENT ? hidden[p] : 0);
+      if (h !== hidden[e]) { hidden[e] = h; changed = true; }
+    }
+    if (!changed) return;
+    for (let i = 0; i < this.renderableCount; i++) {
+      const h = hidden[this.renderableMatrixSlot[i]];
+      if (h === this.renderableHidden[i]) continue;
+      this.renderableHidden[i] = h;
+      this.hiddenRenderables += h === 1 ? 1 : -1;
+      this.visibilityChanged.push(i);
+      // Where it is, so a cached shadow map that showed it, or should now, is redrawn there.
+      this.removedBoxes.push(this.worldMin, this.worldMax, i * 3);
+    }
+    // Sprites, text, shapes, paths, tilemaps and emitters: laid out again without the hidden.
+    this.spriteOrder++;
+    this.layout2D++;
+    this.changes++;
+  }
+
+  /**
+   * The nodes under `node` whose names match: a string exactly, a RegExp by
+   * test(). Depth first, children oldest first, as the file lists them.
+   * `first` stops at the first.
+   */
+  _find(node, name, first) {
+    const found = [];
+    if (!node.alive) return found;
+    if (typeof name !== 'string' && !(name instanceof RegExp)) {
+      throw new Error(`${first ? 'find' : 'findAll'}: name must be a string or a RegExp`);
+    }
+    const walk = (slot) => {
+      for (const child of this.transforms.childrenOf(slot)) {
+        const own = this._names[child];
+        // lastIndex back to 0 first: a /g RegExp would otherwise test from where it last matched.
+        if (own !== undefined && (typeof name === 'string' ? own === name : (name.lastIndex = 0, name.test(own)))) {
+          found.push(new Node(this, this.entities.handleAt(child)));
+          if (first) return true;
+        }
+        if (walk(child)) return true;
+      }
+      return false;
+    };
+    walk(handleIndex(node.entity));
+    return found;
   }
 
   childrenOf(node) {
@@ -1166,6 +1400,10 @@ export class Scene {
         this.renderableMorph[i] = this.renderableMorph[last];
         this.renderableMorphExtent[i] = this.renderableMorphExtent[last];
         this.renderableMorphPad[i] = this.renderableMorphPad[last];
+        if (this.renderableHidden[i] === 1) this.hiddenRenderables--;
+        this.renderableHidden[i] = this.renderableHidden[last];
+        this.renderableHidden[last] = 0;
+        this.renderableTint.copyWithin(i * 3, last * 3, last * 3 + 3);
         this.renderableLodSlot[i] = this.renderableLodSlot[last];
         this.renderableLodSphere.copyWithin(i * 4, last * 4, last * 4 + 4);
         this.renderableCoverage.copyWithin(i * 2, last * 2, last * 2 + 2);
@@ -1181,6 +1419,7 @@ export class Scene {
       }
       this.renderablePrimitive[last] = undefined;
       this.renderableMorphExtent[last] = null;
+      this.renderableTint.fill(0, last * 3, last * 3 + 3);
       this.revision = nextRevision++;
     }
 
@@ -1191,6 +1430,17 @@ export class Scene {
     }
 
     this._dropOwned(dying);
+    // Their slots will be someone else's: not hidden, and not counted.
+    for (const entity of doomed) {
+      const slot = handleIndex(entity);
+      if (this._hiddenSelf[slot] === 1) this._hiddenSelfCount--;
+      this._hiddenSelf[slot] = 0;
+      this.hidden[slot] = 0;
+      delete this._names[slot];
+      // A reused slot starts with none.
+      if (this._tints.delete(slot)) { this._tintDirty = true; this._tintHas[slot] = 0; }
+      if (slot < this._tintHas.length) this._tintAt.fill(0, slot * 6, slot * 6 + 6);
+    }
 
     // Lights on any doomed entity go too. Before the entities are freed, so
     // the handles are still the ones the map was built from.
@@ -1399,7 +1649,7 @@ export class Scene {
       type: spot ? 'spot' : 'point',
       color: Float32Array.from(light.subarray(o + 4, o + 7)),
       intensity: light[o + 7],
-      radius: light[o + 3],
+      radius: Math.abs(light[o + 3]),
       ...(spot ? { innerAngle: this._lightCone[index * 2], outerAngle: this._lightCone[index * 2 + 1] } : {}),
       castShadow,
       size,
@@ -1994,7 +2244,7 @@ export class Scene {
     this._writeLightProperties(index, {
       color: changes.color ?? [light[o + 4], light[o + 5], light[o + 6]],
       intensity: changes.intensity ?? light[o + 7],
-      radius: changes.radius ?? light[o + 3],
+      radius: changes.radius ?? Math.abs(light[o + 3]),
       spot,
       innerAngle: changes.innerAngle ?? this._lightCone[index * 2] ?? 0.2,
       outerAngle: changes.outerAngle ?? this._lightCone[index * 2 + 1] ?? 0.5,
@@ -2019,6 +2269,9 @@ export class Scene {
       light[o] = world[m + 12];
       light[o + 1] = world[m + 13];
       light[o + 2] = world[m + 14];
+      // Hidden: its radius made negative, which the cluster pass assigns
+      // nowhere (clustered.js); lightOf and setLight read its size.
+      light[o + 3] = this.hidden[m / 16] === 1 ? -Math.abs(light[o + 3]) : Math.abs(light[o + 3]);
 
       if (light[o + 14] === LIGHT_SPOT) {
         // -Z of the world matrix. Normalized, because a scaled parent scales
@@ -2043,6 +2296,8 @@ export class Scene {
     this.directionalEntity.length = count;
     let packed = 0;
     for (const [entity, { color, intensity }] of this._directional) {
+      // A hidden one is not packed: it lights nothing and casts nothing.
+      if (this.hidden[handleIndex(entity)] === 1) continue;
       const m = handleIndex(entity) * 16;
       const x = -world[m + 8];
       const y = -world[m + 9];
@@ -2158,6 +2413,8 @@ export class Scene {
    */
   update(jobs = null) {
     const recomposed = jobs?.parallel ? this.transforms.updateParallel(jobs) : this.transforms.update();
+    if (this._visibilityDirty) this._refreshVisibility();
+    if (this._tintDirty) this._refreshTints();
     if (this.reflectionProbes.length > 0) this._placeProbes();
     return recomposed;
   }
@@ -2370,6 +2627,8 @@ export class Scene {
     const candidates = [];
 
     for (let i = 0; i < this.renderableCount; i++) {
+      // A hidden mesh is not there to hit.
+      if (this.renderableHidden[i] === 1) continue;
       // Of a mesh drawn in levels of detail, only the finest: a ray has no
       // distance to choose a level by, and a coarser level's looser shape
       // would be hit where the mesh shown up close isn't.
@@ -2657,6 +2916,7 @@ export class Scene {
     }
     const world = this.transforms.world;
     for (const [entity, kind] of this._picking.items) {
+      if (this.hidden[handleIndex(entity)] === 1) continue;
       const record = kind.get(entity);
       // Into the node's own frame: the inverse of its 2D transform.
       const m = handleIndex(entity) * 16;
