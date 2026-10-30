@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `recovered`, a promise for when it is drawing again. [`engine.gpu.loseForTest()`](docs/API.md#engine-gpu-losefortest)
   loses the device on purpose, to test it.
 
+### Changed
+
+- **A shadow cascade draws only the casters that reach it.** A cascade used to skip a batch of
+  instances only when the box around all of them missed it, so a crowd spread across a map drew
+  every member into every cascade. Each cascade drawn whole is now culled caster by caster on the
+  GPU first. Three hundred walkers, 9,000 parts, moving under a sun: shadows from 12.9 to 9.5 ms
+  of GPU time on Iris Xe, the near cascade from 3.0 to 0.6 ms. The far cascades, which hold the
+  whole crowd, cost what they did.
+
 ## [1.8.0] - 2026-10-30
 
 **Say so.** A misspelt option used to vanish without a word; now the console names it and the
