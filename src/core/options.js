@@ -37,6 +37,7 @@ export const OPTIONS = {
   dof: ['focusDistance', 'fStop', 'sensorHeight'],
   Scene: ['capacity', 'renderableCapacity', 'lightCapacity'],
   createNode: ['parent', 'name'],
+  setParent: ['keepWorld'],
   add: ['parent'],
   frame: ['margin', 'aspect'],
   raycast: ['maxDistance'],

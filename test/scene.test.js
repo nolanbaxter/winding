@@ -1187,4 +1187,48 @@ test('a node keeps its name from the file, and find and findAll search below it'
   assert.equal(scene.createNode().name, '', 'a reused slot does not inherit a name');
 });
 
+console.log('\nworld transforms');
+
+test('world position and rotation are set and kept through parents, from where the parents are now', () => {
+  const scene = new Scene({ capacity: 16 });
+  const turn = (axis, angle) => quatSetAxisAngle(quatCreate(), axis, angle);
+  const root = scene.createNode().setPosition(5, 0, 0).setRotation(turn([0, 1, 0], Math.PI / 2)).setScale(2);
+  const arm = scene.createNode({ parent: root }).setPosition(1, 2, 3).setRotation(turn([1, 0, 0], 0.7));
+  const hand = scene.createNode({ parent: arm });
+  scene.update();
+  // The parents move again, and nothing has composed them yet: the hand still lands where it is told.
+  root.setPosition(-3, 1, 2);
+  arm.setRotation(turn([0, 0, 1], 0.4));
+  const want = turn([0.6, 0.8, 0], 1.1);
+  hand.setWorldPosition(10, -4, 7).setWorldRotation(want);
+  scene.update();
+  const at = hand.worldPosition([0, 0, 0]);
+  [10, -4, 7].forEach((v, k) => assert.ok(Math.abs(at[k] - v) < 1e-4, `position ${at}`));
+  const got = hand.worldRotation(quatCreate());
+  const dot = Math.abs(got[0] * want[0] + got[1] * want[1] + got[2] * want[2] + got[3] * want[3]);
+  assert.ok(Math.abs(dot - 1) < 1e-5, `rotation ${got} for ${want}`);
+
+  // A part breaking off stays where it was; without keepWorld it keeps its numbers and moves.
+  const before = [...scene.transforms.world.subarray(handleIndex(hand.entity) * 16, handleIndex(hand.entity) * 16 + 16)];
+  const debris = scene.createNode().setPosition(-8, 3, 1).setRotation(turn([0, 0, 1], 2)).setScale(0.5);
+  hand.setParent(debris, { keepWorld: true });
+  scene.update();
+  const after = scene.transforms.world.subarray(handleIndex(hand.entity) * 16, handleIndex(hand.entity) * 16 + 16);
+  before.forEach((v, k) => assert.ok(Math.abs(after[k] - v) < 1e-4, `world entry ${k}: ${after[k]} for ${v}`));
+  hand.setParent(null, { keepWorld: true });
+  scene.update();
+  before.forEach((v, k) => assert.ok(Math.abs(scene.transforms.world[handleIndex(hand.entity) * 16 + k] - v) < 1e-4, 'to the root, in place'));
+
+  // A root node's world is its own.
+  const loose = scene.createNode().setWorldPosition(1, 2, 3);
+  assert.deepEqual([...scene.transforms.position.subarray(handleIndex(loose.entity) * 3, handleIndex(loose.entity) * 3 + 3)], [1, 2, 3]);
+
+  // A parent scaled to zero: an error, and nothing moved.
+  const flat = scene.createNode().setScale(0);
+  const child = scene.createNode({ parent: flat }).setPosition(1, 1, 1);
+  assert.throws(() => child.setWorldPosition(0, 0, 0), /^Error: setWorldPosition: a parent is scaled to zero/);
+  assert.throws(() => hand.setParent(flat, { keepWorld: true }), /^Error: setParent: the new parent is scaled to zero/);
+  assert.equal(scene.transforms.parent[handleIndex(hand.entity)], -1, 'not moved under it');
+});
+
 console.log(`\n${passed} checks passed\n`);

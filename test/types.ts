@@ -32,6 +32,9 @@ export async function threeD(): Promise<void> {
   const hand: Node | null = node.find('hand.R');
   const named: string = scene.createNode({ name: 'mount', parent: hand }).name;
   void spawns; void named;
+  ground.setParent(null, { keepWorld: true }).setWorldPosition(1, 2, 3).setWorldRotation(quatCreate());
+  const turned = ground.worldRotation(quatCreate());
+  void turned;
   const shown: boolean = ground.visible;
   void shown;
   await engine.prepare(scene, camera);

@@ -92,7 +92,7 @@ Every call, setting and entry, A to Z by its name.
 
 **R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.renderer.post.requestedLevels` (renamed)](#post-requestedlevels) · [`engine.renderer.resolution`](#renderer-resolution) · [`engine.rhi` (renamed)](#engine-rhi) · [`camera.rotation` (renamed)](#camera2d-rotation) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
 
-**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`node.setVisible()`](#node-setvisible) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`engine.renderer.splatCull`](#renderer-splatcull) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`Winding.supported()`](#winding-supported) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
+**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`node.setVisible()`](#node-setvisible) · [`node.setWorldPosition()`](#node-setworldposition) · [`node.setWorldRotation()`](#node-setworldrotation) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`engine.renderer.splatCull`](#renderer-splatcull) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`Winding.supported()`](#winding-supported) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
 
 **T** &nbsp; [`engine.renderer.taa`](#renderer-taa) · [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
 
@@ -100,7 +100,7 @@ Every call, setting and entry, A to Z by its name.
 
 **V** &nbsp; [`node.visible`](#node-visible) · [`vec3`](#math-vec3) · [`camera.view`](#camera2d-matrices)
 
-**W** &nbsp; [`node.weights`](#node-weights) · [`camera.width`](#camera2d-size) · [`node.worldPosition()`](#node-worldposition) · [`camera.worldToScreen()`](#camera2d-worldtoscreen)
+**W** &nbsp; [`node.weights`](#node-weights) · [`camera.width`](#camera2d-size) · [`node.worldPosition()`](#node-worldposition) · [`node.worldRotation()`](#node-worldrotation) · [`camera.worldToScreen()`](#camera2d-worldtoscreen)
 
 **Z** &nbsp; [`camera.zoom`](#camera2d-zoom)
 
@@ -1315,11 +1315,20 @@ decal.setAxisAngle([1, 0, 0], -Math.PI / 2);
 Sets the rotation from angles in radians, applied in YXZ order: yaw about Y, pitch about X, roll about Z. The angles are not stored.
 
 <a id="node-setparent"></a>
-### `node.setParent(node)` → `Node`
+### `node.setParent(node, options)` → `Node`
 
-Attaches the node to another. `null` moves it to the scene root. Its position, rotation and scale are kept as numbers, now in the new parent's space, so it moves in the world if the parents differ.
+Attaches the node to another. `null` moves it to the scene root. Its position, rotation and scale are kept as numbers, now in the new parent's space, so it moves in the world if the parents differ. With `keepWorld`, they are changed instead, so it stays where it is: a part breaking off a wall or a car, a weapon picked up where it lay.
 
-Throws: `setParent: would create a cycle in the transform hierarchy`, if the new parent is the node itself or below it; `setParent: parent was removed`; `setParent: parent is a node of another scene`.
+| Option | Default | Meaning |
+|---|---|---|
+| `keepWorld` | `false` | Keep its place, turn and size in the world, worked out from where both parents are now. |
+
+```js
+door.setParent(null, { keepWorld: true });      // off the car, where it was
+sword.setParent(player.find('hand.R'));         // into the hand, at the hand's origin
+```
+
+Throws: `setParent: the new parent is scaled to zero, so nothing under it has a place in the world`, with `keepWorld`; `setParent: would create a cycle in the transform hierarchy`, if the new parent is the node itself or below it; `setParent: parent was removed`; `setParent: parent is a node of another scene`.
 
 <a id="node-setvisible"></a>
 ### `node.setVisible(visible)` → `Node`
@@ -1353,6 +1362,45 @@ const p = node.worldPosition(vec3Create());
 ```
 
 Notes: the value is as of the last [`scene.update()`](#scene-update). Straight after `setPosition` it returns the old position until the scene updates.
+
+<a id="node-worldrotation"></a>
+### `node.worldRotation(out)` → `out`
+
+Writes the node's rotation in the world into `out` (a quaternion, 4 numbers) and returns it: its own turned by every parent's. With [`worldPosition`](#node-worldposition), the pose to start a physics body from, as a character turns from animated to ragdoll.
+
+```js
+const bones = character.findAll(/./).map((bone) => ({
+  bone, position: bone.worldPosition([0, 0, 0]), rotation: bone.worldRotation(quatCreate()),
+}));
+```
+
+Notes: as of the last [`scene.update()`](#scene-update), as `worldPosition` is.
+
+<a id="node-setworldposition"></a>
+### `node.setWorldPosition(x, y, z)` → `Node`
+
+Puts the node at a point in the world, whatever its parents: [`setPosition`](#node-setposition) with the position under its parent that lands it there. For a node in a hierarchy that something else places in the world: a physics body's position on a ragdoll's bone, a hand on a ledge. `z` is 0 unless given.
+
+Worked out from where its parents are now, moved this frame or not, so a chain of bones can be set root to tip in one go.
+
+```js
+for (const { bone, body } of ragdoll) {
+  bone.setWorldPosition(...body.position).setWorldRotation(body.rotation);
+}
+```
+
+Throws: `setWorldPosition: a parent is scaled to zero, so no position under it lands anywhere else`.
+
+Notes: a node at the scene root is placed exactly as `setPosition` places it. Its parents' scale is undone too, so a child of a node scaled by 2 is placed with half the numbers.
+
+<a id="node-setworldrotation"></a>
+### `node.setWorldRotation(q)` → `Node`
+
+Turns the node to a rotation in the world (a quaternion), whatever its parents': [`setRotation`](#node-setrotation) with the rotation under its parent that shows it. From where its parents are now, as [`setWorldPosition`](#node-setworldposition).
+
+Throws: `setWorldRotation: a parent is scaled to zero, so no rotation under it shows`.
+
+Notes: exact under parents scaled the same on every axis. Under one stretched unevenly and turned, a child's world shape is skewed, which no rotation of its own can undo; the rotation is then the parent's turn undone, and the skew stays.
 
 <a id="node-children"></a>
 ### `node.children()` → `Node[]`

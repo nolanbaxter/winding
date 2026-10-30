@@ -635,7 +635,10 @@ export class Node {
   setDirection(x: number, y: number, z?: number): this;
   setAxisAngle(axis: Vec3, radians: number): this;
   setEuler(yaw: number, pitch: number, roll?: number): this;
-  setParent(node: Node | null): this;
+  setParent(node: Node | null, options?: { keepWorld?: boolean }): this;
+  setWorldPosition(x: number, y: number, z?: number): this;
+  setWorldRotation(q: Quat): this;
+  worldRotation<T extends Quat>(out: T): T;
   /** Show or hide this node and everything under it; cheaper than removing it. */
   setVisible(visible: boolean): this;
   /** Whether setVisible left this node shown. An ancestor may still hide it. */
