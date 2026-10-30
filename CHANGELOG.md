@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **[`engine.prepare(scene, camera)`](docs/API.md#engine-prepare)**: builds everything a scene will
+  draw with, behind a loading screen. Probes, decals, AO, OIT, TAA and FXAA are built the first
+  time a frame asks for them, and until then frames draw without them, so they appeared a few
+  frames into play. A scene with decals, AO, TAA and particles started 17 pipeline builds in its
+  first frames; after `prepare`, none, and AO draws from the first frame.
+
 ## [1.8.0] - 2026-10-30
 
 **Say so.** A misspelt option used to vanish without a word; now the console names it and the

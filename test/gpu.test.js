@@ -3959,6 +3959,55 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return `batches per frame: ${counts.join(', ')}`;
   });
 
+  await step('after prepare, the first frames of play build no pipeline', async () => {
+    // Each feature here is built the first time a frame asks for it: decals
+    // and AO as a background set, TAA beside them. Until those are ready a
+    // frame draws without them, so they pop in late. Counted once whatever
+    // the first frames started has finished: an engine that prepared must
+    // build none of it, and draw its first frame with AO; one that did not
+    // must build some, or the check proves nothing.
+    const built = async (prepared) => {
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '96px';
+      canvas.style.height = '96px';
+      document.body.appendChild(canvas);
+      const probe = await Winding.create(canvas, { ao: true, taa: true });
+      probe.gpu.device.pushErrorScope('validation');
+      try {
+        probe.gpu.resize(96, 96);
+        const scene = probe.createScene();
+        scene.add(await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1] })))
+          .setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(3, 3, 1);
+        scene.add(await probe.load(buildFeatureGLB({ alphaMode: 'MASK', alphaCutoff: 0.5 }))).setPosition(0, 1, 0);
+        scene.addLight({ type: 'directional', direction: [-0.3, -1, -0.2], intensity: 3 });
+        scene.addDecal({ texture: await probe.loadTexture(twoToneImageURI('#ff0000', 'rgba(255,0,0,0)')), size: [2, 2, 1] })
+          .setAxisAngle([1, 0, 0], -Math.PI / 2);
+        scene.addEmitter({ position: [0, 0.5, 0], lifetime: 10, size: 0.3, color: [1, 1, 1, 1], blend: 'alpha' });
+        const cam = new Camera({ fovY: 1, near: 0.1 });
+        cam.position.set([0, 4, 6]);
+        cam.target.set([0, 0, 0]);
+        if (prepared) await probe.prepare(scene, cam);
+        const before = probe.renderer.pipelines.created;
+        probe.renderFrame(scene, cam);
+        const firstWithAO = probe.renderer._frameAO;
+        for (let i = 0; i < 4; i++) probe.renderFrame(scene, cam);
+        await probe.renderer._pipelinesBuilt();
+        await probe.gpu.device.queue.onSubmittedWorkDone();
+        if (prepared && !firstWithAO) throw new Error('the first frame after prepare drew without AO');
+        const error = await probe.gpu.device.popErrorScope();
+        if (error) throw error;
+        return probe.renderer.pipelines.created - before;
+      } finally {
+        probe.destroy();
+        canvas.remove();
+      }
+    };
+    const [unprepared, prepared] = [await built(false), await built(true)];
+    if (unprepared === 0) throw new Error('an unprepared engine built nothing in its first frames: the check proves nothing');
+    if (prepared !== 0) throw new Error(`${prepared} pipelines built after prepare (${unprepared} without it)`);
+    return `${unprepared} pipelines started by the first frames without prepare, none with it, and AO from the first frame`;
+  });
+
   await step('a scene added to and removed from draws what a scene built fresh draws', async () => {
     // Adding or removing rewrites only the renderable slots that changed --
     // the one added, and the one a removal moved the last renderable into --

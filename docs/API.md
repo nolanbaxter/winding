@@ -86,7 +86,7 @@ Every call, setting and entry, A to Z by its name.
 
 **O** &nbsp; [`engine.renderer.oit`](#renderer-oit) · [`engine.onDemand`](#engine-ondemand) · [`new OrbitController()`](#orbitcontroller) · [`camera.orthographicHalfHeight()`](#camera-orthographichalfheight)
 
-**P** &nbsp; [`Painter's order`](#view2d-order) · [`parseHDR()`](#parsehdr) · [`scene.particlesActive`](#scene-particlesactive) · [`scene.pathOf()`](#scene-pathof) · [`scene.pick()`](#scene-pick) · [`scene.pick()`](#scene-pick-2d) · [`camera.pivot`](#camera2d-pivot) · [`engine.gpu.pixelRatio`](#engine-gpu-pixelratio) · [`camera.pixelSnap`](#camera2d-pixelsnap) · [`node.play()`](#node-play) · [`camera.position`](#camera2d-position) · [`scene.probeOf()`](#scene-probeof)
+**P** &nbsp; [`Painter's order`](#view2d-order) · [`parseHDR()`](#parsehdr) · [`engine.prepare()`](#engine-prepare) · [`scene.particlesActive`](#scene-particlesactive) · [`scene.pathOf()`](#scene-pathof) · [`scene.pick()`](#scene-pick) · [`scene.pick()`](#scene-pick-2d) · [`camera.pivot`](#camera2d-pivot) · [`engine.gpu.pixelRatio`](#engine-gpu-pixelratio) · [`camera.pixelSnap`](#camera2d-pixelsnap) · [`node.play()`](#node-play) · [`camera.position`](#camera2d-position) · [`scene.probeOf()`](#scene-probeof)
 
 **Q** &nbsp; [`quat`](#math-quat)
 
@@ -397,6 +397,33 @@ engine.invalidate();
 ```
 
 Notes: `run` already notices changes to the scene (assigning `scene.environment` included), the camera, the canvas size, debug lines and every setting under [Renderer settings](#renderer-settings), the live [`shadows`](#renderer-shadows) fields included. Call this for changes it cannot see, such as drawing into a texture a sprite shows.
+
+<a id="engine-prepare"></a>
+### `engine.prepare(scene, camera)` → `Promise<void>`
+
+Builds everything `scene` will draw with, before play starts, so its first frames don't draw without a feature while it is still being built. Call it behind a loading screen, after loading and adding what the level holds.
+
+Most pipelines are built when a model loads. Some are built the first time a frame needs them: reflection probes, decals, AO, OIT, TAA and FXAA. Until they are ready, frames draw without them, so they appear a few frames late. A frame only asks for what it shows, so `prepare` draws the scene through `camera` and, for a 3D scene, through a camera that sees all of it. It waits for what those frames started, then draws again for anything only a finished set reaches.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `scene` | required | The scene from `createScene()` that play will draw. |
+| `camera` | `null` | The camera play will draw it through: a `Camera` or a `Camera2D`. Leave it out for a 3D scene and the whole-scene view alone is drawn. |
+
+Returns: a promise that settles once every frame it drew has finished on the GPU.
+
+Throws: `'prepare: takes (scene, camera), the scene from createScene()'`; `'prepare: this engine was destroyed'`.
+
+```js
+const scene = engine.createScene();
+scene.add(await engine.load('level.glb'));
+scene.addEmitter({ texture: spark, blend: 'additive' });   // one of each effect the level uses
+await engine.prepare(scene, camera);
+loadingScreen.remove();
+engine.run(scene, camera);
+```
+
+Notes: its frames go to the canvas, so keep the loading screen over it until the promise settles. Something added later that draws a new way, such as a first decal, asks for its pipelines then. Add one of each kind before preparing, or call `prepare` again after adding it: anything built already is kept, so a second call costs only what is new.
 
 <a id="engine-renderframe"></a>
 ### `engine.renderFrame(scene, camera, { hud, target })` → `void`

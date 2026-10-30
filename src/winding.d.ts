@@ -325,6 +325,8 @@ export class Winding {
   run(scene: Scene, camera: Camera | Camera2D, options?: RunOptions): void;
   stop(): void;
   invalidate(): void;
+  /** Build everything `scene` will draw with, behind a loading screen, so its first frames don't draw without a feature still being built. */
+  prepare(scene: Scene, camera?: Camera | Camera2D | null): Promise<void>;
   renderFrame(scene: Scene, camera: Camera | Camera2D, options?: { hud?: Hud | null; target?: Target | null }): void;
   createTarget(options: { size: Vec2; pixelated?: boolean; label?: string }): Promise<Target>;
   captureProbes(scene: Scene, probeNodes?: Node[]): Promise<void>;

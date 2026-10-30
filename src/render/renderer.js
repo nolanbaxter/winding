@@ -650,6 +650,10 @@ export class Renderer {
    */
   async _pipelinesBuilt() {
     for (const set of [...this._variantSets.values()]) await set.building;
+    // And the passes a frame starts building beside them: TAA and FXAA, which
+    // draw without themselves until ready, as a feature set does.
+    await this._taaBuilding;
+    await this.post._fxaaBuilding;
   }
 
   /**

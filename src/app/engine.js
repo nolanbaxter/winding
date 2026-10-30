@@ -36,6 +36,7 @@ import { parseCube, uploadLUT } from '../render/grading.js';
 import { packSkinVertices } from '../render/vertex.js';
 import { packMorphCountStride } from '../render/morph.js';
 import { Scene } from '../scene/scene.js';
+import { Camera } from '../scene/camera.js';
 import { Camera2D } from '../scene/camera2d.js';
 import { loadGLTF, DEFAULT_MATERIAL } from '../scene/gltf/parse.js';
 import { decodeImages, imageColorSpaces } from '../scene/gltf/images.js';
@@ -858,6 +859,41 @@ export class Winding {
     last.pixelSnap = camera.pixelSnap;
     last.settings = this._settings();
     this._drawn = last;
+  }
+
+  /**
+   * Build everything `scene` will draw with, now, behind a loading screen,
+   * so the first frames of play compile nothing.
+   *
+   * Most pipelines are built when a model loads, but some are built the first
+   * time a frame needs them: probes, decals, AO, OIT, TAA and FXAA in the
+   * background (frames draw without them until they are ready, so they pop in
+   * late), and a few passes on the spot the first time they draw -- particles,
+   * alpha-shaped shadows -- which stalls that frame. A frame asks for what
+   * the scene shows, so this draws the scene twice: through `camera`, and,
+   * for a 3D scene, through a camera that sees all of it, since something
+   * out of view asks for nothing. Then it waits for what those frames
+   * started, and draws once more for what only a finished set reaches.
+   *
+   * The frames go to the canvas: show the loading screen over it. Anything
+   * added later that draws a new way -- the first emitter, a first decal --
+   * asks again; add one of each before preparing, or prepare again.
+   */
+  async prepare(scene, camera = null) {
+    this._assertAlive('prepare');
+    if (!(scene instanceof Scene)) throw new Error('prepare: takes (scene, camera), the scene from createScene()');
+    const views = camera === null ? [] : [camera];
+    const all = new Camera({ near: 0.01 });
+    if (scene.renderableCount > 0 && scene.frame(all)) views.push(all);
+    if (views.length === 0) return;
+    for (let round = 0; round < 2; round++) {
+      for (const view of views) this.renderer.render(scene, view, this.jobs);
+      await this.renderer._pipelinesBuilt();
+      this._assertAlive('prepare');
+    }
+    for (const view of views) this.renderer.render(scene, view, this.jobs);
+    await this.gpu.device.queue.onSubmittedWorkDone();
+    this._drawn = null;
   }
 
   /** Every live setting a frame reads, as one comparable string. */
