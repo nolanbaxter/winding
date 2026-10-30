@@ -28,6 +28,10 @@ export async function threeD(): Promise<void> {
     positions: [0, 0, 0, 1, 0, 0, 0, 0, 1], colors: [1, 0, 0, 0, 1, 0, 0, 0, 1], material: { roughness: 0.8 },
   });
   const ground: Node = scene.add(terrain).setVisible(false);
+  const spawns: Node[] = node.findAll(/^spawn/);
+  const hand: Node | null = node.find('hand.R');
+  const named: string = scene.createNode({ name: 'mount', parent: hand }).name;
+  void spawns; void named;
   const shown: boolean = ground.visible;
   void shown;
   await engine.prepare(scene, camera);

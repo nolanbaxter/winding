@@ -68,7 +68,7 @@ Every call, setting and entry, A to Z by its name.
 
 **E** &nbsp; [`scene.emitterOf()`](#scene-emitterof) · [`engine.environment`](#engine-environment) · [`scene.environment`](#scene-environment) · [`new Environment()`](#environment) · [`engine.renderer.exposure`](#renderer-exposure)
 
-**F** &nbsp; [`engine.renderer.post.filterRadius`](#post-filterradius) · [`engine.renderer.fog`](#renderer-fog) · [`camera.follow()`](#camera-follow) · [`Benchmark.format()`](#benchmark-format) · [`engine.fps`](#engine-fps) · [`scene.frame()`](#scene-frame) · [`orbit.frameBounds()`](#orbitcontroller-framebounds) · [`camera.frameBounds()`](#camera-framebounds)
+**F** &nbsp; [`engine.renderer.post.filterRadius`](#post-filterradius) · [`engine.renderer.fog`](#renderer-fog) · [`node.find()`](#node-find) · [`node.findAll()`](#node-findall) · [`camera.follow()`](#camera-follow) · [`Benchmark.format()`](#benchmark-format) · [`engine.fps`](#engine-fps) · [`scene.frame()`](#scene-frame) · [`orbit.frameBounds()`](#orbitcontroller-framebounds) · [`camera.frameBounds()`](#camera-framebounds)
 
 **G** &nbsp; [`engine.gpu`](#engine-gpu) · [`GPU lost`](#device-lost) · [`engine.grading`](#engine-grading) · [`engine.renderer.post.grading`](#post-grading)
 
@@ -82,7 +82,7 @@ Every call, setting and entry, A to Z by its name.
 
 **M** &nbsp; [`mat4`](#math-mat4)
 
-**N** &nbsp; [`scene.node()`](#scene-node)
+**N** &nbsp; [`node.name`](#node-name) · [`scene.node()`](#scene-node)
 
 **O** &nbsp; [`engine.renderer.oit`](#renderer-oit) · [`engine.onDemand`](#engine-ondemand) · [`new OrbitController()`](#orbitcontroller) · [`camera.orthographicHalfHeight()`](#camera-orthographichalfheight)
 
@@ -1098,10 +1098,11 @@ Makes an empty node. Use it to group things you move together, or as a mount poi
 | Option | Default | Meaning |
 |---|---|---|
 | `parent` | `null` | Node to attach it to. `null` puts it at the scene root. |
+| `name` | `''` | Its [name](#node-name), for [`find`](#node-find) to look it up by. |
 
 Returns: the new Node, at the origin of its parent's space.
 
-Throws: `'createNode: parent was removed'`; `'createNode: parent is a node of another scene'`. Every `addX` that takes a `parent` checks it the same way, named for itself.
+Throws: `'createNode: name must be a string'`; `'createNode: parent was removed'`; `'createNode: parent is a node of another scene'`. Every `addX` that takes a `parent` checks it the same way, named for itself.
 
 ```js
 const mount = scene.createNode({ parent: car });
@@ -1357,6 +1358,40 @@ Notes: the value is as of the last [`scene.update()`](#scene-update). Straight a
 ### `node.children()` → `Node[]`
 
 The node's direct children, oldest first; `[]` if the node is gone. Same as [`scene.childrenOf(node)`](#scene-childrenof).
+
+<a id="node-name"></a>
+### `node.name` → `string`
+
+The node's name in the glTF file it came from, as Blender or another tool named it, or the one [`createNode`](#scene-createnode) gave it. `''` for a node with none, and for one that was removed. Read only.
+
+<a id="node-find"></a>
+### `node.find(name)` → `Node | null`
+
+The first node below this one with that name, or `null`. `name` is a string to match exactly, or a RegExp to test each name with. Searched depth first, each node's children in the order the file lists them; the node itself is not included.
+
+What a level or a model marks by name, found once it is added: spawn points and drop zones in a map, the hand bone a weapon goes in, the wheel or door to take off.
+
+```js
+const map = scene.add(await engine.load('arena.glb'));
+const drop = map.find('drop-zone');
+const hand = player.find('hand.R');
+sword.setParent(hand);
+```
+
+Throws: `'find: name must be a string or a RegExp'`.
+
+Notes: it walks the nodes below on every call. Find what you need once, after adding, and keep the nodes.
+
+<a id="node-findall"></a>
+### `node.findAll(name)` → `Node[]`
+
+Every node below this one with that name, in the order [`find`](#node-find) searches; `[]` for none. A RegExp collects a family: Blender names copies `spawn`, `spawn.001`, `spawn.002`, which `/^spawn/` finds together.
+
+```js
+const spawns = map.findAll(/^spawn/).map((node) => node.worldPosition([0, 0, 0]));
+```
+
+Throws: `'findAll: name must be a string or a RegExp'`.
 
 <a id="node-destroy"></a>
 ### `node.destroy()`

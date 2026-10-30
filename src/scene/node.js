@@ -173,6 +173,21 @@ export class Node {
     return this.scene.childrenOf(this);
   }
 
+  /** Its name in the file it came from, or createNode's; '' for none, or once removed. */
+  get name() {
+    return this.alive ? this.scene._names[handleIndex(this.entity)] ?? '' : '';
+  }
+
+  /** The first node below this one named `name` (a string, or a RegExp to test), depth first; null if none. */
+  find(name) {
+    return this.scene._find(this, name, true)[0] ?? null;
+  }
+
+  /** Every node below this one named `name` (a string, or a RegExp to test), depth first. */
+  findAll(name) {
+    return this.scene._find(this, name, false);
+  }
+
   destroy() {
     this.scene.remove(this);
   }

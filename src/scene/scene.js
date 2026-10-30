@@ -617,6 +617,8 @@ export class Scene {
      */
     this._hiddenSelf = new Uint8Array(capacity);
     this.hidden = new Uint8Array(capacity);
+    /** Each node's name, by entity slot: the file's, or createNode's. A hole is no name. */
+    this._names = [];
     this._hiddenSelfCount = 0;
     this._visibilityDirty = false;
     /** Per renderable: hidden, as last worked out; how many are; and which changed this frame, for the renderer. */
@@ -850,6 +852,7 @@ export class Scene {
 
       const entity = this.entities.alloc();
       created[nodeIndex] = entity;
+      if (node.name) this._names[handleIndex(entity)] = node.name;
       this.transforms.add(entity, {
         position: trs?.position ?? node.position,
         rotation: trs?.rotation ?? node.rotation,
@@ -1115,9 +1118,11 @@ export class Scene {
   /** An empty node, for grouping things you position together. */
   createNode(options = {}, caller = 'createNode') {
     if (caller === 'createNode') checkOptions('createNode', options);
-    const { parent = null } = options;
+    const { parent = null, name = '' } = options;
+    if (typeof name !== 'string') throw new Error(`${caller}: name must be a string`);
     const parentEntity = this._parentOf(caller, parent);
     const entity = this.entities.alloc();
+    if (name) this._names[handleIndex(entity)] = name;
     this.transforms.add(entity, { parent: parentEntity });
     return new Node(this, entity);
   }
@@ -1191,6 +1196,33 @@ export class Scene {
     this.spriteOrder++;
     this.layout2D++;
     this.changes++;
+  }
+
+  /**
+   * The nodes under `node` whose names match: a string exactly, a RegExp by
+   * test(). Depth first, children oldest first, as the file lists them.
+   * `first` stops at the first.
+   */
+  _find(node, name, first) {
+    const found = [];
+    if (!node.alive) return found;
+    if (typeof name !== 'string' && !(name instanceof RegExp)) {
+      throw new Error(`${first ? 'find' : 'findAll'}: name must be a string or a RegExp`);
+    }
+    const walk = (slot) => {
+      for (const child of this.transforms.childrenOf(slot)) {
+        const own = this._names[child];
+        // lastIndex back to 0 first: a /g RegExp would otherwise test from where it last matched.
+        if (own !== undefined && (typeof name === 'string' ? own === name : (name.lastIndex = 0, name.test(own)))) {
+          found.push(new Node(this, this.entities.handleAt(child)));
+          if (first) return true;
+        }
+        if (walk(child)) return true;
+      }
+      return false;
+    };
+    walk(handleIndex(node.entity));
+    return found;
   }
 
   childrenOf(node) {
@@ -1270,6 +1302,7 @@ export class Scene {
       if (this._hiddenSelf[slot] === 1) this._hiddenSelfCount--;
       this._hiddenSelf[slot] = 0;
       this.hidden[slot] = 0;
+      delete this._names[slot];
     }
 
     // Lights on any doomed entity go too. Before the entities are freed, so

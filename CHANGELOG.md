@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.25` runs the world at a quarter speed and `0` stops it: `update` steps keep their length and
   come less often, and animations and particles slow with them, while a HUD scene keeps real time
   so a pause menu still moves. `clock.delta` is the frame's simulated seconds.
+- **[`node.name`](docs/API.md#node-name), [`node.find(name)`](docs/API.md#node-find) and
+  [`node.findAll(name)`](docs/API.md#node-findall)**: a node keeps its name from the glTF file, and
+  a model's or a level's nodes can be found by it -- spawn points and drop zones marked in Blender,
+  the hand bone a weapon goes in, the door to take off. A RegExp finds a family (`/^spawn/`).
+  `createNode` takes a `name` too.
 - **[`engine.prepare(scene, camera)`](docs/API.md#engine-prepare)**: builds everything a scene will
   draw with, behind a loading screen. Probes, decals, AO, OIT, TAA and FXAA are built the first
   time a frame asks for them, and until then frames draw without them, so they appeared a few

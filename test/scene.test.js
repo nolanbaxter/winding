@@ -1152,4 +1152,39 @@ test('framing orthographically fits the sphere and keeps it inside far', () => {
   assert.ok(toNdc(m, [0, 0, -r])[2] >= -1e-6, 'the back of the sphere is not clipped');
 });
 
+console.log('\nnames');
+
+test('a node keeps its name from the file, and find and findAll search below it', () => {
+  const scene = new Scene({ capacity: 16 });
+  const at = (name, children = []) => ({ name, position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1], children, mesh: -1, skin: -1 });
+  // map > [spawn.001, props > [spawn.002, crate], spawn]
+  const asset = {
+    nodes: [at('map', [1, 2, 5]), at('spawn.001'), at('props', [3, 4]), at('spawn.002'), at('crate'), at('spawn')],
+    meshes: [], roots: [0],
+  };
+  const map = scene.add(asset);
+  assert.equal(map.name, 'map');
+  assert.equal(map.find('crate').name, 'crate');
+  assert.equal(map.find('missing'), null);
+  assert.equal(map.find('map'), null, 'below it, not itself');
+  assert.deepEqual(map.findAll(/^spawn/).map((n) => n.name), ['spawn.001', 'spawn.002', 'spawn'], 'depth first, in file order');
+  assert.equal(map.findAll(/^spawn/g).length, 3, 'a /g RegExp finds every one, not every other');
+  assert.equal(map.findAll('spawn').length, 1, 'a string matches exactly');
+  assert.equal(map.find(/spawn/).name, 'spawn.001', 'find stops at the first');
+
+  const made = scene.createNode({ name: 'hand', parent: map });
+  assert.equal(made.name, 'hand');
+  assert.equal(map.find('hand').entity, made.entity);
+  assert.equal(scene.createNode().name, '', 'no name');
+  assert.throws(() => scene.createNode({ name: 4 }), /^Error: createNode: name must be a string$/);
+  assert.throws(() => map.find(4), /^Error: find: name must be a string or a RegExp$/);
+
+  const props = map.find('props');
+  scene.remove(props);
+  assert.equal(props.name, '', 'removed: no name');
+  assert.equal(map.find('crate'), null, 'gone with its parent');
+  assert.deepEqual(props.findAll('crate'), []);
+  assert.equal(scene.createNode().name, '', 'a reused slot does not inherit a name');
+});
+
 console.log(`\n${passed} checks passed\n`);

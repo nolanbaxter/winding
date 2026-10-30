@@ -36,7 +36,7 @@ export const OPTIONS = {
   fog: ['visibility', 'height', 'scaleHeight', 'albedo'],
   dof: ['focusDistance', 'fStop', 'sensorHeight'],
   Scene: ['capacity', 'renderableCapacity', 'lightCapacity'],
-  createNode: ['parent'],
+  createNode: ['parent', 'name'],
   add: ['parent'],
   frame: ['margin', 'aspect'],
   raycast: ['maxDistance'],

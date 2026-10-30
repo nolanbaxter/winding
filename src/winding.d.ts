@@ -529,7 +529,7 @@ export class Scene {
   readonly cameras: Camera[];
   get particlesActive(): boolean;
 
-  createNode(options?: { parent?: Node | null }): Node;
+  createNode(options?: { parent?: Node | null; name?: string }): Node;
   node(entity: number): Node;
   childrenOf(node: Node): Node[];
   add(asset: Model, options?: { parent?: Node | null }): Node;
@@ -640,8 +640,11 @@ export class Node {
   setVisible(visible: boolean): this;
   /** Whether setVisible left this node shown. An ancestor may still hide it. */
   readonly visible: boolean;
+  readonly name: string;
   worldPosition<T extends Vec3>(out: T): T;
   children(): Node[];
+  find(name: string | RegExp): Node | null;
+  findAll(name: string | RegExp): Node[];
   play(nameOrIndex: string | number, options?: PlayOptions): this;
   stop(options?: StopOptions): this;
   destroy(): void;
