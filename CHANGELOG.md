@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A point light's shadow redraws only the faces something moved in.** Its six cube faces were
+  all drawn again whenever anything moved inside its reach; now only the faces the moved box
+  reaches into are, and the frame is the same to the pixel. A walker beside a torch redraws two or
+  three faces, not six. A dungeon of 36 shadowed torches and 40 walkers: 21.9 to 13.8 ms of GPU
+  time on Iris Xe.
 - **Starting is faster.** `Winding.create` built its passes' pipelines one after another, and made
   16 compute pipelines synchronously, each compiled on the GPU process's main thread while
   everything else waited. They now compile side by side, off that thread. A 300-character scene

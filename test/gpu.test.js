@@ -1391,10 +1391,15 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     blocker.setPosition(1.2, 1, 0);
     const moved = await frame();
     const keptAgain = await frame();
-    const report = `drawn ${first.drawn}, ${kept.drawn}, ${farMoved.drawn} (far caster moved), ${moved.drawn} (blocker moved), ${keptAgain.drawn}; `
+    // Every face drawn afresh: the frame the one face redrawn must already have given.
+    engine.renderer.shadows._cache = [];
+    const fresh = await frame();
+    const report = `drawn ${first.drawn}, ${kept.drawn}, ${farMoved.drawn} (far caster moved), ${moved.drawn} (blocker moved, below the light), ${keptAgain.drawn}; `
       + `centre ${lum(first.pixels, 0.5).toFixed(0)} -> ${lum(moved.pixels, 0.5).toFixed(0)}`;
-    if (first.drawn !== 6 || kept.drawn !== 0 || farMoved.drawn !== 0 || moved.drawn !== 6 || keptAgain.drawn !== 0) throw new Error(report);
+    // The blocker moved under the light, so only the face looking down is drawn again.
+    if (first.drawn !== 6 || kept.drawn !== 0 || farMoved.drawn !== 0 || moved.drawn !== 1 || keptAgain.drawn !== 0 || fresh.drawn !== 6) throw new Error(report);
     if (!same(first.pixels, kept.pixels) || !same(moved.pixels, keptAgain.pixels)) throw new Error(`${report}; a kept map drew a different frame`);
+    if (!same(moved.pixels, fresh.pixels)) throw new Error(`${report}; one face redrawn is not the frame every face redrawn gives`);
     if (!(lum(moved.pixels, 0.5) > lum(first.pixels, 0.5) + 20)) throw new Error(`${report}; the shadow did not leave the centre`);
     return report;
   });

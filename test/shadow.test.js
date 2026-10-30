@@ -588,7 +588,19 @@ test('a light keeps its maps until it, its layers, or something in its reach cha
   assert.equal(maps.localDrawn, 0, 'a box that moved far outside its reach');
   box([2.5, 0, -5], [4, 1, -4]);
   maps.updateLocal(scene, camera, quiet);
-  assert.equal(maps.localDrawn, 6, 'a box inside its sphere');
+  assert.equal(maps.localDrawn, 1, 'a box inside its sphere, on its +x side: that face alone');
+  assert.deepEqual([...maps.localRedraw.subarray(0, 6)], [1, 0, 0, 0, 0, 0]);
+  box([0.5, 0.5, -5.2], [1.5, 1.5, -4.8]);
+  maps.updateLocal(scene, camera, quiet);
+  assert.deepEqual([...maps.localRedraw.subarray(0, 6)], [1, 0, 1, 0, 0, 0], 'across the +x and +y edge: both faces');
+  box([-0.5, -0.5, -5.5], [0.5, 0.5, -4.5]);
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 6, 'around the light: every face');
+  maps._faceCull = false;
+  box([2.5, 0, -5], [4, 1, -4]);
+  maps.updateLocal(scene, camera, quiet);
+  assert.equal(maps.localDrawn, 6, 'the A/B switch: every face, as before');
+  maps._faceCull = true;
   boxes.clear();
 
   maps.updateLocal(scene, camera, { all: true, boxes });

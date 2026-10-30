@@ -1007,7 +1007,7 @@ export class ShadowMaps {
       }
       lights[o + 11] = views;
       lights[o + 15] = count + 1;
-      if (this._redrawLight(count, views, scene.lightEntity[i], radius, changes)) drawn += views;
+      drawn += this._redrawLight(count, views, scene.lightEntity[i], radius, changes, margin);
       count += views;
     }
     this.localCount = count;
@@ -1032,10 +1032,14 @@ export class ShadowMaps {
   }
 
   /**
-   * Whether the light whose views fill layers first..first+views-1 must be
-   * drawn this frame, marking them in localRedraw and remembering the draw.
+   * Which of the views filling layers first..first+views-1 must be drawn this
+   * frame, marked in localRedraw; returns how many. All of them when the
+   * light's views changed or no record can be trusted; otherwise, of a point
+   * light, the faces something moved in -- a walker beside a torch redraws
+   * the two or three faces it is in, not all six. `tanHalf` is how wide each
+   * face sees (localMargin).
    */
-  _redrawLight(first, views, entity, radius, changes) {
+  _redrawLight(first, views, entity, radius, changes, tanHalf) {
     if (this.localRedraw.length < this.localCapacity) {
       const grown = new Uint8Array(this.localCapacity);
       grown.set(this.localRedraw);
@@ -1044,20 +1048,29 @@ export class ShadowMaps {
     const floats = views * LOCAL_VIEW_FLOATS;
     const at = first * LOCAL_VIEW_FLOATS;
     const cached = this._cache[first];
-    let redraw = changes === null || changes.all || cached === undefined
-      || cached.entity !== entity || cached.views !== views
-      || changes.boxes.touchesSphere(this._eye[0], this._eye[1], this._eye[2], radius);
-    for (let k = 0; !redraw && k < floats; k++) redraw = cached.data[k] !== this.localData[at + k];
-    this.localRedraw.fill(redraw ? 1 : 0, first, first + views);
-    if (!redraw) cached.frame = this._frame;
-    if (redraw) {
+    let all = changes === null || changes.all || cached === undefined
+      || cached.entity !== entity || cached.views !== views;
+    for (let k = 0; !all && k < floats; k++) all = cached.data[k] !== this.localData[at + k];
+    if (all) {
+      this.localRedraw.fill(1, first, first + views);
       const data = cached?.data.length === floats ? cached.data : new Float32Array(floats);
       data.set(this.localData.subarray(at, at + floats));
       this._cache[first] = { entity, views, data, frame: this._frame };
       // Layers inside this run held other runs' maps, which are gone now.
       for (let l = first + 1; l < first + views; l++) this._cache[l] = undefined;
+      return views;
     }
-    return redraw;
+    // _faceCull: off for an A/B against redrawing every face, and nothing else.
+    const faces = views === 6 && this._faceCull !== false
+      ? changes.boxes.facesTouched(this._eye[0], this._eye[1], this._eye[2], radius, tanHalf)
+      : (changes.boxes.touchesSphere(this._eye[0], this._eye[1], this._eye[2], radius) ? 63 : 0);
+    let drawn = 0;
+    for (let v = 0; v < views; v++) {
+      this.localRedraw[first + v] = (faces >> v) & 1;
+      drawn += (faces >> v) & 1;
+    }
+    cached.frame = this._frame;
+    return drawn;
   }
 
   /**

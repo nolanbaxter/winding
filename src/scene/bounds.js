@@ -103,6 +103,35 @@ export class BoxList {
     return false;
   }
 
+  /**
+   * Which faces of a cube around (x, y, z) any box reaches into, within
+   * `radius`: a bit a face, in CUBE_AXES' order (+x, -x, +y, -y, +z, -z).
+   * Each face sees out to `tanHalf` across per unit along its axis, a
+   * little past 45 degrees. A box is taken to reach a face when its far
+   * side along the face's axis is past it and, that far out, its nearest
+   * point across is in view: never a face it misses, sometimes one it only
+   * nearly reaches.
+   */
+  facesTouched(x, y, z, radius, tanHalf) {
+    const d = this.data, r2 = radius * radius, eye = [x, y, z];
+    let faces = 0;
+    for (let k = 0; k < this.count * 6 && faces !== 63; k += 6) {
+      const dx = Math.max(d[k] - x, 0, x - d[k + 3]);
+      const dy = Math.max(d[k + 1] - y, 0, y - d[k + 4]);
+      const dz = Math.max(d[k + 2] - z, 0, z - d[k + 5]);
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      const across = [dx, dy, dz];
+      for (let axis = 0; axis < 3; axis++) {
+        const b = (axis + 1) % 3, c = (axis + 2) % 3;
+        // How far the box reaches each way along the axis, from the eye.
+        const ahead = d[k + 3 + axis] - eye[axis], behind = eye[axis] - d[k + axis];
+        if (ahead > 0 && ahead * tanHalf >= across[b] && ahead * tanHalf >= across[c]) faces |= 1 << (axis * 2);
+        if (behind > 0 && behind * tanHalf >= across[b] && behind * tanHalf >= across[c]) faces |= 1 << (axis * 2 + 1);
+      }
+    }
+    return faces;
+  }
+
   /** Does any box come within `radius` of (x, y, z)? */
   touchesSphere(x, y, z, radius) {
     const d = this.data, r2 = radius * radius;
