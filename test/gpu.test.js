@@ -1394,6 +1394,12 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     // Every face drawn afresh: the frame the one face redrawn must already have given.
     engine.renderer.shadows._cache = [];
     const fresh = await frame();
+    // And every caster into every face, as before casters were listed a face at a time.
+    engine.renderer.shadows._cache = [];
+    engine.renderer.shadows._listCasters = false;
+    const unlisted = await frame();
+    engine.renderer.shadows._listCasters = true;
+    if (!same(fresh.pixels, unlisted.pixels)) throw new Error('a face drawn from its listed casters is not the face drawn from every caster');
     const report = `drawn ${first.drawn}, ${kept.drawn}, ${farMoved.drawn} (far caster moved), ${moved.drawn} (blocker moved, below the light), ${keptAgain.drawn}; `
       + `centre ${lum(first.pixels, 0.5).toFixed(0)} -> ${lum(moved.pixels, 0.5).toFixed(0)}`;
     // The blocker moved under the light, so only the face looking down is drawn again.

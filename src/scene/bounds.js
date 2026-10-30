@@ -113,22 +113,9 @@ export class BoxList {
    * nearly reaches.
    */
   facesTouched(x, y, z, radius, tanHalf) {
-    const d = this.data, r2 = radius * radius, eye = [x, y, z];
+    const d = this.data, r2 = radius * radius;
     let faces = 0;
-    for (let k = 0; k < this.count * 6 && faces !== 63; k += 6) {
-      const dx = Math.max(d[k] - x, 0, x - d[k + 3]);
-      const dy = Math.max(d[k + 1] - y, 0, y - d[k + 4]);
-      const dz = Math.max(d[k + 2] - z, 0, z - d[k + 5]);
-      if (dx * dx + dy * dy + dz * dz > r2) continue;
-      const across = [dx, dy, dz];
-      for (let axis = 0; axis < 3; axis++) {
-        const b = (axis + 1) % 3, c = (axis + 2) % 3;
-        // How far the box reaches each way along the axis, from the eye.
-        const ahead = d[k + 3 + axis] - eye[axis], behind = eye[axis] - d[k + axis];
-        if (ahead > 0 && ahead * tanHalf >= across[b] && ahead * tanHalf >= across[c]) faces |= 1 << (axis * 2);
-        if (behind > 0 && behind * tanHalf >= across[b] && behind * tanHalf >= across[c]) faces |= 1 << (axis * 2 + 1);
-      }
-    }
+    for (let k = 0; k < this.count * 6 && faces !== 63; k += 6) faces |= boxFaces(d, k, d, k + 3, x, y, z, r2, tanHalf);
     return faces;
   }
 
@@ -143,6 +130,32 @@ export class BoxList {
     }
     return false;
   }
+}
+
+const ACROSS = new Float64Array(3);
+
+/**
+ * The faces of a cube around (x, y, z) that the box min[minAt..], max[maxAt..]
+ * reaches into within sqrt(r2) of it, a bit a face in CUBE_AXES' order: 0
+ * when it is out of reach. See BoxList.facesTouched; exact for the pyramid
+ * each face sees, so a box it calls outside a face casts nothing into it.
+ */
+export function boxFaces(min, minAt, max, maxAt, x, y, z, r2, tanHalf) {
+  const across = ACROSS;
+  across[0] = Math.max(min[minAt] - x, 0, x - max[maxAt]);
+  across[1] = Math.max(min[minAt + 1] - y, 0, y - max[maxAt + 1]);
+  across[2] = Math.max(min[minAt + 2] - z, 0, z - max[maxAt + 2]);
+  if (across[0] * across[0] + across[1] * across[1] + across[2] * across[2] > r2) return 0;
+  let faces = 0;
+  for (let axis = 0; axis < 3; axis++) {
+    const eye = axis === 0 ? x : axis === 1 ? y : z;
+    const b = across[(axis + 1) % 3] / tanHalf, c = across[(axis + 2) % 3] / tanHalf;
+    // How far the box reaches each way along the axis, from the eye.
+    const ahead = max[maxAt + axis] - eye, behind = eye - min[minAt + axis];
+    if (ahead > 0 && ahead >= b && ahead >= c) faces |= 1 << (axis * 2);
+    if (behind > 0 && behind >= b && behind >= c) faces |= 1 << (axis * 2 + 1);
+  }
+  return faces;
 }
 
 /**

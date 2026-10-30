@@ -798,4 +798,53 @@ test('a surface is open where an edge has one triangle, welded by position first
 });
 
 
+test('each point-light face lists the casters that reach into it, a run a batch', () => {
+  // A light at the origin, reach 5. Batch 0: a box on its +x side, and one
+  // across its +x and +y edge. Batch 1: a box below it, one out of reach, and
+  // one hidden. The +x face draws batch 0's two; +y the edge box; -y the box below.
+  const maps = localShadowMaps();
+  maps._growLocal(6);
+  maps.localCount = 6;
+  maps.localRedraw = new Uint8Array(maps.localCapacity).fill(1, 0, 6);
+  maps._lit = [0, 6, 0, 0, 0, 5];
+  maps._viewRuns = new Int32Array(0);
+  maps._listRuns = new Uint32Array(3);
+  maps._listItems = new Uint32Array(1);
+  maps._listBuffer = null;
+  maps._candidates = { item: new Uint32Array(1), batch: new Uint32Array(1), faces: new Uint8Array(1) };
+  const boxes = [
+    [[2, -0.5, -0.5], [3, 0.5, 0.5]],    // 0: +x
+    [[0.5, 0.5, -0.2], [1.5, 1.5, 0.2]], // 1: +x and +y
+    [[-0.5, -3, -0.5], [0.5, -2, 0.5]],  // 2: -y
+    [[20, 0, 0], [21, 1, 1]],            // 3: out of reach
+    [[-0.5, 2, -0.5], [0.5, 3, 0.5]],    // 4: +y, but hidden
+  ];
+  const worldMin = new Float32Array(15), worldMax = new Float32Array(15);
+  boxes.forEach(([min, max], i) => { worldMin.set(min, i * 3); worldMax.set(max, i * 3); });
+  const renderableHidden = Uint8Array.from([0, 0, 0, 0, 1]);
+  const scene = { worldMin, worldMax, renderableCount: 5, hiddenRenderables: 1, renderableHidden };
+  const gpu = { batchCount: 2, batchFirst: [0, 2], batchSize: [2, 3], batchOrder: Uint32Array.from([0, 1, 2, 3, 4]) };
+  maps._listLocalCasters(scene, gpu, 1.05);
+
+  const listed = (view) => {
+    const [first, count] = [maps._viewRuns[view * 2], maps._viewRuns[view * 2 + 1]];
+    return Array.from({ length: count }, (_, r) => {
+      const [batch, start, n] = maps._listRuns.subarray((first + r) * 3, (first + r) * 3 + 3);
+      return [batch, [...maps._listItems.subarray(start, start + n)]];
+    });
+  };
+  assert.deepEqual(listed(0), [[0, [0, 1]]], '+x: both of batch 0, one run');
+  assert.deepEqual(listed(1), [], '-x: nothing');
+  assert.deepEqual(listed(2), [[0, [1]]], '+y: the edge box; the hidden one is not drawn');
+  assert.deepEqual(listed(3), [[1, [2]]], '-y: the box below');
+  assert.deepEqual([listed(4), listed(5)], [[], []]);
+  assert.equal([0, 1, 2, 3, 4, 5].flatMap(listed).flatMap(([, items]) => items).includes(3), false, 'out of reach: in no list');
+
+  // A face kept from last frame is not listed.
+  maps.localRedraw[0] = 0;
+  maps._listLocalCasters(scene, gpu, 1.05);
+  assert.equal(maps._viewRuns[0], -1);
+  assert.deepEqual(listed(2), [[0, [1]]]);
+});
+
 console.log(`\n${passed} checks passed\n`);

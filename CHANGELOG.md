@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A point or spot light's shadow draws only the casters that reach each view.** Every face of a
+  point light drew every caster in the scene and let the GPU clip what fell outside; now each face
+  drawn lists the casters whose boxes reach into it, batch by batch, and draws those, through
+  `firstInstance` from the list. The picture is the same to the pixel. A dungeon of 36 shadowed
+  torches and 40 walkers, after 1.9.0's faces-that-changed: 13.0 to 6.8 ms of GPU time on Iris Xe,
+  21.9 ms before both, for about 0.5 ms of CPU listing. With LOD the GPU still chooses a group's
+  level, so those scenes draw every caster as before.
+
 ## [1.9.0] - 2026-10-30
 
 **Ready for games.** A lost GPU device is recovered from instead of ending the session, and

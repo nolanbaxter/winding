@@ -44,7 +44,7 @@ import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW } from '../rhi/bindgroups.js';
 import { ALPHA_MASK, MATERIAL_WGSL, VARIANT_DOUBLE_SIDED } from './material.js';
 import { CULL_SHADOW, CULL_CASCADE, CASCADE_PHASES, NOT_BATCHED } from './gpudriven.js';
-import { boxInOrtho, boxWithinOrtho, CHUNK_TRIANGLES } from '../scene/bounds.js';
+import { boxInOrtho, boxWithinOrtho, boxFaces, CHUNK_TRIANGLES } from '../scene/bounds.js';
 import { aabbTransform } from '../core/math/aabb.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
 import { VERTEX_BUFFER_LAYOUT, POSITION_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
@@ -817,6 +817,22 @@ export class ShadowMaps {
     /** Bumped when either array or its buffers are replaced: bind groups rebuild. */
     this.revision = 0;
     this._localExecutors = [];
+    /**
+     * Each local view's casters, when updateLocal is given the batches: the
+     * renderables whose box reaches into it, batch by batch, so a face draws
+     * the walker beside its torch and not every caster in the scene. Per view
+     * [first run, run count] in _viewRuns, -1 for a view not listed; per run
+     * [batch, first item, items] in _listRuns; the items, renderable indices,
+     * in _listItems and on the GPU in _listBuffer.
+     */
+    this._viewRuns = new Int32Array(0);
+    this._listRuns = new Uint32Array(3 * 256);
+    this._listItems = new Uint32Array(1024);
+    this._listBuffer = null;
+    this.localListBindGroup = undefined;
+    /** Per light given views this frame: first view, view count, x, y, z, radius. */
+    this._lit = [];
+    this._candidates = { item: new Uint32Array(256), batch: new Uint32Array(256), faces: new Uint8Array(256) };
     this._frustum = frustumCreate();
     this._growCascades(this.cascadeCount);
     this._growLocal(1);
@@ -934,7 +950,9 @@ export class ShadowMaps {
     if (this.localData) data.set(this.localData.subarray(0, data.length));
     this.localData = data;
     for (let v = this._localExecutors.length; v < capacity; v++) {
-      this._localExecutors.push((pass) => this._encodeView(pass, this.localBindGroup, v * this.alignment));
+      this._localExecutors.push((pass) => (this._listed && this._viewRuns[v * 2] >= 0
+        ? this._encodeListed(pass, v)
+        : this._encodeView(pass, this.localBindGroup, v * this.alignment)));
     }
     this.localCapacity = capacity;
     this.localBindGroup = undefined;
@@ -962,7 +980,7 @@ export class ShadowMaps {
    * cannot change what the maps say about anything that matters. Without
    * `changes`, everything is drawn.
    */
-  updateLocal(scene, camera, changes = null) {
+  updateLocal(scene, camera, changes = null, gpu = null) {
     // Grown for the most views ever on screen at once, and kept at that for
     // good: a burst of sixteen shadowed lights left 96 MB behind at the
     // default size. A spell using under a quarter of it gives the rest back,
@@ -979,6 +997,7 @@ export class ShadowMaps {
     const generation = this._localGeneration;
     let count = 0;
     let drawn = 0;
+    (this._lit ??= []).length = 0;
     for (let i = 0; i < scene.lightCount; i++) {
       const o = i * LIGHT_FLOATS;
       lights[o + 11] = 0;
@@ -1007,6 +1026,7 @@ export class ShadowMaps {
       }
       lights[o + 11] = views;
       lights[o + 15] = count + 1;
+      this._lit.push(count, views, this._eye[0], this._eye[1], this._eye[2], radius);
       drawn += this._redrawLight(count, views, scene.lightEntity[i], radius, changes, margin);
       count += views;
     }
@@ -1025,10 +1045,138 @@ export class ShadowMaps {
       drawn = count;
     }
     this.localDrawn = drawn;
+    // With LOD the GPU picks each group's level, which a list made here cannot know.
+    // _listCasters: off for an A/B against every view drawing every caster.
+    this._listed = gpu !== null && !gpu.hasLod && drawn > 0 && this._listCasters !== false;
+    if (this._listed) this._listLocalCasters(scene, gpu, margin);
     if (count > 0) {
       this.rhi.queue.writeBuffer(this.localUniform, 0, this.localStaging, 0, this.alignment * count);
       this.rhi.queue.writeBuffer(this.localBuffer, 0, this.localData, 0, count * LOCAL_VIEW_FLOATS);
     }
+  }
+
+  /**
+   * The casters of every view drawn this frame, listed and uploaded: for each
+   * light, the batched, shown renderables whose box reaches into its sphere,
+   * by batch, and of those, for each of its views drawn, the ones whose box
+   * reaches into that view -- a face of a point light by boxFaces, a spot by
+   * its sphere alone. Every renderable is tested once for each light drawn.
+   * ponytail: a scan of every caster per light drawn, 0.5 ms for 24 lights
+   * over 1,300 casters; a grid of the casters' boxes if a bigger level shows it.
+   */
+  _listLocalCasters(scene, gpu, tanHalf) {
+    if (this._viewRuns.length < this.localCount * 2) this._viewRuns = new Int32Array(this.localCapacity * 2);
+    this._viewRuns.fill(-1, 0, this.localCount * 2);
+    const lit = this._lit, c = this._candidates, redraw = this.localRedraw;
+    const { worldMin, worldMax } = scene;
+    const hidden = scene.hiddenRenderables > 0 ? scene.renderableHidden : null;
+    let runs = 0, items = 0;
+    for (let l = 0; l < lit.length; l += 6) {
+      const first = lit[l], views = lit[l + 1], x = lit[l + 2], y = lit[l + 3], z = lit[l + 4], r2 = lit[l + 5] * lit[l + 5];
+      let any = false;
+      for (let v = 0; v < views; v++) any ||= redraw[first + v] === 1;
+      if (!any) continue;
+      // What reaches the light at all, and which of its views: walked batch by
+      // batch, in the static order, so each batch's casters come out together.
+      let m = 0;
+      for (let b = 0; b < gpu.batchCount; b++) {
+        const from = gpu.batchFirst[b], to = from + gpu.batchSize[b];
+        for (let k = from; k < to; k++) {
+          const i = gpu.batchOrder[k];
+          // Out of reach first, inline: most casters are, and this is the loop's cost.
+          const o = i * 3;
+          const dx = worldMin[o] > x ? worldMin[o] - x : x > worldMax[o] ? x - worldMax[o] : 0;
+          const dy = worldMin[o + 1] > y ? worldMin[o + 1] - y : y > worldMax[o + 1] ? y - worldMax[o + 1] : 0;
+          const dz = worldMin[o + 2] > z ? worldMin[o + 2] - z : z > worldMax[o + 2] ? z - worldMax[o + 2] : 0;
+          if (dx * dx + dy * dy + dz * dz > r2 || hidden?.[i] === 1) continue;
+          const faces = views === 6 ? boxFaces(worldMin, o, worldMax, o, x, y, z, r2, tanHalf) : 1;
+          if (faces === 0) continue;
+          if (m === c.item.length) {
+            for (const key of ['item', 'batch']) { const grown = new Uint32Array(m * 2); grown.set(c[key]); c[key] = grown; }
+            const grown = new Uint8Array(m * 2); grown.set(c.faces); c.faces = grown;
+          }
+          c.item[m] = i; c.batch[m] = b; c.faces[m] = faces;
+          m++;
+        }
+      }
+      for (let v = 0; v < views; v++) {
+        if (redraw[first + v] === 0) continue;
+        const startRun = runs;
+        for (let at = 0; at < m; at++) {
+          if ((c.faces[at] & (1 << v)) === 0) continue;
+          if (runs === startRun || this._listRuns[(runs - 1) * 3] !== c.batch[at]) {
+            if ((runs + 1) * 3 > this._listRuns.length) { const grown = new Uint32Array(this._listRuns.length * 2); grown.set(this._listRuns); this._listRuns = grown; }
+            this._listRuns[runs * 3] = c.batch[at];
+            this._listRuns[runs * 3 + 1] = items;
+            this._listRuns[runs * 3 + 2] = 0;
+            runs++;
+          }
+          if (items === this._listItems.length) { const grown = new Uint32Array(items * 2); grown.set(this._listItems); this._listItems = grown; }
+          this._listItems[items++] = c.item[at];
+          this._listRuns[(runs - 1) * 3 + 2]++;
+        }
+        this._viewRuns[(first + v) * 2] = startRun;
+        this._viewRuns[(first + v) * 2 + 1] = runs - startRun;
+      }
+    }
+    // Grown to the most items any frame has listed, and kept: casters come and go from a light.
+    const bytes = Math.max(4, items * 4);
+    if (this._listBuffer === null || this._listBuffer.size < bytes) {
+      const size = Math.max(bytes, (this._listBuffer?.size ?? 0) * 2, 4096);
+      this._listBuffer?.destroy();
+      this._listBuffer = createBuffer(this.rhi, {
+        label: 'shadow-local-casters', size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.localListBindGroup = undefined;
+    }
+    if (items > 0) this.rhi.queue.writeBuffer(this._listBuffer, 0, this._listItems, 0, items);
+  }
+
+  /**
+   * One local view from its list (_listLocalCasters): each batch's run of
+   * casters, drawn through firstInstance from the listed items against a batch
+   * base of zero, as the blended casters are; then the blended casters as
+   * every view draws them.
+   */
+  _encodeListed(pass, v) {
+    const gpu = this._gpu, materials = gpu.materials, offset = v * this.alignment;
+    const alpha = this.alphaDescriptors.length > 0;
+    const runs = this._listRuns, start = this._viewRuns[v * 2], end = start + this._viewRuns[v * 2 + 1];
+    this.geometry.bindPositions(pass);
+    pass.setBindGroup(GROUP_FRAME, this.localListBindGroup, [offset]);
+    this.pipelineLayout.bindEmptyGroups(pass);
+    pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.transparentBatchOffset()]);
+    let boundVariant = -1, masked = false;
+    for (let r = start; r < end; r++) {
+      const b = runs[r * 3];
+      if (alpha && materials.alphaModes[gpu.batchMaterial[b]] === ALPHA_MASK) { masked = true; continue; }
+      const primitive = gpu.batchPrimitive[b];
+      const skinned = gpu.batchSkinned[b];
+      const doubleSided = (materials.variants[gpu.batchMaterial[b]] & VARIANT_DOUBLE_SIDED) !== 0 || primitive.open === true;
+      const variant = (doubleSided ? 4 : 0) + skinned * 2 + gpu.batchMirrored[b];
+      if (variant !== boundVariant) {
+        pass.setPipeline(this._pipelines.get(this.descriptors[variant]));
+        boundVariant = variant;
+      }
+      if (skinned) pass.setVertexBuffer(1, this.geometry.skinBuffer);
+      pass.drawIndexed(primitive.indexCount, runs[r * 3 + 2], primitive.firstIndex, primitive.baseVertex, runs[r * 3 + 1]);
+    }
+    if (!alpha) return;
+    this.geometry.bind(pass);
+    let bound = null, boundMaterial = -1;
+    for (let r = start; masked && r < end; r++) {
+      const b = runs[r * 3], material = gpu.batchMaterial[b];
+      if (materials.alphaModes[material] !== ALPHA_MASK) continue;
+      const primitive = gpu.batchPrimitive[b], skinned = gpu.batchSkinned[b] === 1;
+      const pipeline = this._pipelines.get(this.alphaDescriptors[skinned ? 1 : 0]);
+      if (pipeline !== bound) { pass.setPipeline(pipeline); bound = pipeline; }
+      if (material !== boundMaterial) { pass.setBindGroup(GROUP_MATERIAL, materials.bindGroup(material)); boundMaterial = material; }
+      if (skinned) pass.setVertexBuffer(1, this.geometry.skinBuffer);
+      pass.drawIndexed(primitive.indexCount, runs[r * 3 + 2], primitive.firstIndex, primitive.baseVertex, runs[r * 3 + 1]);
+    }
+    // The blended casters, from the order every view reads them in.
+    pass.setBindGroup(GROUP_FRAME, this.localBindGroup, [offset]);
+    this._encodeAlphaCasters(pass, gpu, materials, () => false);
   }
 
   /**
@@ -1503,6 +1651,11 @@ export class ShadowMaps {
 
     if (localResource === null || this.localCount === 0) return;
     this.localBindGroup ??= this._makeCascadeBindGroup(gpu, palette, morph, this.localUniform);
+    // The lists' own, rebuilt with the local group or a grown list buffer.
+    if (this._listed && (this.localListBindGroup === undefined || this._listGroupFor !== this.localBindGroup)) {
+      this.localListBindGroup = this._makeCascadeBindGroup(gpu, palette, morph, this.localUniform, this._listBuffer);
+      this._listGroupFor = this.localBindGroup;
+    }
     for (let v = 0; v < this.localCount; v++) {
       // A kept map is not drawn, and the layer is not cleared: the array is
       // imported, so what it held last frame is still there.
@@ -1788,6 +1941,7 @@ export class ShadowMaps {
     this.localTexture?.destroy();
     this.localUniform?.destroy();
     this.localBuffer?.destroy();
+    this._listBuffer?.destroy();
   }
 }
 
