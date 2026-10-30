@@ -70,7 +70,7 @@ Every call, setting and entry, A to Z by its name.
 
 **F** &nbsp; [`engine.renderer.post.filterRadius`](#post-filterradius) · [`engine.renderer.fog`](#renderer-fog) · [`node.find()`](#node-find) · [`node.findAll()`](#node-findall) · [`camera.follow()`](#camera-follow) · [`Benchmark.format()`](#benchmark-format) · [`engine.fps`](#engine-fps) · [`scene.frame()`](#scene-frame) · [`orbit.frameBounds()`](#orbitcontroller-framebounds) · [`camera.frameBounds()`](#camera-framebounds)
 
-**G** &nbsp; [`engine.gpu`](#engine-gpu) · [`GPU lost`](#device-lost) · [`engine.grading`](#engine-grading) · [`engine.renderer.post.grading`](#post-grading)
+**G** &nbsp; [`node.glow`](#node-glow) · [`engine.gpu`](#engine-gpu) · [`GPU lost`](#device-lost) · [`engine.grading`](#engine-grading) · [`engine.renderer.post.grading`](#post-grading)
 
 **H** &nbsp; [`HUD`](#view2d-hud)
 
@@ -92,9 +92,9 @@ Every call, setting and entry, A to Z by its name.
 
 **R** &nbsp; [`scene.raycast()`](#scene-raycast) · [`camera.rayFromScreen()`](#camera-rayfromscreen) · [`engine.gpu.readPixels()`](#engine-gpu-readpixels) · [`scene.remove()`](#scene-remove) · [`engine.renderer`](#engine-renderer) · [`engine.renderFrame()`](#engine-renderframe) · [`benchmark.report()`](#benchmark-report) · [`engine.renderer.post.requestedLevels` (renamed)](#post-requestedlevels) · [`engine.renderer.resolution`](#renderer-resolution) · [`engine.rhi` (renamed)](#engine-rhi) · [`camera.rotation` (renamed)](#camera2d-rotation) · [`engine.run()`](#engine-run) · [`benchmark.run()`](#benchmark-run)
 
-**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`node.setVisible()`](#node-setvisible) · [`node.setWorldPosition()`](#node-setworldposition) · [`node.setWorldRotation()`](#node-setworldrotation) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`engine.renderer.splatCull`](#renderer-splatcull) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`Winding.supported()`](#winding-supported) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
+**S** &nbsp; [`new Scene()`](#scene-constructor) · [`camera.screenToWorld()`](#camera2d-screentoworld) · [`node.setAngle()`](#node-setangle) · [`node.setAxisAngle()`](#node-setaxisangle) · [`scene.setDecal()`](#scene-setdecal) · [`node.setDirection()`](#node-setdirection) · [`scene.setEmitter()`](#scene-setemitter) · [`node.setEuler()`](#node-seteuler) · [`scene.setLight()`](#scene-setlight) · [`node.setParent()`](#node-setparent) · [`scene.setPath()`](#scene-setpath) · [`node.setPosition()`](#node-setposition) · [`scene.setProbe()`](#scene-setprobe) · [`node.setRotation()`](#node-setrotation) · [`node.setScale()`](#node-setscale) · [`node.setTint()`](#node-settint) · [`node.setGlow()`](#node-setglow) · [`node.setVisible()`](#node-setvisible) · [`node.setWorldPosition()`](#node-setworldposition) · [`node.setWorldRotation()`](#node-setworldrotation) · [`scene.setShape()`](#scene-setshape) · [`scene.setSprite()`](#scene-setsprite) · [`scene.setText()`](#scene-settext) · [`scene.setTile()`](#scene-settile) · [`scene.setTilemap()`](#scene-settilemap) · [`scene.setTiles()`](#scene-settiles) · [`engine.renderer.shadowDistance`](#renderer-shadowdistance) · [`engine.renderer.shadows`](#renderer-shadows) · [`scene.shapeOf()`](#scene-shapeof) · [`engine.skippedFrames`](#engine-skippedframes) · [`engine.renderer.skybox`](#renderer-skybox) · [`engine.renderer.softShadows`](#renderer-softshadows) · [`engine.debug.sphere()`](#debug-sphere) · [`engine.renderer.splatCull`](#renderer-splatcull) · [`scene.splatsOf()`](#scene-splatsof) · [`scene.spriteOf()`](#scene-spriteof) · [`spriteSheet()`](#spritesheet) · [`sRGB colours`](#view2d-colour) · [`srgbToLinear()`](#color-srgbtolinear) · [`benchmark.start()`](#benchmark-start) · [`engine.stats`](#engine-stats) · [`new StatsOverlay()`](#statsoverlay) · [`engine.stop()`](#engine-stop) · [`node.stop()`](#node-stop) · [`engine.renderer.post.strength`](#post-strength) · [`Winding.supported()`](#winding-supported) · [`orbit.syncFromCamera()`](#orbitcontroller-syncfromcamera)
 
-**T** &nbsp; [`engine.renderer.taa`](#renderer-taa) · [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
+**T** &nbsp; [`engine.renderer.taa`](#renderer-taa) · [`node.tint`](#node-tint) · [`scene.textOf()`](#scene-textof) · [`engine.renderer.post.threshold`](#post-threshold) · [`scene.tileAt()`](#scene-tileat) · [`scene.tilemapOf()`](#scene-tilemapof)
 
 **U** &nbsp; [`engine.unload()`](#engine-unload) · [`scene.update()`](#scene-update) · [`camera.update()`](#camera2d-update) · [`camera.update()`](#camera-update) · [`orbit.update()`](#orbitcontroller-update) · [`overlay.update()`](#statsoverlay-update)
 
@@ -1346,6 +1346,45 @@ const shot = bullets.find((b) => !b.visible).setPosition(...muzzle).setVisible(t
 Notes: hiding is inherited, as a position is: a node is drawn only if it and every ancestor are shown, and a node added or moved under a hidden one is hidden with it. Its own setting is what [`node.visible`](#node-visible) reports. A hidden emitter makes no particles, and owes none for when it is shown again; those already alive run on unseen. A hidden light keeps its colour, brightness and reach, which [`scene.lightOf`](#scene-lightof) still reports. Animations play on while hidden. A reflection probe goes on lighting while hidden.
 
 Throws: `'setVisible: this node was removed'`.
+
+<a id="node-settint"></a>
+### `node.setTint(color)` → `Node`
+
+Multiplies the base colour of every mesh under the node by `color`: linear RGB, as [`colorFromHex`](#color-colorfromhex) gives it. A faction's colour on one shared model, a class told apart by its tint, a flash of red when hit. `[1, 1, 1]` is no tint.
+
+Tints multiply down the hierarchy: a red army with one unit tinted half as bright draws that unit dark red. The meshes stay in their batches, so tinting every unit differently draws with the same calls as tinting none. Only the base colour changes: reflections and the material's own emission keep theirs, so a model meant to be coloured is best authored light grey.
+
+```js
+const red = colorFromHex('#c8382e'), blue = colorFromHex('#2e62c8');
+for (const unit of army) scene.add(soldier, { parent: unit }).setTint(unit.side === 'red' ? red : blue);
+```
+
+Throws: `'setTint: color must be 3 numbers, 0 to 65504'`; `"setTint: a tint has no alpha; a see-through mesh is a blended material's"`, for a fourth number that is not 1; `'setTint: this node was removed'`.
+
+Notes: kept as 16-bit floats, so a tint is exact to about three significant figures. Changing tints costs one pass over the scene's nodes in a frame where any changed: 0.1 ms for 9,000 nodes on Iris Xe.
+
+<a id="node-setglow"></a>
+### `node.setGlow(color)` → `Node`
+
+Adds light to every mesh under the node, linear RGB, as its own emission would: `[0, 0, 0]` is none, and past 1 it blooms. A hit's white flash, a power-up's shimmer, a selected unit lit up. Glows add down the hierarchy, and stay in their batches as tints do.
+
+```js
+enemy.setGlow([3, 3, 3]);                                   // hit: a flash
+engine.clock.timeScale = 0;                                 // and a hit-stop
+setTimeout(() => { enemy.setGlow([0, 0, 0]); engine.clock.timeScale = 1; }, 80);
+```
+
+Throws: `'setGlow: color must be 3 numbers, 0 to 65504'`; `"setGlow: a tint has no alpha; a see-through mesh is a blended material's"`; `'setGlow: this node was removed'`.
+
+<a id="node-tint"></a>
+### `node.tint` → `[r, g, b]`
+
+The tint [`setTint`](#node-settint) gave this node, `[1, 1, 1]` for none: its own, not what its ancestors add. A copy; change it with `setTint`.
+
+<a id="node-glow"></a>
+### `node.glow` → `[r, g, b]`
+
+The glow [`setGlow`](#node-setglow) gave this node, `[0, 0, 0]` for none: its own, as `tint` is.
 
 <a id="node-visible"></a>
 ### `node.visible` → `boolean`

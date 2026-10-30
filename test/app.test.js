@@ -2391,4 +2391,69 @@ await atest('Winding.supported says whether create can work, and never throws', 
   }
 });
 
+test('a tint multiplies and a glow adds down the hierarchy, in three words a renderable, zero for none', () => {
+  // Reads a renderable's words back as WGSL's unpack2x16float would, plus 1 on the tint.
+  const half = (h) => {
+    const e = (h >> 10) & 31, m = h & 1023, s = h & 0x8000 ? -1 : 1;
+    return s * (e === 0 ? m * 2 ** -24 : (1 + m / 1024) * 2 ** (e - 15));
+  };
+  const read = (scene, i) => {
+    const w = scene.renderableTint.subarray(i * 3, i * 3 + 3);
+    const h = [w[0] & 0xffff, w[0] >>> 16, w[1] & 0xffff, w[1] >>> 16, w[2] & 0xffff, w[2] >>> 16].map(half);
+    return { tint: [h[0] + 1, h[1] + 1, h[2] + 1], glow: [h[3], h[4], h[5]] };
+  };
+  const near = (got, want, what) => want.forEach((v, k) => assert.ok(Math.abs(got[k] - v) <= Math.abs(v) * 1e-3 + 1e-3, `${what}: ${got} for ${want}`));
+
+  const scene = new Scene({ capacity: 64 });
+  const army = scene.createNode();
+  const unit = scene.add(fakeAsset(), { parent: army });
+  const other = scene.add(fakeAsset());
+  scene.update();
+  assert.deepEqual([...scene.renderableTint.subarray(0, 6)], [0, 0, 0, 0, 0, 0], 'none: all zero');
+  assert.deepEqual(scene.tintChanged, []);
+
+  army.setTint([0.8, 0.1, 0.1]);
+  unit.setTint([0.5, 1, 2]).setGlow([3, 0, 0.25]);
+  assert.deepEqual(unit.tint, [0.5, 1, 2]);
+  assert.deepEqual(unit.glow, [3, 0, 0.25]);
+  assert.deepEqual(other.tint, [1, 1, 1]);
+  scene.update();
+  near(read(scene, 0).tint, [0.4, 0.1, 0.2], 'multiplied by the army');
+  near(read(scene, 0).glow, [3, 0, 0.25], 'glow');
+  assert.deepEqual(scene.tintChanged, [0], 'only it, listed for the renderer');
+
+  // Moved out from under the army: its own tint alone.
+  scene.tintChanged.length = 0;
+  unit.setParent(null);
+  scene.update();
+  near(read(scene, 0).tint, [0.5, 1, 2], 'its own');
+  // Back to none, and forgotten.
+  unit.setTint([1, 1, 1]).setGlow([0, 0, 0, 1]);
+  army.setTint([1, 1, 1]);
+  scene.update();
+  assert.equal(scene._tints.size, 0, 'nothing kept for nodes back to none');
+  assert.deepEqual([...scene.renderableTint.subarray(0, 3)], [0, 0, 0]);
+
+  // A removal moves the last renderable down, its words with it.
+  other.setTint([0, 0.5, 0]);
+  scene.update();
+  unit.destroy();
+  near(read(scene, 0).tint, [0, 0.5, 0], 'carried down by the swap');
+  assert.deepEqual([...scene.renderableTint.subarray(3, 6)], [0, 0, 0], 'the old place cleared');
+
+  assert.throws(() => other.setTint([1, 0, 0, 0.5]), /^Error: setTint: a tint has no alpha; a see-through mesh is a blended material's$/);
+  assert.throws(() => other.setTint([1, -1, 0]), /^Error: setTint: color must be 3 numbers, 0 to 65504$/);
+  assert.throws(() => other.setGlow([NaN, 0, 0]), /^Error: setGlow: color must be 3 numbers, 0 to 65504$/);
+  assert.throws(() => other.setGlow(1), /^Error: setGlow: color must be 3 numbers/);
+  other.destroy();
+  assert.throws(() => other.setTint([1, 1, 1]), /^Error: setTint: this node was removed$/);
+  assert.deepEqual(other.tint, [1, 1, 1], 'removed: none');
+  const reused = scene.add(fakeAsset());
+  scene.update();
+  assert.deepEqual([...scene.renderableTint.subarray(0, 3)], [0, 0, 0], 'a reused slot starts with none');
+  reused.setGlow([1, 0, 0]);
+  scene.update();
+  near(read(scene, 0).glow, [1, 0, 0], 'and takes one');
+});
+
 console.log(`\n${passed} checks passed\n`);

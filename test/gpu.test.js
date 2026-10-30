@@ -4122,6 +4122,57 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     }
   });
 
+  await step('a tint and a glow colour a node in its batch, batched or merged, at the same draw count', async () => {
+    // Two instances of one quad, drawn as a batch, and a quad of its own, drawn
+    // merged: tinted red, glowing, and tinted green. The others stay as they were.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 120);
+      const quad = { positions: [-1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1], indices: [0, 2, 1, 0, 3, 2], material: { color: [0.8, 0.8, 0.8, 1], doubleSided: true } };
+      const [shared, own] = await Promise.all([probe.createMesh(quad), probe.createMesh(quad)]);
+      const scene = probe.createScene();
+      const a = scene.add(shared).setPosition(-3, 0, 0);
+      const b = scene.add(shared).setPosition(0, 0, 0);
+      const c = scene.add(own).setPosition(3, 0, 0);
+      scene.addLight({ type: 'directional', direction: [0, -1, -0.2], intensity: 0.5, castShadow: false });
+      const cam = new Camera({ fovY: 1.2, near: 0.1 });
+      cam.position.set([0, 8, 0.01]);
+      cam.target.set([0, 0, 0]);
+      await probe.prepare(scene, cam);
+      const frame = async () => {
+        for (let i = 0; i < 3; i++) probe.renderFrame(scene, cam);
+        const pixels = await probe.gpu.readPixels();
+        return [47, 80, 113].map((x) => { const i = (60 * 160 + x) * 4; return [pixels[i], pixels[i + 1], pixels[i + 2]]; });
+      };
+      const before = await frame();
+      const batches = probe.renderer.gpu.batchCount;
+      a.setTint([1, 0, 0]);
+      b.setGlow([2, 2, 2]);
+      c.setTint([0, 1, 0]);
+      const after = await frame();
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      const [[ar, ag, ab], [br], [cr, cg, cb]] = after;
+      // Not to 0: the specular reflection is the light's colour, which a base colour's tint leaves be.
+      if (!(ar > 40 && ag < 40 && ab < 40 && Math.abs(ar - before[0][0]) < 8)) throw new Error(`tinted red: ${after[0]} from ${before[0]}`);
+      if (!(br > before[1][0] + 40)) throw new Error(`glowing: ${after[1]} from ${before[1]}`);
+      if (!(cg > 40 && cr < 40 && cb < 40)) throw new Error(`merged, tinted green: ${after[2]} from ${before[2]}`);
+      if (probe.renderer.gpu.batchCount !== batches) throw new Error(`${probe.renderer.gpu.batchCount} batches from ${batches}`);
+      a.setTint([1, 1, 1]);
+      const back = await frame();
+      if (back[0].some((v, k) => Math.abs(v - before[0][k]) > 2)) throw new Error(`untinted: ${back[0]}, was ${before[0]}`);
+      return `red ${after[0]}, glow ${after[1]} (from ${before[1]}), merged green ${after[2]}, ${batches} batches either way`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('a hidden node draws as if it were not there, shadows and light included, and comes back shown', async () => {
     // Under one parent: a mesh drawn merged, three instances of another drawn
     // as a batch, a sprite, text, a point light and a decal. Hidden, the frame

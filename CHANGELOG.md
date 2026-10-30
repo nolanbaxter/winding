@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whatever its parents, from where they are now -- a physics body's pose on a ragdoll's bone, set
   root to tip in one step -- and moved to a new parent without moving: a wall piece or a car door
   breaking off, a weapon picked up where it lay.
+- **[`node.setTint(color)`](docs/API.md#node-settint) and [`node.setGlow(color)`](docs/API.md#node-setglow)**:
+  colour a mesh and everything under it at runtime -- factions, classes, players, a hit's flash --
+  without a copy of the model per colour. Tints multiply and glows add down the hierarchy, and
+  the meshes stay in their batches: tinting every unit differently draws with the same calls as
+  tinting none. They ride in padding the per-object data already had, so nothing grew, and a
+  frame where tints change spends 0.1 ms on 9,000 nodes.
 - **[`engine.prepare(scene, camera)`](docs/API.md#engine-prepare)**: builds everything a scene will
   draw with, behind a loading screen. Probes, decals, AO, OIT, TAA and FXAA are built the first
   time a frame asks for them, and until then frames draw without them, so they appeared a few

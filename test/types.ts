@@ -34,6 +34,9 @@ export async function threeD(): Promise<void> {
   void spawns; void named;
   ground.setParent(null, { keepWorld: true }).setWorldPosition(1, 2, 3).setWorldRotation(quatCreate());
   const turned = ground.worldRotation(quatCreate());
+  ground.setTint(colorFromHex('#c8382e')).setGlow([2, 2, 2]);
+  const [r]: [number, number, number] = ground.tint;
+  void r;
   void turned;
   const shown: boolean = ground.visible;
   void shown;

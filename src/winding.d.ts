@@ -644,6 +644,10 @@ export class Node {
   /** Whether setVisible left this node shown. An ancestor may still hide it. */
   readonly visible: boolean;
   readonly name: string;
+  setTint(color: ArrayLike<number>): this;
+  setGlow(color: ArrayLike<number>): this;
+  readonly tint: [number, number, number];
+  readonly glow: [number, number, number];
   worldPosition<T extends Vec3>(out: T): T;
   children(): Node[];
   find(name: string | RegExp): Node | null;

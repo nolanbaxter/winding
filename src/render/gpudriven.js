@@ -962,6 +962,11 @@ export class GpuDriven {
     for (const i of scene.visibilityChanged) {
       if (i < count && this._touchedMark[i] === 0) { this._touchedMark[i] = 1; this._touched.push(i); }
     }
+    // Tinted or glowing differently: their draw data carries it, so written again.
+    for (const i of scene.tintChanged) {
+      if (i < count && this._touchedMark[i] === 0) { this._touchedMark[i] = 1; this._touched.push(i); }
+    }
+    scene.tintChanged.length = 0;
     /** Whether anything was shown or hidden this frame: the merged shadow lists are written again. */
     this.shownOrHidden = scene.visibilityChanged.length > 0;
     scene.visibilityChanged.length = 0;
@@ -986,6 +991,11 @@ export class GpuDriven {
       // the unskinned vertex shader never reads anyway.
       const skin = scene.renderableSkin[i];
       this.drawDataU32[drawFloat + 28] = skin >= 0 ? paletteOffsets[skin] : 0;
+      // The tint and glow, as three words in the normal matrix's padding: see DrawData in pbr.js.
+      const tint = i * 3;
+      this.drawDataU32[drawFloat + 19] = scene.renderableTint[tint];
+      this.drawDataU32[drawFloat + 23] = scene.renderableTint[tint + 1];
+      this.drawDataU32[drawFloat + 27] = scene.renderableTint[tint + 2];
 
       // The three morph words. All static per renderable -- where a
       // primitive's deltas live, where an instance's weights live, and how

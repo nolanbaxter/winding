@@ -114,6 +114,33 @@ export class Node {
     return this;
   }
 
+  /**
+   * Multiply the base colour of every mesh under this node by `color`, linear
+   * RGB: a faction's colour, a class's, a hit's flash of red. Tints multiply
+   * down the hierarchy, and [1, 1, 1] is none. Stays in its batch: the draw
+   * calls are the same.
+   */
+  setTint(color) {
+    this.scene._setTint(this, color, 0, 'setTint');
+    return this;
+  }
+
+  /** Add light to every mesh under this node, linear RGB, as its own emission does: a hit's flash. Glows add down the hierarchy. */
+  setGlow(color) {
+    this.scene._setTint(this, color, 3, 'setGlow');
+    return this;
+  }
+
+  /** The tint setTint gave this node, [1, 1, 1] for none: its own, not its ancestors'. */
+  get tint() {
+    return this.scene._tintOf(this, 0);
+  }
+
+  /** The glow setGlow gave this node, [0, 0, 0] for none. */
+  get glow() {
+    return this.scene._tintOf(this, 3);
+  }
+
   /** Whether setVisible left this node shown. Its ancestors may still hide it. */
   get visible() {
     return this.alive && this.scene._hiddenSelf[handleIndex(this.entity)] !== 1;
