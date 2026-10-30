@@ -57,7 +57,7 @@ import { ClusteredLights, CLUSTER_Z } from './clustered.js';
 import { PostStack, HDR_FORMAT } from './post.js';
 import { Upscaler, MIN_RESOLUTION } from './upscale.js';
 import { SplatPass, SPLAT_CULL } from './splats.js';
-import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW } from './gpudriven.js';
+import { GpuDriven, BATCH_BYTES, INDIRECT_BYTES, CULL_SHADOW, CULL_CASCADE } from './gpudriven.js';
 import {
   updateWorldBounds, unionWorldBounds, saveBoxes, moveUnion, farthestViewDepth, farthestDistance,
   updateSkinBounds, applySkinBounds, BoxList,
@@ -1287,6 +1287,8 @@ export class Renderer {
     this.shadows.update(camera, scene, changes,
       this._hasSceneBounds ? this._sceneMin : null, this._hasSceneBounds ? this._sceneMax : null);
     this.shadows.updateLocal(scene, camera, changes);
+    // The cascades drawn whole this frame, their matrices and counts for the cull.
+    this.gpu.setCascades(this.shadows.cascadesToCull(), this.shadows.matrices);
     this._shadowCacheScene = scene;
     this._shadowCacheRevision = target !== null ? -1 : scene.revision;
     this.stats.shadowViews = this.shadows.localCount;
@@ -1428,6 +1430,15 @@ export class Renderer {
         visibleResource: visibleShadow,
       });
       shadowReads.push(indirectShadow, visibleShadow);
+    }
+    // Each cascade drawn whole, culled caster by caster first (gpudriven.js).
+    for (const layer of this.shadows.cascadesToCull()) {
+      const indirect = graph.importBuffer(`indirect:cascade${layer}`, this.gpu.indirectBuffer);
+      const visible = graph.importBuffer(`visible:cascade${layer}`, this.gpu.visibleBuffer);
+      this.gpu.addCullPass(graph, {
+        phase: CULL_CASCADE + layer, boundsResource: drawDataBuffer, indirectResource: indirect, visibleResource: visible,
+      });
+      shadowReads.push(indirect, visible);
     }
     this.shadows.addPasses(
       graph, shadowMap, this.gpu, this.drawBindGroup, this.skinPalette, this.morph, localShadowMap, shadowReads,

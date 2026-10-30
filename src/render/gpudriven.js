@@ -109,11 +109,22 @@ export function writeChanged(queue, buffer, next, held, count, stride = 1, all =
 /**
  * Cull phases, each writing its own slice of the indirect arguments and the
  * visible list: early (last frame's visible set), late (against this frame's
- * depth), and shadow (every caster at the level of detail the camera chose,
- * which runs only when the scene has LOD groups).
+ * depth), shadow (every caster at the level of detail the camera chose, which
+ * runs only when the scene has LOD groups), and one a cascade (the casters
+ * that reach that cascade, run when it is drawn whole).
  */
-export const CULL_PHASES = 3;
 export const CULL_SHADOW = 2;
+export const CULL_CASCADE = 3;
+/**
+ * Cascades culled caster by caster: one directional light's worth, which is
+ * the most a light has (shadows.js MAX_CASCADES is this). A second light that
+ * casts keeps culling its cascades a batch at a time.
+ */
+export const CASCADE_PHASES = 4;
+export const CULL_PHASES = CULL_CASCADE + CASCADE_PHASES;
+
+/** A phase's name, for passes and labels. */
+export const phaseName = (phase) => ['early', 'late', 'shadow'][phase] ?? `cascade${phase - CULL_CASCADE}`;
 
 /** Words a merged object takes in its group's table (merged.js): the object, its first vertex. */
 export const TABLE_WORDS = 2;
@@ -146,6 +157,9 @@ struct CullParams {
   // The projection's y scale: 1 / tan(fovY / 2), or 1 / half-height for an
   // orthographic camera. With clip w it gives a sphere's size on screen.
   projectionScale : f32,
+  // A cascade phase's cascade: its orthographic view-projection, light space
+  // to the unit box the shadow map covers.
+  cascade       : mat4x4<f32>,
 };
 
 /**
@@ -261,6 +275,27 @@ fn lodSelected(item : u32) -> bool {
   return coverage >= bounds[item].minPoint.w && coverage < bounds[item].maxPoint.w;
 }
 
+/**
+ * Does this box reach the cascade? Its eight corners through the cascade's
+ * matrix, and their extent against the box the map covers: x and y in -1..1,
+ * depth in 0..1. The same test the CPU makes of a batch's box (boxInOrtho).
+ */
+fn inCascade(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
+  var lo = vec3<f32>(1e30);
+  var hi = vec3<f32>(-1e30);
+  for (var c = 0u; c < 8u; c = c + 1u) {
+    let corner = vec3<f32>(
+      select(boxMin.x, boxMax.x, (c & 1u) != 0u),
+      select(boxMin.y, boxMax.y, (c & 2u) != 0u),
+      select(boxMin.z, boxMax.z, (c & 4u) != 0u),
+    );
+    let p = (params.cascade * vec4<f32>(corner, 1.0)).xyz;
+    lo = min(lo, p);
+    hi = max(hi, p);
+  }
+  return hi.x >= -1.0 && lo.x <= 1.0 && hi.y >= -1.0 && lo.y <= 1.0 && hi.z >= 0.0 && lo.z <= 1.0;
+}
+
 /** The same positive-vertex test the CPU path uses, over the same five planes. */
 fn inFrustum(boxMin : vec3<f32>, boxMax : vec3<f32>) -> bool {
   for (var p = 0u; p < ${FRUSTUM_PLANE_COUNT}u; p = p + 1u) {
@@ -304,6 +339,14 @@ fn cull(@builtin(global_invocation_id) id : vec3<u32>) {
     // casts onto what is -- but only at the level of detail the camera chose,
     // or a group would cast every one of its levels at once.
     if (batched && lodSelected(item)) { emit(batch, item); }
+    return;
+  }
+
+  if (params.phase >= ${CULL_CASCADE}u) {
+    // A CASCADE: the casters that reach it, at the level the camera chose. A
+    // horde spread across a map reaches every cascade as a batch, and only a
+    // corner of each as casters.
+    if (batched && lodSelected(item) && inCascade(boxMin, boxMax)) { emit(batch, item); }
     return;
   }
 
@@ -445,8 +488,8 @@ export class GpuDriven {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // planes(5 * 16) + viewProj(64) + 4 u32 + (phase, indirectBase, visibleBase, projectionScale)
-    this.cullParams = new ArrayBuffer(FRUSTUM_PLANE_COUNT * 16 + 64 + 16 + 16);
+    // planes(5 * 16) + viewProj(64) + 4 u32 + (phase, indirectBase, visibleBase, projectionScale) + cascade(64)
+    this.cullParams = new ArrayBuffer(FRUSTUM_PLANE_COUNT * 16 + 64 + 16 + 16 + 64);
     this.cullParamsF32 = new Float32Array(this.cullParams);
     this.cullParamsU32 = new Uint32Array(this.cullParams);
     // One buffer, one slot per phase, so a single dispatch pair needs no
@@ -475,7 +518,7 @@ export class GpuDriven {
     /** Slots [0, opaqueCount) of the visible list belong to the cull shader. */
     this.opaqueCount = 0;
 
-    this._cullExecute = [0, 1, 2].map((phase) => (pass) => this._dispatch(pass, phase));
+    this._cullExecute = Array.from({ length: CULL_PHASES }, (_, phase) => (pass) => this._dispatch(pass, phase));
     /** Whether any renderable is in an LOD group, which is when the shadow phase runs. */
     this.hasLod = false;
     this._needsFullUpload = true;
@@ -525,7 +568,7 @@ export class GpuDriven {
     });
 
     this._makeBindGroup = (hzbView, phase) => device.createBindGroup({
-      label: `gpu-cull:${['early', 'late', 'shadow'][phase]}`,
+      label: `gpu-cull:${phaseName(phase)}`,
       layout: this.layout,
       entries: [
         {
@@ -687,7 +730,7 @@ export class GpuDriven {
   }
 
   _rebuildBindGroups() {
-    this.bindGroups = [0, 1, 2].map((phase) => this._makeBindGroup(this._hzbView, phase));
+    this.bindGroups = Array.from({ length: CULL_PHASES }, (_, phase) => this._makeBindGroup(this._hzbView, phase));
   }
 
   /**
@@ -1010,9 +1053,10 @@ export class GpuDriven {
         this.boundsBuffer, low * BOUNDS_FLOATS * 4, this.boundsData, low * BOUNDS_FLOATS, span * BOUNDS_FLOATS,
       );
     }
-    // Both halves: phase 1 writes at capacity, so a partial write would leave
-    // its counts at whatever the previous frame accumulated.
-    queue.writeBuffer(this.indirectBuffer, 0, this.indirectData);
+    // Every phase that may run this frame: phase 1 writes at capacity, so a
+    // partial write would leave its counts at whatever the previous frame
+    // accumulated. A cascade's counts are reset when it is culled (setCascades).
+    queue.writeBuffer(this.indirectBuffer, 0, this.indirectData, 0, CULL_CASCADE * this.batchCapacity * (INDIRECT_BYTES / 4));
     this.merged?.reset();
 
     // One params slot per phase. Only the last four words differ, but writing
@@ -1028,6 +1072,25 @@ export class GpuDriven {
   }
 
   /**
+   * The cascades culled caster by caster this frame: `layers` (each below
+   * CASCADE_PHASES), with their matrices at `matrices[layer * 16]`. Their
+   * counts are reset and their matrices written after update()'s writes, in
+   * queue order, before the dispatches that read them.
+   */
+  setCascades(layers, matrices) {
+    const queue = this.rhi.queue;
+    const words = INDIRECT_BYTES / 4;
+    // Where the cascade matrix sits in a params slot: after everything else.
+    const at = this.cullParams.byteLength - 64;
+    for (const layer of layers) {
+      const phase = CULL_CASCADE + layer;
+      queue.writeBuffer(this.indirectBuffer, phase * this.batchCapacity * INDIRECT_BYTES,
+        this.indirectData, phase * this.batchCapacity * words, Math.max(this.batchCount, 1) * words);
+      queue.writeBuffer(this.cullParamsBuffer, phase * this.cullParamsStride + at, matrices, layer * 16, 16);
+    }
+  }
+
+  /**
    * One cull dispatch.
    *
    * The late phase declares a read of the pyramid, which is what orders it
@@ -1037,7 +1100,7 @@ export class GpuDriven {
    */
   addCullPass(graph, { phase, boundsResource, indirectResource, visibleResource, hzbResources = [] }) {
     graph.addPass({
-      name: `cull:${['early', 'late', 'shadow'][phase]}`,
+      name: `cull:${phaseName(phase)}`,
       type: 'compute',
       reads: [boundsResource, ...hzbResources],
       writes: [indirectResource, visibleResource],

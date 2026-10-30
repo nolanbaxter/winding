@@ -4008,6 +4008,56 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
     return `${unprepared} pipelines started by the first frames without prepare, none with it, and AO from the first frame`;
   });
 
+  await step('a cascade culled caster by caster casts the shadows a batch at a time casts', async () => {
+    // Sixty-four plates of one mesh, one batch, spread wider than the near
+    // cascades reach: those draw only the plates the GPU kept for them. The
+    // frame must be the frame drawn without culling, pixel for pixel -- the
+    // same scene twice, since a scene's first frame draws every cascade.
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '160px';
+    canvas.style.height = '120px';
+    document.body.appendChild(canvas);
+    const probe = await Winding.create(canvas, { antialias: false, post: { strength: 0 } });
+    probe.gpu.device.pushErrorScope('validation');
+    try {
+      probe.gpu.resize(160, 120);
+      const ground = await probe.load(buildFeatureGLB({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0 }));
+      const plate = await probe.load(buildFeatureGLB({ baseColorFactor: [0.3, 0.3, 0.3, 1], doubleSided: true }));
+      const build = () => {
+        const scene = probe.createScene();
+        scene.add(ground).setAxisAngle([1, 0, 0], -Math.PI / 2).setScale(40, 40, 1);
+        for (let i = 0; i < 64; i++) scene.add(plate).setPosition((i % 8) * 8 - 28, 1.6, Math.floor(i / 8) * 8 - 28);
+        scene.addLight({ type: 'directional', direction: [-0.5, -0.7, -0.3], intensity: 3 });
+        return scene;
+      };
+      const cam = new Camera({ fovY: 1, near: 0.1 });
+      cam.position.set([-26, 3, 26]);
+      cam.target.set([0, 0, 0]);
+      const draw = async (culling) => {
+        probe.renderer.shadows._cullCasters = culling;
+        const scene = build();
+        await probe.prepare(scene, cam);
+        probe.renderFrame(scene, cam);
+        const culled = probe.renderer.shadows._toCull.length;
+        return { pixels: await probe.gpu.readPixels(), culled };
+      };
+      const on = await draw(true);
+      const off = await draw(false);
+      const error = await probe.gpu.device.popErrorScope();
+      if (error) throw error;
+      if (on.culled === 0) throw new Error('no cascade was culled caster by caster: the check proves nothing');
+      let differ = 0;
+      for (let i = 0; i < on.pixels.length; i += 4) {
+        if (on.pixels[i] !== off.pixels[i] || on.pixels[i + 1] !== off.pixels[i + 1] || on.pixels[i + 2] !== off.pixels[i + 2]) differ++;
+      }
+      if (differ > 0) throw new Error(`${differ} pixels differ between culled cascades and cascades culled a batch at a time`);
+      return `${on.culled} cascades culled caster by caster; the frame is the one drawn without, ${on.pixels.length / 4} pixels`;
+    } finally {
+      probe.destroy();
+      canvas.remove();
+    }
+  });
+
   await step('after the GPU device is lost, the engine recovers and draws the same frame', async () => {
     // Everything a load hands out is rebuilt in place on the new device: a
     // textured model and a skinned one, a sprite's texture, a font, a LUT,

@@ -42,15 +42,16 @@ import { vec3Create, vec3Normalize } from '../core/math/vec3.js';
 import { compileShader } from '../rhi/shader.js';
 import { createPipelineLayout, GROUP_FRAME, GROUP_MATERIAL, GROUP_DRAW } from '../rhi/bindgroups.js';
 import { ALPHA_MASK, MATERIAL_WGSL, VARIANT_DOUBLE_SIDED } from './material.js';
-import { CULL_SHADOW, NOT_BATCHED } from './gpudriven.js';
-import { boxInOrtho, CHUNK_TRIANGLES } from '../scene/bounds.js';
+import { CULL_SHADOW, CULL_CASCADE, CASCADE_PHASES, NOT_BATCHED } from './gpudriven.js';
+import { boxInOrtho, boxWithinOrtho, CHUNK_TRIANGLES } from '../scene/bounds.js';
 import { aabbTransform } from '../core/math/aabb.js';
 import { DEPTH_FORMAT, DEPTH_CLEAR_VALUE, DEPTH_COMPARE } from '../rhi/device.js';
 import { VERTEX_BUFFER_LAYOUT, POSITION_BUFFER_LAYOUT, SKIN_BUFFER_LAYOUT } from './vertex.js';
 import { createBuffer } from '../rhi/buffer.js';
 import { createTexture } from '../rhi/texture.js';
 
-export const MAX_CASCADES = 4;
+/** A light's cascades at most: as many as the GPU cull has phases for, so each is culled caster by caster. */
+export const MAX_CASCADES = CASCADE_PHASES;
 
 /** One local shadow view as the forward shader reads it: a mat4 and a vec4. */
 export const LOCAL_VIEW_FLOATS = 20;
@@ -655,14 +656,16 @@ export class ShadowMaps {
     });
 
     this.alignment = rhi.limits.minUniformBufferOffsetAlignment;
-    // `order` is the static batch order, or with LOD the shadow cull's slice.
-    this._makeCascadeBindGroup = (gpu, palette, morph, buffer = this.cascadeBuffer) => rhi.device.createBindGroup({
+    // `order` is the static batch order, or with LOD the shadow cull's slice;
+    // a cascade's culled draws read theirs from the visible list as well.
+    this._makeCascadeBindGroup = (gpu, palette, morph, buffer = this.cascadeBuffer,
+      order = gpu.hasLod ? gpu.visibleBuffer : gpu.batchOrderBuffer) => rhi.device.createBindGroup({
       label: 'shadow-cascade',
       layout: this.cascadeLayout,
       entries: [
         { binding: 0, resource: { buffer, size: 64 } },
         { binding: 1, resource: { buffer: gpu.drawDataBuffer } },
-        { binding: 2, resource: { buffer: gpu.hasLod ? gpu.visibleBuffer : gpu.batchOrderBuffer } },
+        { binding: 2, resource: { buffer: order } },
         { binding: 3, resource: { buffer: palette.buffer } },
         { binding: 4, resource: { buffer: morph.deltaBuffer } },
         { binding: 5, resource: { buffer: morph.weightBuffer } },
@@ -1305,7 +1308,9 @@ export class ShadowMaps {
   /** Cascade `layer`, as this frame needs it: whole, or its scrolled pieces. */
   _encodeCascade(pass, layer) {
     if (this.cascadeRedraw[layer] !== SCROLL) {
-      this._encodeView(pass, this.cascadeBindGroup, layer * this.alignment, this.matrices, layer * 16);
+      // Only a layer the GPU culled this frame (cascadesToCull): its lists are this frame's.
+      const phase = this._toCull?.includes(layer) ? CULL_CASCADE + layer : null;
+      this._encodeView(pass, this.cascadeBindGroup, layer * this.alignment, this.matrices, layer * 16, true, phase);
       return;
     }
     const piece = this._pieces[layer];
@@ -1410,6 +1415,21 @@ export class ShadowMaps {
    * the matrix does not depend on which cascade is drawing, and writing it per
    * cascade would quadruple the ring for nothing.
    */
+  /**
+   * The cascade layers drawn whole this frame that the GPU culls caster by
+   * caster: the first light's, which have a cull phase each. Scrolled ones
+   * draw strips, culled mesh by mesh on the CPU.
+   */
+  cascadesToCull() {
+    const layers = (this._toCull ??= []);
+    layers.length = 0;
+    // _cullCasters: off for an A/B against culling a batch at a time, and nothing else.
+    if (this._cullCasters === false) return layers;
+    const count = Math.min(this.shadowedCount * this.cascadeCount, CASCADE_PHASES);
+    for (let layer = 0; layer < count; layer++) if (this.cascadeRedraw[layer] === FULL) layers.push(layer);
+    return layers;
+  }
+
   /** Whether this frame draws any shadow map, as update() and updateLocal() decided. */
   drawsAny() {
     for (let layer = 0; layer < this.shadowedCount * this.cascadeCount; layer++) if (this.cascadeRedraw[layer] !== KEEP) return true;
@@ -1435,6 +1455,9 @@ export class ShadowMaps {
       this._hasLod = gpu.hasLod;
       this._geometryRevision = this.geometry.revision;
       this.cascadeBindGroup = this._makeCascadeBindGroup(gpu, palette, morph);
+      // The same, reading a batch's casters from the visible list: what a cascade's culled draws bind.
+      this.cascadeCulledBindGroup = gpu.hasLod ? this.cascadeBindGroup
+        : this._makeCascadeBindGroup(gpu, palette, morph, this.cascadeBuffer, gpu.visibleBuffer);
       this.localBindGroup = undefined;
       this._gpuRevision = gpu.buffersRevision;
       this._paletteRevision = palette.revision;
@@ -1530,8 +1553,23 @@ export class ShadowMaps {
    * transform and clip, all of it, cascade after cascade. Point and spot
    * views are perspective, which that test is not.
    */
-  _encodeView(pass, bindGroup, offset, cull = null, at = 0, useMerged = true) {
+  _encodeView(pass, bindGroup, offset, cull = null, at = 0, useMerged = true, phase = null) {
     const gpu = this._gpu;
+    // With a cascade's cull phase, a batch that reaches past the cascade draws
+    // the casters the GPU kept; one wholly inside it draws them all, directly,
+    // since culling would keep every one and an indirect draw costs more.
+    const culled = (b) => phase !== null && gpu.batchSize[b] > 1 && !boxWithinOrtho(this._batchBoxes, b * 6, cull, at) ? phase : null;
+    // Which list the frame group points the shader at: the static order, or the
+    // visible list a culled draw needs. Switched only when a draw needs the other.
+    const lists = phase !== null && bindGroup === this.cascadeBindGroup && this.cascadeCulledBindGroup !== bindGroup
+      ? [bindGroup, this.cascadeCulledBindGroup] : null;
+    let listBound = 0;
+    this._useList = (culledList) => {
+      const want = culledList ? 1 : 0;
+      if (lists === null || want === listBound) return;
+      pass.setBindGroup(GROUP_FRAME, lists[want], [offset]);
+      listBound = want;
+    };
     // Every depth-only caster's positions, bound once for the view; the alpha
     // casters below bind the full vertices they need for their UVs.
     this.geometry.bindPositions(pass);
@@ -1542,13 +1580,10 @@ export class ShadowMaps {
     // switches once per run rather than per draw.
     let boundVariant = -1;
 
-    // Instanced, one call per batch. The shadow pass culls nothing, so the
-    // instance count is simply the batch size and the shader walks the static
-    // batch-ordered list rather than the compacted one.
-    //
-    // ponytail: culled a batch at a time, by the box around all its casters.
-    // A batch of many instances spread wide still draws all of them into a
-    // cascade that one reaches; per-instance needs the cull compute per cascade.
+    // Instanced, one call per batch: culled a batch at a time by the box around
+    // its casters, and for a cascade drawn whole, caster by caster on the GPU
+    // (`culled`). Otherwise the instance count is the batch size, and the
+    // shader walks the static batch-ordered list.
     // Depth-only casters first. The alpha ones bind a material in group 2,
     // where these pipelines expect the empty group, so they come after.
     const materials = gpu.materials;
@@ -1580,15 +1615,16 @@ export class ShadowMaps {
         && primitive.morphCountStride === 0 && !gpu.hasLod) {
         this._drawChunks(pass, gpu, b, primitive, cull, at);
       } else {
-        this._drawBatch(pass, gpu, b, primitive);
+        this._drawBatch(pass, gpu, b, primitive, culled(b));
       }
     }
     if (grouped) this._encodeMergedCasters(pass, materials, cull, at, false);
     if (alpha) {
       this.geometry.bind(pass);
-      this._encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch);
+      this._encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch, culled);
     }
     if (alpha && grouped) this._encodeMergedCasters(pass, materials, cull, at, true);
+    this._useList = null;
   }
 
   /**
@@ -1636,6 +1672,7 @@ export class ShadowMaps {
     const box = (this._chunkBox ??= new Float32Array(6));
     const min = (this._chunkMin ??= new Float32Array(3));
     const max = (this._chunkMax ??= new Float32Array(3));
+    this._useList?.(false);
     pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
     const triangles = primitive.indexCount / 3;
     let run = -1;
@@ -1658,13 +1695,16 @@ export class ShadowMaps {
   }
 
   /**
-   * One batch's casters: all of them, or with LOD the ones the shadow cull
-   * kept -- the level the camera shows, on screen or off.
+   * One batch's casters: all of them; with `phase`, the ones a cascade's cull
+   * kept; or with LOD the ones the shadow cull kept -- the level the camera
+   * shows, on screen or off. A cascade's cull keeps to that level too.
    */
-  _drawBatch(pass, gpu, b, primitive) {
-    if (gpu.hasLod) {
-      pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b, CULL_SHADOW)]);
-      pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, CULL_SHADOW));
+  _drawBatch(pass, gpu, b, primitive, phase = null) {
+    const from = phase ?? (gpu.hasLod ? CULL_SHADOW : null);
+    this._useList?.(phase !== null);
+    if (from !== null) {
+      pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b, from)]);
+      pass.drawIndexedIndirect(gpu.indirectBuffer, gpu.indirectOffset(b, from));
     } else {
       pass.setBindGroup(GROUP_DRAW, this._batchBindGroup, [gpu.batchOffset(b)]);
       pass.drawIndexed(primitive.indexCount, gpu.batchSize[b], primitive.firstIndex, primitive.baseVertex);
@@ -1672,7 +1712,7 @@ export class ShadowMaps {
   }
 
   /** MASK batches, then blended items, each shaped by its material's alpha. */
-  _encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch = null) {
+  _encodeAlphaCasters(pass, gpu, materials, casts, mergedBatch = null, culled = () => null) {
     let bound = null;
     let boundMaterial = -1;
     const draw = (hashed, skinned, material, primitive) => {
@@ -1690,7 +1730,7 @@ export class ShadowMaps {
       if (materials.alphaModes[material] !== ALPHA_MASK || !casts(b) || mergedBatch?.[b] === 1) continue;
       const primitive = gpu.batchPrimitive[b];
       draw(false, gpu.batchSkinned[b] === 1, material, primitive);
-      this._drawBatch(pass, gpu, b, primitive);
+      this._drawBatch(pass, gpu, b, primitive, culled(b));
     }
 
     // Blended casters sit after the batches in the static order, and are drawn
@@ -1698,6 +1738,7 @@ export class ShadowMaps {
     // transparent pass uses. Neighbours that bind alike share one call.
     const casters = gpu.blendedCasters;
     if (casters.length === 0) return;
+    this._useList?.(false);
     pass.setBindGroup(GROUP_DRAW, this._batchBindGroup,
       [gpu.hasLod ? gpu.shadowTransparentBatchOffset() : gpu.transparentBatchOffset()]);
     const selected = gpu.casterSelected;

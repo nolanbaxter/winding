@@ -56,6 +56,23 @@ export function boxInOrtho(data, k, m, o) {
   return x1 >= -1 && x0 <= 1 && y1 >= -1 && y0 <= 1 && z1 >= 0 && z0 <= 1;
 }
 
+/**
+ * Is the box wholly inside the orthographic view at m[o]? boxInOrtho's
+ * extent, against the same unit box, from within: every caster of a batch
+ * whose box passes this is in the view, so culling them one by one keeps all.
+ */
+export function boxWithinOrtho(data, k, m, o) {
+  const d = data;
+  for (let corner = 0; corner < 8; corner++) {
+    const x = d[k + (corner & 1 ? 3 : 0)], y = d[k + 1 + (corner & 2 ? 3 : 0)], z = d[k + 2 + (corner & 4 ? 3 : 0)];
+    const cx = m[o] * x + m[o + 4] * y + m[o + 8] * z + m[o + 12];
+    const cy = m[o + 1] * x + m[o + 5] * y + m[o + 9] * z + m[o + 13];
+    const cz = m[o + 2] * x + m[o + 6] * y + m[o + 10] * z + m[o + 14];
+    if (!(cx >= -1 && cx <= 1 && cy >= -1 && cy <= 1 && cz >= 0 && cz <= 1)) return false;
+  }
+  return true;
+}
+
 export class BoxList {
   constructor() {
     this.data = new Float32Array(6 * 64);
